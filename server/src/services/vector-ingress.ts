@@ -55,6 +55,7 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   body: string;
   attachmentIds?: string[];
   launchContext?: VectorWorkloadLaunchContext;
+  roleContext?: VectorRoleTurnContext;
 }
 
 export interface VectorWorkloadLaunchContext {
@@ -68,6 +69,15 @@ export interface VectorWorkloadLaunchContext {
   model: string;
   tools: string[];
   noBuiltinTools: boolean;
+  systemPrompt: string;
+  metadata: Record<string, string>;
+}
+
+export interface VectorRoleTurnContext {
+  schemaVersion: 1;
+  role: string;
+  model: string;
+  noBuiltinTools: true;
   systemPrompt: string;
   metadata: Record<string, string>;
 }
@@ -379,6 +389,32 @@ export function vectorIngressService(
     ) {
       throw conflict("Vector workload launch differs from the provisioned contract", {
         code: "vector_workload_contract_mismatch",
+      });
+    }
+  }
+
+  async function assertRoleTurn(input: VectorIngressTurnInput) {
+    if (!input.roleContext) return;
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector role turn requires complete owner scope", {
+        code: "vector_role_owner_scope_required",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const adapterConfig = eventPayloadRecord(agent.adapterConfig);
+    const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
+    if (
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId ||
+      input.profileId !== "staging" ||
+      agent.role !== input.roleContext.role ||
+      (input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
+    ) {
+      throw conflict("Vector role turn differs from the provisioned agent contract", {
+        code: "vector_role_contract_mismatch",
       });
     }
   }
@@ -873,6 +909,7 @@ export function vectorIngressService(
 
   async function addTurn(input: VectorIngressTurnInput) {
     await assertWorkloadLaunch(input);
+    await assertRoleTurn(input);
     const { issue, ownerId } = await resolveConversation(input);
     const mapping = hasCompleteOwnerScope(input)
       ? await bindConversationOwner(input, issue.id)
@@ -880,6 +917,8 @@ export function vectorIngressService(
     const requestedAttachmentIds = [...new Set(input.attachmentIds ?? [])];
     const effectiveBody = input.launchContext
       ? `[VECTOR_WORKLOAD_LAUNCH_V1]\n${JSON.stringify(input.launchContext)}\n\n${input.body}`
+      : input.roleContext
+        ? `[VECTOR_ROLE_TURN_V1]\n${JSON.stringify(input.roleContext)}\n\n${input.body}`
       : input.body;
     let replayed = false;
 
@@ -995,7 +1034,11 @@ export function vectorIngressService(
         deliveredRunId = run.id;
       }
       return run;
-    }, input.launchContext ? { vectorWorkloadLaunch: input.launchContext } : {});
+    }, input.launchContext
+      ? { vectorWorkloadLaunch: input.launchContext }
+      : input.roleContext
+        ? { vectorRoleTurn: input.roleContext }
+        : {});
 
     const receipt = await db
       .select({
