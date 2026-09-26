@@ -87,14 +87,16 @@ async function fixture() {
   return { manifest, toolPolicy, stagedReleaseRoot, activeReleaseRoot };
 }
 
-function memoryPort(): VectorProvisioningPort & { companies: any[]; ownerships: any[]; agents: any[] } {
+function memoryPort(): VectorProvisioningPort & { companies: any[]; ownerships: any[]; agents: any[]; terminated: string[] } {
   const companies: any[] = [];
   const ownerships: any[] = [];
   const agents: any[] = [];
+  const terminated: string[] = [];
   return {
     companies,
     ownerships,
     agents,
+    terminated,
     listCompanies: async () => companies,
     getCompany: async (id) => companies.find((row) => row.id === id) ?? null,
     createCompany: async (input) => { companies.push({ ...input }); return companies.at(-1); },
@@ -110,49 +112,61 @@ function memoryPort(): VectorProvisioningPort & { companies: any[]; ownerships: 
       agents[index] = { ...agents[index], ...structuredClone(patch) };
       return agents[index];
     },
+    terminateAgent: async (id) => {
+      const index = agents.findIndex((row) => row.id === id);
+      if (index < 0) return null;
+      terminated.push(id);
+      agents[index] = { ...agents[index], status: "terminated" };
+      return agents[index];
+    },
   };
 }
 
 describe("Vector installation provisioning", () => {
-  it("accepts sealed Standard speak authority but rejects engineering or changed capabilities", async () => {
+  it("accepts exactly the speak-only Standard Chat roster and rejects any second agent or wider tools", async () => {
     const f = await fixture();
-    const workerBody = "# Implementation Worker\n\nWork only from the authenticated todo brief.\n";
+    const workerBody = "# Implementation Worker\n";
     const workerPath = "paperclip/profile-assets/standard/implementation-worker/AGENTS.md";
     await fs.mkdir(path.dirname(path.join(f.stagedReleaseRoot, workerPath)), { recursive: true });
     await fs.writeFile(path.join(f.stagedReleaseRoot, workerPath), workerBody);
-    const worker = {
+    const retiredWorker = {
       ...f.manifest.agent,
       id: "6e0d30cf-6f32-5f8c-bb1d-3117ce4b27d5",
       name: "Implementation Worker",
       role: "implementation-worker",
       title: "Restricted todo worker",
-      capabilities: "Executes authenticated todo briefs without filesystem or shell access.",
       instructions: { path: workerPath, sha256: createHash("sha256").update(workerBody).digest("hex") },
     };
+    const speakOnly = f.toolPolicy.extensions[2];
     const standard = {
       ...f.manifest, profile: "standard",
       agent: { ...f.manifest.agent, name: "Standard Chat", role: "standard-chat" },
-      additionalAgents: [worker],
-      toolPolicy: {
-        profile: "standard",
-        builtinTools: [],
-        extensions: [{
-          ...f.toolPolicy.extensions[1],
-          tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
-        }, f.toolPolicy.extensions[2]],
-      },
+      additionalAgents: [],
+      toolPolicy: { profile: "standard", builtinTools: [], extensions: [speakOnly] },
     };
     expect(vectorInstallationManifestSchema.safeParse(standard).success).toBe(true);
-    expect(vectorInstallationManifestSchema.safeParse({ ...standard, additionalAgents: [] }).success).toBe(false);
+    // The retired implementation-worker (or any second agent) is never admitted.
+    expect(vectorInstallationManifestSchema.safeParse({ ...standard, additionalAgents: [retiredWorker] }).success).toBe(false);
     expect(vectorInstallationManifestSchema.safeParse({
       ...standard,
-      additionalAgents: [{ ...worker, role: "engineer" }],
+      additionalAgents: [{ ...retiredWorker, role: "standard-chat", name: "Second Chat" }],
     }).success).toBe(false);
-    for (const extensions of [[], [f.toolPolicy.extensions[0]], [f.toolPolicy.extensions[1]],
-      [{ ...f.toolPolicy.extensions[2], permissions: { filesystem: true, shell: false } }],
-      [{ ...f.toolPolicy.extensions[2], tools: ["speak", "bash"] }]]) {
+    expect(vectorInstallationManifestSchema.safeParse({
+      ...standard,
+      agent: { ...standard.agent, role: "implementation-worker" },
+    }).success).toBe(false);
+    const chatBridge = {
+      ...f.toolPolicy.extensions[1],
+      tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
+    };
+    for (const extensions of [[], [f.toolPolicy.extensions[0]], [f.toolPolicy.extensions[1]], [chatBridge],
+      [chatBridge, speakOnly], [speakOnly, chatBridge],
+      [{ ...speakOnly, permissions: { filesystem: true, shell: false } }],
+      [{ ...speakOnly, tools: ["speak", "ask_user"] }],
+      [{ ...speakOnly, tools: ["speak", "bash"] }]]) {
       expect(vectorInstallationManifestSchema.safeParse({ ...standard, toolPolicy: { ...standard.toolPolicy, extensions } }).success).toBe(false);
     }
+    expect(vectorInstallationManifestSchema.safeParse({ ...standard, toolPolicy: { ...standard.toolPolicy, builtinTools: ["read"] } }).success).toBe(false);
     expect(vectorInstallationManifestSchema.safeParse({ ...f.manifest, toolPolicy: { ...f.toolPolicy, extensions: [f.toolPolicy.extensions[0]] } }).success).toBe(false);
     expect(vectorInstallationManifestSchema.safeParse({ ...standard, toolPolicy: { ...standard.toolPolicy, profile: "engineering" } }).success).toBe(false);
   });
@@ -645,7 +659,6 @@ describe("Vector installation provisioning", () => {
   describe("manifest revision upgrades", () => {
     const workerId = "6e0d30cf-6f32-5f8c-bb1d-3117ce4b27d5";
     const chatPath = "paperclip/profile-assets/standard/standard-chat/AGENTS.md";
-    const workerPath = "paperclip/profile-assets/standard/implementation-worker/AGENTS.md";
 
     async function standardRevision(f: Awaited<ReturnType<typeof fixture>>, revision: number, chatBody: string) {
       const stage = async (relative: string, body: string) => {
@@ -653,14 +666,7 @@ describe("Vector installation provisioning", () => {
         await fs.writeFile(path.join(f.stagedReleaseRoot, relative), body);
         return { path: relative, sha256: createHash("sha256").update(body).digest("hex") };
       };
-      const toolPolicy = {
-        profile: "standard",
-        builtinTools: [],
-        extensions: [{
-          ...f.toolPolicy.extensions[1],
-          tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
-        }, f.toolPolicy.extensions[2]],
-      };
+      const toolPolicy = { profile: "standard", builtinTools: [], extensions: [f.toolPolicy.extensions[2]] };
       const manifest = {
         ...f.manifest,
         manifestRevision: revision,
@@ -672,60 +678,97 @@ describe("Vector installation provisioning", () => {
           role: "standard-chat",
           instructions: await stage(chatPath, chatBody),
         },
-        additionalAgents: [{
-          ...f.manifest.agent,
-          id: workerId,
-          name: "Implementation Worker",
-          role: "implementation-worker",
-          title: "Restricted todo worker",
-          capabilities: "Executes authenticated todo briefs without filesystem or shell access.",
-          instructions: await stage(workerPath, "# Implementation Worker\n"),
-        }],
+        additionalAgents: [],
         toolPolicy,
       };
       return { ...f, manifest, selectedProfile: "standard", effectiveToolPolicy: toolPolicy };
     }
 
-    /** Leaves exactly the revision-1 single-agent state observed on a live Standard install. */
+    /** A roster member provisioned by an older revision (the retired implementation-worker). */
+    function legacyWorker(chat: any, revision = 1) {
+      const worker = structuredClone(chat);
+      worker.id = workerId;
+      worker.name = "Implementation Worker";
+      worker.role = "implementation-worker";
+      worker.status = "idle";
+      worker.metadata.vectorProvisioning.manifestRevision = revision;
+      return worker;
+    }
+
+    /** Revision 1 as observed on a live Standard install: Standard Chat plus the legacy worker. */
     async function revisionOneInstall() {
       const f = await fixture();
       const port = memoryPort();
       await reconcileVectorInstallation(port, await standardRevision(f, 1, "# Standard Chat v1\n"));
-      port.agents.splice(port.agents.findIndex((agent) => agent.id === workerId), 1);
+      port.agents.push(legacyWorker(port.agents[0]));
       return { f, port };
     }
 
-    it("upgrades a lower-revision agent, creates the added agent, and reruns as a no-op", async () => {
+    it("upgrades the kept agent, retires the dropped agent, and reruns as a no-op", async () => {
       const { f, port } = await revisionOneInstall();
-      const retired = {
+      const foreign = {
         ...structuredClone(port.agents[0]),
         id: "0f5b7f4e-3a55-4d0b-9a0e-5b7c1d2e3f40",
-        name: "Retired Agent",
+        name: "Other Install Agent",
       };
-      port.agents.push(retired);
+      foreign.metadata.vectorProvisioning.installationId = "other-install";
+      const unmarked = { ...structuredClone(port.agents[0]), id: "0f5b7f4e-3a55-4d0b-9a0e-5b7c1d2e3f42", name: "Operator Agent", metadata: {} };
+      port.agents.push(foreign, unmarked);
       const before = structuredClone(port.agents[0]);
       const input = await standardRevision(f, 2, "# Standard Chat v2\n");
 
       const upgraded = await reconcileVectorInstallation(port, input);
+      expect(Object.keys(upgraded).sort()).toEqual([
+        "agentId", "agentIds", "agentsCreated", "companyId", "created", "installationId",
+        "manifestRevision", "profile", "rosterCatalogSha256", "schemaVersion", "workloadCatalogSha256",
+      ]);
       expect(upgraded).toMatchObject({
         manifestRevision: 2,
         agentId: f.manifest.agent.id,
-        agentIds: [f.manifest.agent.id, workerId],
-        created: { company: false, ownership: false, agent: true },
-        agentsCreated: 1,
+        agentIds: [f.manifest.agent.id],
+        created: { company: false, ownership: false, agent: false },
+        agentsCreated: 0,
       });
       const chat = port.agents.find((agent) => agent.id === f.manifest.agent.id);
       expect(chat.metadata.vectorProvisioning).toMatchObject({ manifestRevision: 2, rosterCatalogSha256: upgraded.rosterCatalogSha256 });
       expect(chat.metadata.vectorProvisioning.rosterCatalogSha256).not.toBe(before.metadata.vectorProvisioning.rosterCatalogSha256);
-      expect(port.agents.find((agent) => agent.id === retired.id)).toEqual(retired);
+      expect(port.agents.find((agent) => agent.id === workerId).status).toBe("terminated");
+      expect(port.terminated).toEqual([workerId]);
+      // Agents without this installation's marker are never touched.
+      expect(port.agents.find((agent) => agent.id === foreign.id)).toEqual(foreign);
+      expect(port.agents.find((agent) => agent.id === unmarked.id)).toEqual(unmarked);
 
       const rerun = await reconcileVectorInstallation(port, input);
-      expect(rerun).toEqual({ ...upgraded, created: { company: false, ownership: false, agent: false }, agentsCreated: 0 });
-      expect(port.agents).toHaveLength(3);
+      expect(rerun).toEqual(upgraded);
+      expect(port.terminated).toEqual([workerId]);
+      expect(port.agents).toHaveLength(4);
+    });
+
+    it("fails closed without mutation when an active agent at the current revision is missing from the roster", async () => {
+      const { f, port } = await revisionOneInstall();
+      const before = structuredClone(port.agents);
+      await expect(reconcileVectorInstallation(port, await standardRevision(f, 1, "# Standard Chat v1\n")))
+        .rejects.toThrow("missing from the roster");
+      expect(port.agents).toEqual(before);
+      expect(port.terminated).toEqual([]);
+    });
+
+    it("refuses to retire an agent from a newer revision", async () => {
+      const f = await fixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, await standardRevision(f, 1, "# Standard Chat v1\n"));
+      port.agents.push(legacyWorker(port.agents[0], 3));
+      const before = structuredClone(port.agents);
+      await expect(reconcileVectorInstallation(port, await standardRevision(f, 2, "# Standard Chat v2\n")))
+        .rejects.toThrow("downgrade refused");
+      expect(port.agents).toEqual(before);
+      expect(port.terminated).toEqual([]);
     });
 
     it("still fails closed on drift at the same revision", async () => {
-      const { f, port } = await revisionOneInstall();
+      const f = await fixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, await standardRevision(f, 1, "# Standard Chat v1\n"));
       await expect(reconcileVectorInstallation(port, await standardRevision(f, 1, "# Standard Chat changed\n")))
         .rejects.toThrow("immutable field agent.metadata differs");
     });
@@ -765,31 +808,47 @@ describe("Vector installation provisioning", () => {
         await database?.cleanup();
       });
 
-      it("upgrades revision 1 to 2 in Postgres and reruns idempotently", async () => {
+      it("upgrades revision 1 to 2 in Postgres, terminates the dropped agent, and reruns idempotently", async () => {
         const f = await fixture();
         await provisionVectorInstallation(db, await standardRevision(f, 1, "# Standard Chat v1\n"));
-        await db.delete(agentsTable).where(eq(agentsTable.id, workerId));
+        const chatRow = await db.select().from(agentsTable).where(eq(agentsTable.id, f.manifest.agent.id)).then((rows) => rows[0]!);
+        const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...chatColumns } = chatRow;
+        const workerMetadata = structuredClone(chatRow.metadata as any);
+        workerMetadata.vectorProvisioning.manifestRevision = 1;
+        await db.insert(agentsTable).values({
+          ...chatColumns,
+          id: workerId,
+          name: "Implementation Worker",
+          role: "implementation-worker",
+          status: "idle",
+          metadata: workerMetadata,
+        });
         const input = await standardRevision(f, 2, "# Standard Chat v2\n");
 
         const upgraded = await provisionVectorInstallation(db, input);
-        expect(upgraded).toMatchObject({ manifestRevision: 2, agentIds: [f.manifest.agent.id, workerId], agentsCreated: 1 });
+        expect(upgraded).toMatchObject({ manifestRevision: 2, agentIds: [f.manifest.agent.id], agentsCreated: 0 });
         const chat = await db.select().from(agentsTable).where(eq(agentsTable.id, f.manifest.agent.id)).then((rows) => rows[0]!);
         expect((chat.metadata as any).vectorProvisioning.manifestRevision).toBe(2);
+        expect(chat.status).not.toBe("terminated");
+        const worker = await db.select().from(agentsTable).where(eq(agentsTable.id, workerId)).then((rows) => rows[0]!);
+        expect(worker.status).toBe("terminated");
 
         const rerun = await provisionVectorInstallation(db, input);
-        expect(rerun).toMatchObject({ agentsCreated: 0, created: { company: false, ownership: false, agent: false } });
+        expect(rerun).toEqual(upgraded);
+        const workerAfterRerun = await db.select().from(agentsTable).where(eq(agentsTable.id, workerId)).then((rows) => rows[0]!);
+        expect(workerAfterRerun.status).toBe("terminated");
+        expect(workerAfterRerun.updatedAt).toEqual(worker.updatedAt);
         await expect(provisionVectorInstallation(db, await standardRevision(f, 1, "# Standard Chat v1\n")))
           .rejects.toThrow("downgrade refused");
       });
     });
 
-    it("keeps the name-collision check when an upgrade renames an agent", async () => {
+    it("keeps the name-collision check on upgrade", async () => {
       const f = await fixture();
       const port = memoryPort();
       await reconcileVectorInstallation(port, await standardRevision(f, 1, "# Standard Chat v1\n"));
-      port.agents.push({ ...structuredClone(port.agents[1]), id: "0f5b7f4e-3a55-4d0b-9a0e-5b7c1d2e3f41", name: "Worker Renamed" });
+      port.agents.push({ ...structuredClone(port.agents[0]), id: "0f5b7f4e-3a55-4d0b-9a0e-5b7c1d2e3f41", metadata: {} });
       const input = await standardRevision(f, 2, "# Standard Chat v2\n");
-      input.manifest.additionalAgents[0].name = "Worker Renamed";
       await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("agent identity collision");
     });
   });

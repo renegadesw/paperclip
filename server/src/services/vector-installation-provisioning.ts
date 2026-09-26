@@ -35,7 +35,7 @@ const toolPolicySchema = z.object({
   }).strict()),
 }).strict().superRefine((policy, ctx) => {
   const restrictedExtensions = policy.profile === "standard"
-    ? [chatCallbackExtension, speakExtension] : [stagingCallbackExtension];
+    ? [speakExtension] : [stagingCallbackExtension];
   if (policy.profile !== "engineering" && (policy.builtinTools.length > 0
       || stableJson(policy.extensions) !== stableJson(restrictedExtensions))) {
     ctx.addIssue({
@@ -184,14 +184,9 @@ const speakExtension = {
   permissions: { filesystem: false, shell: false },
 };
 
-const chatCallbackExtension = {
-  name: "vector.tool-bridge",
-  tools: ["ask_user", "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
-  permissions: { filesystem: false, shell: false },
-};
-
 const engineeringCallbackExtension = {
-  ...chatCallbackExtension,
+  name: "vector.tool-bridge",
+  permissions: { filesystem: false, shell: false },
   tools: [
     "ask_user", "github_api", "github_manage", "github_read", "github_repo",
     "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list",
@@ -411,10 +406,10 @@ export const vectorInstallationManifestSchema = z.object({
   }
   if (manifest.profile === "standard") {
     if (
-      allAgents.length !== 2 || manifest.agent.name !== "Standard Chat" || manifest.agent.role !== "standard-chat" ||
-      stableJson(roles) !== stableJson(["implementation-worker", "standard-chat"])
+      allAgents.length !== 1 || manifest.agent.name !== "Standard Chat" || manifest.agent.role !== "standard-chat" ||
+      stableJson(roles) !== stableJson(["standard-chat"])
     ) {
-      ctx.addIssue({ code: "custom", path: ["agent"], message: "standard installs provision exactly the Standard Chat and restricted implementation worker agents" });
+      ctx.addIssue({ code: "custom", path: ["agent"], message: "standard installs provision exactly the Standard Chat agent" });
     }
     if (manifest.workloads.length !== 0) {
       ctx.addIssue({ code: "custom", path: ["workloads"], message: "standard installs do not own Funky workload schedules" });
@@ -595,6 +590,7 @@ type AgentRecord = {
   budgetMonthlyCents: number;
   permissions: Record<string, unknown>;
   metadata: Record<string, unknown> | null;
+  status?: string;
 };
 
 type InstallationOwnershipRecord = {
@@ -614,6 +610,7 @@ export interface VectorProvisioningPort {
   getAgent(id: string): Promise<AgentRecord | null>;
   createAgent(companyId: string, input: Omit<AgentRecord, "companyId">): Promise<AgentRecord>;
   updateAgent(id: string, patch: Partial<Omit<AgentRecord, "id" | "companyId">>): Promise<AgentRecord | null>;
+  terminateAgent(id: string): Promise<AgentRecord | null>;
 }
 
 export interface VectorProvisioningInput {
@@ -690,6 +687,25 @@ function storedManifestRevision(
     throw new Error("Vector provisioning agent has an invalid manifest revision");
   }
   return revision;
+}
+
+/**
+ * The revision recorded by this installation's provisioning marker, or null
+ * when the agent does not carry this installation's marker. Unlike
+ * storedManifestRevision this never throws: it is used to find roster members
+ * that a newer manifest dropped, among agents the installation may not own.
+ */
+function ownedManifestRevision(
+  agent: AgentRecord,
+  manifest: { installationId: string; profile: string },
+): number | null {
+  const metadata = agent.metadata;
+  const marker = metadata && typeof metadata === "object" ? metadata.vectorProvisioning : undefined;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return null;
+  const record = marker as Record<string, unknown>;
+  if (record.installationId !== manifest.installationId || record.profile !== manifest.profile) return null;
+  const revision = record.manifestRevision;
+  return typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 1 ? revision : null;
 }
 
 function containedReleasePath(root: string, relative: string): string {
@@ -785,6 +801,26 @@ export async function reconcileVectorInstallation(
   }
 
   const existingAgents = await port.listAgents(company.id);
+  // Agents this installation provisioned under an older revision that the
+  // current manifest no longer declares are retired (terminated), never left
+  // active. Validate before any agent mutation so a refused manifest changes
+  // nothing.
+  const declaredAgentIds = new Set([manifest.agent, ...manifest.additionalAgents].map((agent) => agent.id));
+  const droppedAgents: AgentRecord[] = [];
+  for (const candidate of existingAgents) {
+    if (declaredAgentIds.has(candidate.id) || candidate.companyId !== company.id) continue;
+    const revision = ownedManifestRevision(candidate, manifest);
+    if (revision === null || candidate.status === "terminated") continue;
+    if (revision > manifest.manifestRevision) {
+      throw new Error(
+        `Vector provisioning downgrade refused: agent is at manifest revision ${revision}, manifest is ${manifest.manifestRevision}`,
+      );
+    }
+    if (revision === manifest.manifestRevision) {
+      throw new Error("Vector provisioning drift: an active agent at the current manifest revision is missing from the roster");
+    }
+    droppedAgents.push(candidate);
+  }
   const resolvedAgentIds: string[] = [];
   let agentsCreated = 0;
   for (const desired of [manifest.agent, ...manifest.additionalAgents]) {
@@ -861,6 +897,13 @@ export async function reconcileVectorInstallation(
     resolvedAgentIds.push(agent.id);
   }
 
+  for (const dropped of droppedAgents) {
+    const retired = await port.terminateAgent(dropped.id);
+    if (!retired || retired.status !== "terminated") {
+      throw new Error("Vector provisioning failed to retire an agent dropped from the manifest");
+    }
+  }
+
   return {
     schemaVersion: 1,
     installationId: manifest.installationId,
@@ -918,6 +961,7 @@ function productionPort(db: Db): VectorProvisioningPort {
     createAgent: (companyId, input) => agents.create(companyId, input) as Promise<AgentRecord>,
     updateAgent: (id, patch) =>
       agents.update(id, patch, { recordRevision: { source: "vector_provisioning" } }) as Promise<AgentRecord | null>,
+    terminateAgent: (id) => agents.terminate(id) as Promise<AgentRecord | null>,
   };
 }
 

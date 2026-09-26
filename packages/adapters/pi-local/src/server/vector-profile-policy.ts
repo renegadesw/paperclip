@@ -60,7 +60,7 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
     capability: "todos",
     tools: ["todo_add", "todo_list", "todo_update", "todo_mark_done"],
     status: "ported",
-    dependency: "Uses the run-scoped Vector callback authority and durable llm.paperclip_todos state; workers are bound to their launched todo.",
+    dependency: "Uses the run-scoped Vector callback authority and durable llm.paperclip_todos state.",
   },
   {
     capability: "github-broker",

@@ -3,7 +3,6 @@ import {
   appendVectorPersonaSystemPrompt,
   appendVectorRoleSystemPrompt,
   appendVectorWorkloadSystemPrompt,
-  ENGINEERING_TODO_WORKER_PROMPT,
   resolveVectorRuntimeSelection,
 } from "./execute.js";
 
@@ -67,24 +66,21 @@ describe("Vector role turn system prompt", () => {
     })).toThrow("malformed");
   });
 
-  it("admits builtin tools only for the exact engineering implementation-worker alias", () => {
-    const alias = {
+  it("never admits a builtin-tool role turn, including the retired implementation-worker alias", () => {
+    const retiredAlias = {
       schemaVersion: 1,
       role: "implementation-worker",
       model: "router/Qwen3.8-Flash",
       noBuiltinTools: false,
-      systemPrompt: ENGINEERING_TODO_WORKER_PROMPT,
+      systemPrompt: "You are executing one authenticated NexusLink todo brief.",
       metadata: {
         todo_id: "00000000-0000-4000-8000-000000000023",
         launch_digest: "a".repeat(32),
         launch_mode: "scoped",
       },
     };
-    expect(appendVectorRoleSystemPrompt("Static", alias, "engineering"))
-      .toContain(ENGINEERING_TODO_WORKER_PROMPT);
-    expect(() => appendVectorRoleSystemPrompt("Static", alias, "standard")).toThrow("malformed");
-    expect(() => appendVectorRoleSystemPrompt("Static", { ...alias, role: "engineer" }, "engineering")).toThrow("malformed");
-    expect(() => appendVectorRoleSystemPrompt("Static", { ...alias, systemPrompt: "changed" }, "engineering")).toThrow("malformed");
+    expect(() => appendVectorRoleSystemPrompt("Static", retiredAlias)).toThrow("malformed");
+    expect(() => appendVectorRoleSystemPrompt("Static", { ...retiredAlias, role: "pi" })).toThrow("malformed");
   });
 });
 

@@ -37,7 +37,6 @@ import { logActivity } from "./activity-log.js";
 import type { VectorToolPendingDescriptor } from "./vector-tool-authority.js";
 import type { VectorProviderPendingDescriptor } from "./vector-provider-authority.js";
 import type { StorageService } from "../storage/index.js";
-import { ENGINEERING_TODO_WORKER_PROMPT } from "@paperclipai/adapter-pi-local/server";
 import {
   isVectorIngressImageAsset,
   validateVectorIngressImages,
@@ -58,9 +57,6 @@ export { vectorIngressOwnerSha256 } from "./vector-ingress-owner.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
-const STANDARD_TODO_WORKER_PROMPT = `You are executing one authenticated NexusLink todo brief.
-
-Complete the brief as fully as the explicitly granted conversation tools allow. You have no filesystem, shell, repository, GitHub, Vault, MCP, or ambient Pi tools. Never claim to have inspected or changed an external system. If the brief requires an unavailable capability, explain the exact boundary and provide the most useful safe result you can.`;
 
 export interface VectorIngressScope {
   companyId: string;
@@ -490,33 +486,17 @@ export function vectorIngressService(
     const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
     const adapterConfig = eventPayloadRecord(agent.adapterConfig);
     const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
-    const stagingRole = input.profileId === "staging" && input.roleContext.noBuiltinTools === true;
-    const workerMetadata = input.roleContext.metadata;
-    const standardTodoWorker = input.profileId === "standard" && agent.role === "implementation-worker" &&
-      input.roleContext.role === "implementation-worker" && input.roleContext.noBuiltinTools === true &&
-      input.roleContext.systemPrompt === STANDARD_TODO_WORKER_PROMPT &&
-      Object.keys(workerMetadata).sort().join(",") === "launch_digest,launch_mode,todo_id" &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(workerMetadata.todo_id ?? "") &&
-      /^[0-9a-f]{32}$/.test(workerMetadata.launch_digest ?? "") &&
-      (workerMetadata.launch_mode === "scoped" || workerMetadata.launch_mode === "just_go") &&
-      input.externalSessionId === `${workerMetadata.launch_mode === "just_go" ? "todo-jg-" : "todo-"}${workerMetadata.todo_id}-${workerMetadata.launch_digest}`;
-    const engineeringTodoWorker = input.profileId === "engineering" && agent.role === "engineer" &&
-      input.roleContext.role === "implementation-worker" && input.roleContext.noBuiltinTools === false &&
-      input.roleContext.systemPrompt === ENGINEERING_TODO_WORKER_PROMPT &&
-      Object.keys(workerMetadata).sort().join(",") === "launch_digest,launch_mode,todo_id" &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(workerMetadata.todo_id ?? "") &&
-      /^[0-9a-f]{32}$/.test(workerMetadata.launch_digest ?? "") &&
-      (workerMetadata.launch_mode === "scoped" || workerMetadata.launch_mode === "just_go") &&
-      input.externalSessionId === `${workerMetadata.launch_mode === "just_go" ? "todo-jg-" : "todo-"}${workerMetadata.todo_id}-${workerMetadata.launch_digest}`;
+    // Role turns are a staging-only surface: the turn must name the target
+    // agent's own provisioned role and carry no builtin tools. Engineering
+    // (FunkyDev, alias `pi`) and standard (standard-chat) never accept one.
     if (
       provisioning.schemaVersion !== 1 ||
       provisioning.installationId !== input.installationId ||
       provisioning.profile !== input.profileId ||
-      (!stagingRole && !standardTodoWorker && !engineeringTodoWorker) ||
-      (!engineeringTodoWorker && agent.role !== input.roleContext.role) ||
-      (standardTodoWorker || engineeringTodoWorker
-        ? !input.runtimeSelection || input.roleContext.model !== `router/${input.runtimeSelection.model}`
-        : input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
+      input.profileId !== "staging" ||
+      input.roleContext.noBuiltinTools !== true ||
+      agent.role !== input.roleContext.role ||
+      (input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
     ) {
       throw conflict("Vector role turn differs from the provisioned agent contract", {
         code: "vector_role_contract_mismatch",
@@ -545,7 +525,7 @@ export function vectorIngressService(
       provisioning.schemaVersion !== 1 ||
       provisioning.installationId !== input.installationId ||
       provisioning.profile !== input.profileId ||
-      (input.roleContext !== undefined && input.roleContext.role !== "implementation-worker")
+      input.roleContext !== undefined
     ) {
       throw conflict("Vector repository context differs from the provisioned engineering contract", {
         code: "vector_repository_contract_mismatch",
@@ -596,7 +576,7 @@ export function vectorIngressService(
     const configured = eventPayloadRecord(agent.adapterConfig);
     if (
       (input.profileId === "standard"
-        ? agent.role !== "standard-chat" && agent.role !== "implementation-worker"
+        ? agent.role !== "standard-chat"
         : agent.role !== "engineer") ||
       typeof configured.model !== "string" ||
       !configured.model.startsWith("router/") ||
@@ -627,7 +607,6 @@ export function vectorIngressService(
   ): Promise<VectorPersonaTurnContext | null> {
     const priorRun = await latestConversationRun(input, issue);
     const prior = persistedPersonaContext(priorRun?.contextSnapshot?.vectorPersonaTurn);
-    const priorRole = eventPayloadRecord(priorRun?.contextSnapshot?.vectorRoleTurn);
     const requested = input.personaContext ?? null;
     if (
       requested && prior &&
@@ -644,9 +623,7 @@ export function vectorIngressService(
       });
     }
     const effective = requested ?? prior;
-    const standardTodoWorker = input.profileId === "standard" &&
-      (input.roleContext?.role === "implementation-worker" || priorRole.role === "implementation-worker");
-    if (!effective && input.profileId === "standard" && !standardTodoWorker) {
+    if (!effective && input.profileId === "standard") {
       throw conflict("Vector standard-chat requires an admitted persona", {
         code: "vector_persona_required",
       });
@@ -671,10 +648,9 @@ export function vectorIngressService(
   ) {
     const ownerSha256 = vectorIngressOwnerSha256(scope);
     const turn = scope as Partial<VectorIngressTurnInput>;
-    const requestedRole = scope.profileId === "engineering" && turn.roleContext?.role === "implementation-worker"
-      ? "implementation-worker"
-      : null;
-    const insertedRole = scope.profileId === "engineering" ? requestedRole ?? "pi" : null;
+    // FunkyDev has exactly one session alias. A NexusLink todo launch is an
+    // ordinary `pi` turn whose opening message is the todo brief.
+    const insertedRole = scope.profileId === "engineering" ? "pi" : null;
     const requestedRepository = turn.repositoryContext?.repository ?? null;
     const inserted = await db
       .insert(vectorIngressConversations)
@@ -710,9 +686,8 @@ export function vectorIngressService(
       });
     }
     if (
-      inserted.length === 0 &&
-      ((requestedRole !== null && mapping.sessionRole !== requestedRole) ||
-        (requestedRepository !== null && mapping.repository !== requestedRepository))
+      (scope.profileId === "engineering" && mapping.sessionRole !== null && mapping.sessionRole !== "pi") ||
+      (inserted.length === 0 && requestedRepository !== null && mapping.repository !== requestedRepository)
     ) {
       throw conflict("Vector conversation role or repository binding does not match", {
         code: "vector_ingress_session_binding_mismatch",

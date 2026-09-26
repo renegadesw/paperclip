@@ -57,7 +57,7 @@ export const sessionCodec: AdapterSessionCodec = {
   },
 };
 
-export { execute, ENGINEERING_TODO_WORKER_PROMPT } from "./execute.js";
+export { execute } from "./execute.js";
 export {
   readVectorLegacyPiContextMarker,
   stageVectorLegacyPiContext,
