@@ -9,6 +9,7 @@ import type {
 import { emailApi } from "@/api/email";
 import { issuesApi } from "@/api/issues";
 import { useChatConnectorsEnabled } from "@/hooks/useChatConnectorsEnabled";
+import { paperclipApiPath } from "@/lib/base-path";
 const EmailContext = createContext<EmailThreadSummary | null>(null);
 export function EmailThreadProvider({
   companyId,
@@ -104,7 +105,7 @@ export function EmailMessageCard({
             return (
               <a
                 key={id}
-                href={`/api/attachments/${id}/content`}
+                href={paperclipApiPath(`/attachments/${id}/content`)}
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-xs"

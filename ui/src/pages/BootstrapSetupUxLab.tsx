@@ -3,6 +3,7 @@ import { Loader2, ShieldCheck, Terminal, TriangleAlert } from "lucide-react";
 import { BOOTSTRAP_FALLBACK_COMMAND } from "@/bootstrapSetup";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { paperclipPath } from "@/lib/base-path";
 
 type LabFixtureKey =
   | "signed-out-private"
@@ -67,7 +68,7 @@ function SignedOutPrivate() {
       </p>
       <div className="mt-5">
         <Button asChild>
-          <a href="/auth?next=/">Sign in / Create account</a>
+          <a href={paperclipPath("/auth?next=/")}>Sign in / Create account</a>
         </Button>
       </div>
       <CliFallback hasActiveInvite={false} />
@@ -90,7 +91,7 @@ function SignedInPrivate() {
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
         Wrong account?{" "}
-        <a href="/auth?next=/" className="underline underline-offset-2">
+        <a href={paperclipPath("/auth?next=/")} className="underline underline-offset-2">
           Switch account
         </a>
         .
@@ -172,7 +173,7 @@ function ClaimSuccess() {
       </div>
       <div className="mt-5">
         <Button asChild variant="outline">
-          <a href="/">Continue to dashboard</a>
+          <a href={paperclipPath("/")}>Continue to dashboard</a>
         </Button>
       </div>
     </StateChrome>
@@ -215,11 +216,11 @@ export function BootstrapSetupUxLab() {
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
             Fixtures for the bootstrap-pending screen in <span className="font-mono">CloudAccessGate</span>. Used
             as the UX spec for{" "}
-            <a className="underline underline-offset-2" href="/PAP/issues/PAP-10113">
+            <a className="underline underline-offset-2" href={paperclipPath("/PAP/issues/PAP-10113")}>
               PAP-10113
             </a>{" "}
             and the implementation reference for{" "}
-            <a className="underline underline-offset-2" href="/PAP/issues/PAP-10114">
+            <a className="underline underline-offset-2" href={paperclipPath("/PAP/issues/PAP-10114")}>
               PAP-10114
             </a>
             . The browser claim CTA only appears when{" "}

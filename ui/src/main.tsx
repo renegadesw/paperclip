@@ -21,6 +21,7 @@ import { PluginLauncherProvider } from "./plugins/launchers";
 import { startPerfMeasureReaper } from "./lib/perf-measure-reaper";
 import { getOrCreatePaperclipReactRoot } from "./lib/react-root";
 import { startServiceWorkerUpdates } from "./lib/service-worker-updates";
+import { paperclipUiBasePath } from "./lib/base-path";
 import "@mdxeditor/editor/style.css";
 import "./index.css";
 
@@ -66,7 +67,7 @@ getOrCreatePaperclipReactRoot(window, rootElement).render(
       <QueryClientProvider client={queryClient}>
         <SentryGate />
         <ThemeProvider>
-          <BrowserRouter>
+          <BrowserRouter basename={paperclipUiBasePath || undefined}>
             <CompanyProvider>
               <EditorAutocompleteProvider>
                 <ToastProvider>

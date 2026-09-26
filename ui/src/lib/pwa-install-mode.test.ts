@@ -25,6 +25,6 @@ describe("PWA install mode", () => {
     // the link opts in. Behind an authenticating reverse proxy (e.g. a
     // managed-hosting front door), the cookie-less request is rejected on
     // every page load.
-    expect(html).toContain('rel="manifest" href="/site.webmanifest" crossorigin="use-credentials"');
+    expect(html).toContain('rel="manifest" href="%BASE_URL%site.webmanifest" crossorigin="use-credentials"');
   });
 });

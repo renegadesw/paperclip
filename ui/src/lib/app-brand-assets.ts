@@ -1,3 +1,5 @@
+import { paperclipPath } from "@/lib/base-path";
+
 export type AppBrandManifestProvider = {
   slug: string;
   provider: string;
@@ -45,7 +47,7 @@ function isLocalAssetPath(value: unknown): value is string {
 
 async function loadManifest(): Promise<AppBrandManifest> {
   if (!manifestPromise) {
-    manifestPromise = fetch("/brands/apps/manifest.json", { credentials: "same-origin" })
+    manifestPromise = fetch(paperclipPath("/brands/apps/manifest.json"), { credentials: "same-origin" })
       .then(async (response) => {
         if (!response.ok) throw new Error(`App brand manifest request failed (${response.status})`);
         const value: unknown = await response.json();
@@ -72,8 +74,8 @@ export function resolveLocalAppBrandAssets(
   );
   if (!provider || !isLocalAssetPath(provider.localAsset)) return null;
   return {
-    light: provider.localAsset,
-    dark: isLocalAssetPath(provider.darkAsset) ? provider.darkAsset : provider.localAsset,
+    light: paperclipPath(provider.localAsset),
+    dark: paperclipPath(isLocalAssetPath(provider.darkAsset) ? provider.darkAsset : provider.localAsset),
   };
 }
 

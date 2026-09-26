@@ -27,6 +27,7 @@ import { pluginsApi, type PluginUiContribution } from "@/api/plugins";
 import { authApi } from "@/api/auth";
 import { Button } from "@/components/ui/button";
 import { useNavigate, useLocation } from "@/lib/router";
+import { paperclipPath } from "@/lib/base-path";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
 import {
@@ -447,7 +448,7 @@ function LauncherRenderContent({
     if (renderEnvironment.environment === "iframe") {
       return (
         <iframe
-          src={`/_plugins/${encodeURIComponent(instance.launcher.pluginId)}/ui/${instance.launcher.action.target}`}
+          src={paperclipPath(`/_plugins/${encodeURIComponent(instance.launcher.pluginId)}/ui/${instance.launcher.action.target}`)}
           title={`${instance.launcher.pluginDisplayName} ${instance.launcher.displayName}`}
           className="h-full min-h-[24rem] w-full rounded-md border border-border bg-background"
         />

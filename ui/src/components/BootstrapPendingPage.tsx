@@ -110,7 +110,7 @@ export function BootstrapPendingPage({
         </div>
         <div className="mt-5">
           <Button asChild variant="outline">
-            <a href="/">Continue to dashboard</a>
+            <Link to="/">Continue to dashboard</Link>
           </Button>
         </div>
       </StateChrome>

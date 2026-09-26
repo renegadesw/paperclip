@@ -50,11 +50,11 @@ describe("startServiceWorkerUpdates", () => {
     vi.useRealTimers();
   });
 
-  it("registers /sw.js", async () => {
+  it("registers the service worker inside the configured UI scope", async () => {
     const { container } = fakeContainer({ controlled: false });
     const { doc } = fakeDocument();
     startServiceWorkerUpdates({ container, documentRef: doc, reload: vi.fn() });
-    expect(container.register).toHaveBeenCalledWith("/sw.js");
+    expect(container.register).toHaveBeenCalledWith("/sw.js", { scope: "/" });
   });
 
   it("reloads once when a new worker takes over a hidden, already-controlled page", async () => {
