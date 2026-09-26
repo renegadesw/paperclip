@@ -125,6 +125,7 @@ const turnSchema = z.object({
   ...scopeShape,
   clientRequestId: z.string().trim().min(1).max(255),
   body: z.string().min(1).max(1_000_000),
+  voiceActive: z.boolean().optional(),
   attachmentIds: z.array(z.string().uuid()).max(20).optional(),
   authorityHandle: z.string().trim().min(1).max(1024).optional(),
   authorityTools: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/)).min(1).max(64).optional(),

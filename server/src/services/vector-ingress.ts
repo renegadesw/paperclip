@@ -53,6 +53,7 @@ export interface VectorIngressOwnerScope {
 }
 
 export interface VectorIngressTurnInput extends VectorIngressScope {
+  voiceActive?: boolean;
   clientRequestId: string;
   body: string;
   attachmentIds?: string[];
@@ -1173,11 +1174,14 @@ export function vectorIngressService(
       : null;
     let deliveredRunId: string | null = null;
     await deliverConversationComments(db, issue, async (agentId, wakeup) => {
-      const targetWake = wakeup.idempotencyKey === `conversation-comment:${comment.id}` && (pendingAuthority || pendingProviderAuthority)
+      const targetWake = wakeup.idempotencyKey === `conversation-comment:${comment.id}`
         ? {
             ...wakeup,
             contextSnapshot: {
               ...wakeup.contextSnapshot,
+              // Per-turn presentation hint, never stored in user comments or
+              // inherited by subsequent turns. It grants no tool authority.
+              vectorVoiceActive: input.voiceActive === true,
               ...(pendingAuthority ? { vectorToolAuthorityPending: pendingAuthority } : {}),
               ...(pendingProviderAuthority
                 ? { vectorProviderAuthorityPending: pendingProviderAuthority }

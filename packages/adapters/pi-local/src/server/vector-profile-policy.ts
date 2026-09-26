@@ -77,8 +77,8 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
   {
     capability: "voice-marker",
     tools: ["speak"],
-    status: "blocked",
-    dependency: "The extension is local, but Vector chat clients still need the Paperclip tool event projected onto their existing speak frame contract.",
+    status: "ported",
+    dependency: "Requires the matching sealed Vector OS speak asset and tool-frame gateway; device playback remains rollout acceptance.",
   },
   {
     capability: "rctl",

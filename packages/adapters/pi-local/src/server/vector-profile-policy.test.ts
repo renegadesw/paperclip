@@ -212,6 +212,7 @@ describe("Vector Pi profile isolation", () => {
   it("records callback-bound legacy tools as blocked rather than claiming name-only parity", () => {
     const statuses = new Map(FUNKYDEV_CAPABILITY_INVENTORY.map((entry) => [entry.capability, entry.status]));
     expect(statuses.get("vault-reference")).toBe("ported");
+    expect(statuses.get("voice-marker")).toBe("ported");
     expect(statuses.get("pi-builtins")).toBe("native");
     expect(statuses.get("operator-question")).toBe("blocked");
     expect(statuses.get("todos")).toBe("blocked");

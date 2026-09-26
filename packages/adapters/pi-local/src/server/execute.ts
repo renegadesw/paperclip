@@ -60,6 +60,7 @@ import { buildPiBuiltinToolArgs } from "./tools.js";
 import { prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
 import { prepareVectorToolCapability } from "./vector-tool-capability.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+import { appendVectorVoiceContext } from "./vector-voice-context.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -874,7 +875,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       run: { id: runId, source: "on_demand" },
       context,
     };
-    const renderedSystemPromptExtension = renderTemplate(systemPromptExtension, templateData);
+    const renderedSystemPromptExtension = appendVectorVoiceContext(
+      renderTemplate(systemPromptExtension, templateData), context.vectorVoiceActive,
+    );
     const renderedBootstrapPrompt =
       !canResumeSession && bootstrapPromptTemplate.trim().length > 0
         ? renderTemplate(bootstrapPromptTemplate, templateData).trim()

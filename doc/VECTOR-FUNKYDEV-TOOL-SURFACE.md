@@ -23,7 +23,7 @@ also contains:
 | Todos | `todo_add`, `todo_list`, `todo_update`, `todo_mark_done` | Paperclip callback bridge packaged; Vector OS must provide owner-scoped executors before activation |
 | GitHub broker | `github_read`, `github_manage`, `github_api`, `github_repo` | Blocked: current extension calls legacy broker endpoints with a legacy session capability |
 | Personal memory | `memory_save`, `memory_search`, `memory_forget` | Paperclip callback bridge packaged; Vector OS must provide the three owner-scoped executors before activation |
-| Voice marker | `speak` | Blocked: local extension is reusable, but the Paperclip event still needs projection onto the existing Vector client frame contract |
+| Voice marker | `speak` | Ported in the matching Vector OS release: sealed local extension for engineering/standard, existing tool-frame projection, and private per-turn voice context; physical-device playback still requires acceptance |
 | LLM meter | no model-callable tool | Not ported: Paperclip owns its run usage/cost accounting |
 | Vector `/os/mcp` | server-defined analyst tools | Not current FunkyDev behavior; it belongs to the `funky-analyst` path and must not be imported without an explicit Vector identity contract |
 
@@ -105,7 +105,7 @@ depends on matching Vector OS executors. The remaining minimum contracts are:
   replacements whose response and refusal semantics are intentionally mapped;
 - bidirectional handling of Pi's `extension_ui_request` and
   `extension_ui_response` for `ask_user` (logging the event is not enough);
-- an event projection preserving the existing `speak` tool frame for
+- deployment verification of the existing `speak` tool-frame projection for
   Tailchat/NexusLink/Funky clients; and
 - an explicit decision whether FunkyDev should mount `/os/mcp`. Current source
   proves that bridge for the Funky analyst, not the native standing engineer.

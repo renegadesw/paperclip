@@ -144,6 +144,14 @@ issuing a new request ID.
 
 ## Run-scoped Vector model authority (disabled by default)
 
+The signed turn envelope also accepts optional boolean `voiceActive`. It is a
+presentation hint, not authority. Only the matching comment's wakeup receives
+`vectorVoiceActive`; absent/false on the next turn clears it. The Pi adapter
+appends the existing native voice instruction to the system prompt for that
+turn. User comments and replay text remain unchanged. The deployment-sealed
+tool policy must independently admit the local `speak` extension. Voice context
+does not enable filesystem, shell, model access, or any callback tool.
+
 A turn may carry a second opaque, non-secret `providerAuthorityHandle`. It is
 accepted only when signed Vector ingress and the complete provider bridge
 configuration are enabled:

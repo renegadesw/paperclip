@@ -779,6 +779,7 @@ const support = await getEmbeddedPostgresTestSupport();
         ...base,
         clientRequestId: "standard-persona-turn-1",
         body: "Hello there.",
+        voiceActive: true,
         personaContext,
       });
       const firstRun = await db
@@ -787,6 +788,7 @@ const support = await getEmbeddedPostgresTestSupport();
         .where(eq(heartbeatRuns.id, first.runId!))
         .then((rows) => rows[0]?.context as Record<string, unknown>);
       expect(firstRun.vectorPersonaTurn).toEqual(personaContext);
+      expect(firstRun.vectorVoiceActive).toBe(true);
       const firstComment = await db
         .select({ body: issueComments.body })
         .from(issueComments)
@@ -806,6 +808,7 @@ const support = await getEmbeddedPostgresTestSupport();
         .where(eq(heartbeatRuns.id, second.runId!))
         .then((rows) => rows[0]?.context as Record<string, unknown>);
       expect(secondRun.vectorPersonaTurn).toEqual(personaContext);
+      expect(secondRun.vectorVoiceActive).toBe(false);
 
       await expect(service.addTurn({
         ...base,
