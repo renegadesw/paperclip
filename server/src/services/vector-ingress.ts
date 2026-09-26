@@ -29,6 +29,7 @@ import { deliverConversationComments } from "./agent-conversations.js";
 import { heartbeatService } from "./heartbeat.js";
 import { issueService } from "./issues.js";
 import { logActivity } from "./activity-log.js";
+import type { VectorToolPendingDescriptor } from "./vector-tool-authority.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
@@ -209,6 +210,11 @@ function projectVectorTranscriptMessage(
 }
 
 export interface VectorIngressToolAuthority {
+  registerPending(input: VectorIngressScope & {
+    issueId: string;
+    commentId: string;
+    authorityHandle: string;
+  }): VectorToolPendingDescriptor;
   bindRun(input: VectorIngressScope & {
     issueId: string;
     runId: string;
@@ -808,6 +814,11 @@ export function vectorIngressService(
   }
 
   async function addTurn(input: VectorIngressTurnInput) {
+    if (input.authorityHandle && !options.toolAuthority) {
+      throw conflict("Vector tool authority is disabled", {
+        code: "vector_tool_authority_disabled",
+      });
+    }
     const { issue, ownerId } = await resolveConversation(input);
     const mapping = hasCompleteOwnerScope(input)
       ? await bindConversationOwner(input, issue.id)
@@ -914,9 +925,28 @@ export function vectorIngressService(
       });
     }
 
+    const pendingAuthority = input.authorityHandle
+      ? options.toolAuthority!.registerPending({
+          companyId: input.companyId,
+          agentId: input.agentId,
+          externalSessionId: input.externalSessionId,
+          issueId: issue.id,
+          commentId: comment.id,
+          authorityHandle: input.authorityHandle,
+        })
+      : null;
     let deliveredRunId: string | null = null;
     await deliverConversationComments(db, issue, async (agentId, wakeup) => {
-      const run = await heartbeat.wakeup(agentId, wakeup);
+      const targetWake = wakeup.idempotencyKey === `conversation-comment:${comment.id}` && pendingAuthority
+        ? {
+            ...wakeup,
+            contextSnapshot: {
+              ...wakeup.contextSnapshot,
+              vectorToolAuthorityPending: pendingAuthority,
+            },
+          }
+        : wakeup;
+      const run = await heartbeat.wakeup(agentId, targetWake);
       if (
         wakeup.idempotencyKey === `conversation-comment:${comment.id}` &&
         run &&
@@ -959,17 +989,12 @@ export function vectorIngressService(
 
     const runId = deliveredRunId ?? receipt?.runId ?? null;
     if (input.authorityHandle) {
-      if (!options.toolAuthority) {
-        throw conflict("Vector tool authority is disabled", {
-          code: "vector_tool_authority_disabled",
-        });
-      }
       if (!runId) {
         throw conflict("Vector tool authority requires a created run", {
           code: "vector_tool_authority_run_missing",
         });
       }
-      await options.toolAuthority.bindRun({
+      await options.toolAuthority!.bindRun({
         companyId: input.companyId,
         agentId: input.agentId,
         externalSessionId: input.externalSessionId,

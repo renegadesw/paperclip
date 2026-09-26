@@ -24,12 +24,28 @@ export type VectorToolRuntimeAccess = {
   tools: readonly string[];
 };
 
+export type VectorToolPendingDescriptor = {
+  version: 1;
+  handleSha256: string;
+  sessionScope: string;
+  commentId: string;
+};
+
 type Grant = VectorToolAuthorityScope & {
   authorityHandle: string;
+  handleSha256: string;
   sessionScope: string;
   bearerToken: string;
   expiresAt: number;
   requestIds: Set<string>;
+};
+
+type PendingGrant = Omit<VectorToolAuthorityScope, "runId"> & {
+  commentId: string;
+  authorityHandle: string;
+  handleSha256: string;
+  sessionScope: string;
+  expiresAt: number;
 };
 
 export type VectorToolAuthorityConfig = {
@@ -180,6 +196,7 @@ function tokenEqual(left: string, right: string): boolean {
 
 export class VectorToolAuthorityBridge {
   private readonly byRun = new Map<string, Grant>();
+  private readonly pending = new Map<string, PendingGrant>();
 
   constructor(
     private readonly db: Db,
@@ -187,6 +204,109 @@ export class VectorToolAuthorityBridge {
     private readonly fetchImpl: FetchLike = fetch,
     private readonly now: () => number = Date.now,
   ) {}
+
+  private pendingKey(input: Pick<PendingGrant, "companyId" | "agentId" | "issueId" | "commentId">): string {
+    return [input.companyId, input.agentId, input.issueId, input.commentId].join("\0");
+  }
+
+  registerPending(input: Omit<VectorToolAuthorityScope, "runId"> & {
+    commentId: string;
+    authorityHandle: string;
+  }): VectorToolPendingDescriptor {
+    const authorityHandle = input.authorityHandle.trim();
+    if (!authorityHandle || authorityHandle.length > 1024 || !input.commentId.trim()) {
+      throw unprocessable("Vector tool authority handle is invalid", {
+        code: "vector_tool_authority_invalid",
+      });
+    }
+    const handleSha256 = createHash("sha256").update(authorityHandle).digest("hex");
+    const sessionScope = vectorToolSessionScope(input);
+    const key = this.pendingKey(input);
+    const existing = this.pending.get(key);
+    if (existing && existing.expiresAt > this.now()) {
+      if (
+        existing.companyId !== input.companyId ||
+        existing.agentId !== input.agentId ||
+        existing.issueId !== input.issueId ||
+        existing.externalSessionId !== input.externalSessionId ||
+        existing.authorityHandle !== authorityHandle
+      ) {
+        throw conflict("Vector tool authority is already pending for different scope", {
+          code: "vector_tool_authority_scope_conflict",
+        });
+      }
+    } else {
+      this.pending.set(key, {
+        ...input,
+        authorityHandle,
+        handleSha256,
+        sessionScope,
+        expiresAt: this.now() + this.config.ttlSeconds * 1000,
+      });
+    }
+    return { version: 1, handleSha256, sessionScope, commentId: input.commentId };
+  }
+
+  async bindPendingRun(input: {
+    companyId: string;
+    agentId: string;
+    issueId: string;
+    runId: string;
+    pending: VectorToolPendingDescriptor;
+  }): Promise<VectorToolRuntimeAccess> {
+    const key = this.pendingKey({ ...input, commentId: input.pending.commentId });
+    const existing = this.byRun.get(input.runId);
+    if (
+      existing &&
+      existing.expiresAt > this.now() &&
+      existing.companyId === input.companyId &&
+      existing.agentId === input.agentId &&
+      existing.issueId === input.issueId &&
+      existing.handleSha256 === input.pending.handleSha256 &&
+      existing.sessionScope === input.pending.sessionScope
+    ) {
+      const redundantPending = this.pending.get(key);
+      if (
+        redundantPending?.handleSha256 === input.pending.handleSha256 &&
+        redundantPending.sessionScope === input.pending.sessionScope
+      ) {
+        this.pending.delete(key);
+      }
+      const access = this.runtimeAccess(input);
+      if (access) return access;
+    }
+    const grant = this.pending.get(key);
+    if (
+      !grant ||
+      grant.expiresAt <= this.now() ||
+      input.pending.version !== 1 ||
+      input.pending.handleSha256 !== grant.handleSha256 ||
+      input.pending.sessionScope !== grant.sessionScope
+    ) {
+      this.pending.delete(key);
+      throw conflict("Vector tool authority pending grant is unavailable", {
+        code: "vector_tool_authority_pending_missing",
+      });
+    }
+    // Consume before the first await. Concurrent dispatch attempts cannot both
+    // bind one grant, and a crash/restart cannot resurrect the raw handle.
+    this.pending.delete(key);
+    await this.bindRun({
+      companyId: grant.companyId,
+      agentId: grant.agentId,
+      externalSessionId: grant.externalSessionId,
+      issueId: grant.issueId,
+      runId: input.runId,
+      authorityHandle: grant.authorityHandle,
+    });
+    const access = this.runtimeAccess(input);
+    if (!access) {
+      throw conflict("Vector tool authority did not bind to the run", {
+        code: "vector_tool_authority_bind_failed",
+      });
+    }
+    return access;
+  }
 
   async bindRun(input: VectorToolAuthorityScope & { authorityHandle: string }): Promise<void> {
     const authorityHandle = input.authorityHandle.trim();
@@ -249,6 +369,7 @@ export class VectorToolAuthorityBridge {
     this.byRun.set(input.runId, {
       ...input,
       authorityHandle,
+      handleSha256,
       sessionScope,
       bearerToken: randomBytes(32).toString("base64url"),
       expiresAt: this.now() + this.config.ttlSeconds * 1000,
@@ -371,4 +492,37 @@ export function activeVectorToolRuntimeAccess(input: {
   issueId: string | null;
 }): VectorToolRuntimeAccess | null {
   return activeBridge?.runtimeAccess(input) ?? null;
+}
+
+export async function prepareActiveVectorToolRuntimeAccess(input: {
+  runId: string;
+  companyId: string;
+  agentId: string;
+  issueId: string | null;
+  pending: unknown;
+}): Promise<VectorToolRuntimeAccess | null> {
+  if (input.pending == null) return activeVectorToolRuntimeAccess(input);
+  const pending = input.pending as Partial<VectorToolPendingDescriptor>;
+  if (
+    pending.version !== 1 ||
+    typeof pending.handleSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(pending.handleSha256) ||
+    typeof pending.sessionScope !== "string" ||
+    !pending.sessionScope ||
+    typeof pending.commentId !== "string" ||
+    !pending.commentId ||
+    !input.issueId ||
+    !activeBridge
+  ) {
+    throw conflict("Vector tool authority pending grant is unavailable", {
+      code: "vector_tool_authority_pending_missing",
+    });
+  }
+  return activeBridge.bindPendingRun({
+    runId: input.runId,
+    companyId: input.companyId,
+    agentId: input.agentId,
+    issueId: input.issueId,
+    pending: pending as VectorToolPendingDescriptor,
+  });
 }

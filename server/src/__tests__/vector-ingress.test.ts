@@ -30,9 +30,11 @@ import {
   vectorConversationOwnerId,
   vectorIngressService,
   type VectorIngressHeartbeat,
+  type VectorIngressToolAuthority,
 } from "../services/vector-ingress.js";
 import type { VectorRuntimeScope } from "../services/vector-runtime-scope.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { VectorToolAuthorityBridge } from "../services/vector-tool-authority.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -490,6 +492,87 @@ const support = await getEmbeddedPostgresTestSupport();
       await expect(
         service.addTurn({ ...input, attachmentIds: [attachment.id] }),
       ).rejects.toMatchObject({ status: 409 });
+    });
+
+    it("persists only pending authority scope before wakeup and confirms the created run", async () => {
+      const commentMarker = {
+        version: 1 as const,
+        handleSha256: "a".repeat(64),
+        sessionScope: "session-scope",
+        commentId: "filled-by-register",
+      };
+      const registerPending = vi.fn((input: { commentId: string }) => ({
+        ...commentMarker,
+        commentId: input.commentId,
+      }));
+      const bindRun = vi.fn().mockResolvedValue(undefined);
+      const toolAuthority = { registerPending, bindRun } as unknown as VectorIngressToolAuthority;
+      const service = vectorIngressService(db, { heartbeat, toolAuthority });
+      const result = await service.addTurn({
+        companyId,
+        agentId,
+        externalSessionId: "authority-thread",
+        clientRequestId: "authority-turn",
+        body: "Use my memory",
+        authorityHandle: "opaque-vector-handle",
+      });
+      expect(registerPending).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        commentId: result.commentId,
+        authorityHandle: "opaque-vector-handle",
+      }));
+      expect(bindRun).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        runId: result.runId,
+        authorityHandle: "opaque-vector-handle",
+      }));
+      const context = await db.select({ value: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, result.runId!))
+        .then((rows) => rows[0]?.value);
+      expect(context?.vectorToolAuthorityPending).toEqual({
+        ...commentMarker,
+        commentId: result.commentId,
+      });
+      expect(JSON.stringify(context)).not.toContain("opaque-vector-handle");
+    });
+
+    it("replays one client request only with the same authority handle", async () => {
+      const toolAuthority = new VectorToolAuthorityBridge(db, {
+        endpoint: new URL("http://127.0.0.1:32160/internal/paperclip/v1/tools/call"),
+        callbackUrl: new URL("http://127.0.0.1:3100/api/internal/vector/v1/tools/callback"),
+        installationId: "test-installation",
+        profile: "standard",
+        secret: "vector-tool-authority-test-secret-32-plus",
+        allowedTools: ["memory_search"],
+        ttlSeconds: 3600,
+      }, vi.fn());
+      const service = vectorIngressService(db, { heartbeat, toolAuthority });
+      const input = {
+        companyId,
+        agentId,
+        externalSessionId: "authority-replay-thread",
+        clientRequestId: "authority-replay-turn",
+        body: "Search memory once",
+        authorityHandle: "opaque-authority-replay-handle",
+      };
+      const first = await service.addTurn(input);
+      await expect(service.addTurn(input)).resolves.toMatchObject({
+        issueId: first.issueId,
+        commentId: first.commentId,
+        runId: first.runId,
+        replayed: true,
+      });
+      await expect(service.addTurn({
+        ...input,
+        authorityHandle: "different-authority-handle",
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_tool_authority_scope_conflict" },
+      });
     });
 
     it("binds existing same-issue attachments and rejects foreign issue attachments", async () => {
