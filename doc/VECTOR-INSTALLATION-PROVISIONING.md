@@ -1,7 +1,7 @@
 # Vector installation provisioning
 
-Vector's native release may provision one installation-owned company and root
-agent before the Paperclip server starts. The supported entrypoint is:
+Vector's native release may provision one installation-owned company and a
+stable agent roster before the Paperclip server starts. The supported entrypoint is:
 
 ```text
 server/dist/vector-provision.js
@@ -21,13 +21,32 @@ argv, stdout receipt, or error output.
 The manifest pins stable UUIDs, installation/profile identity, Pi adapter type,
 RPC execution mode, model, thinking level, workspace, release-owned
 instructions, runtime heartbeat policy, permissions, and the deployment tool
-policy. The instructions asset is checked against its manifest SHA-256 in the
-staged release. The stored adapter path points through the installation's
-stable `current` symlink so it survives release-directory renames and rollback.
+policy for the root agent and any additional roster agents. Every instructions
+asset is checked against its manifest SHA-256 in the staged release. Stored
+adapter paths point through the installation's stable `current` symlink so they
+survive release-directory renames and rollback. Supported profiles are
+`engineering`, `standard`, and `staging`; only engineering may declare ambient
+Pi built-ins or extensions.
+
+Roster shape is profile-closed rather than a shared superset:
+
+- `engineering` provisions exactly the FunkyDev engineer and no Funky workload catalog;
+- `standard` provisions exactly the Standard Chat agent and no Funky workload catalog;
+- `staging` provisions exactly Funky analyst, Scout, and Advisor plus all seven
+  current Vector workload contracts.
+
+The optional `workloads` catalog records the exact relationship between stable
+Vector workload keys and roster agents. Paperclip-owned work may use ordinary
+issues. A workload whose authority remains Vector's database must declare
+`runtimeAuthority: "vector_lease_triple"` and a credential-free, default-off
+bridge contract. Its imported `vector_jobs` schedule must also remain disabled.
+The canonical catalog digest and each agent's assigned workload keys are stored
+in agent metadata, so an edited task/tool/schedule mapping is immutable drift
+instead of a silent behavioral change.
 
 Reconciliation is intentionally strict:
 
-- first application creates the company and agent atomically;
+- first application creates the company and complete roster atomically;
 - retry returns the same company and agent IDs without creating duplicates;
 - a name owned by another stable ID is an identity collision;
 - an immutable field difference is drift and aborts provisioning;
@@ -37,6 +56,9 @@ Reconciliation is intentionally strict:
   before database mutation;
 - failures print only `Vector provisioning failed` from the CLI boundary.
 
-This entrypoint provisions only the declared company and agent. It does not
-import Vector Scout, Advisors, legacy tasks, routines, schedules, transcripts,
-or the remaining FunkyDev callback-backed tools.
+This entrypoint provisions only the declared company, agents, and workload
+contract metadata. It does not claim or settle Vector tasks, enable imported
+schedules, create Paperclip routines for Vector lease queues, import historical
+transcripts, or add the remaining FunkyDev callback-backed tools. See
+`VECTOR-ROSTER-WORKLOAD-PARITY.md` for the exact current mapping and cutover
+gaps.
