@@ -9,6 +9,7 @@ import {
   assets,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueAttachments,
   issueComments,
@@ -102,6 +103,8 @@ describe("Vector ingress service authentication", () => {
           addTurn,
           reset: vi.fn(),
           cancel: vi.fn(),
+          status: vi.fn(),
+          events: vi.fn(),
         } as never,
         now: () => 1_700_000_000_000,
       }),
@@ -478,6 +481,122 @@ const support = await getEmbeddedPostgresTestSupport();
           agentId,
           externalSessionId: "control-a",
         }),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it("reads only the scoped conversation's latest run and durable events", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const scope = {
+        companyId,
+        agentId,
+        externalSessionId: "read-thread",
+      };
+      const turn = await service.addTurn({
+        ...scope,
+        clientRequestId: "read-thread-1",
+        body: "Read this run",
+      });
+      const other = await service.addTurn({
+        companyId,
+        agentId,
+        externalSessionId: "read-other-thread",
+        clientRequestId: "read-other-thread-1",
+        body: "Do not leak this run",
+      });
+      await db.insert(heartbeatRunEvents).values([
+        {
+          companyId,
+          agentId,
+          runId: turn.runId!,
+          seq: 1,
+          eventType: "assistant_delta",
+          message: "hello",
+          payload: {
+            text: "hello",
+            delta: "hello",
+            internalSecret: "must-not-cross-ingress",
+          },
+        },
+        {
+          companyId,
+          agentId,
+          runId: turn.runId!,
+          seq: 2,
+          eventType: "agent_settled",
+          message: "settled",
+          payload: { settled: true },
+        },
+        {
+          companyId,
+          agentId,
+          runId: turn.runId!,
+          seq: 3,
+          eventType: "lifecycle",
+          message: "internal lifecycle canary",
+          payload: { secret: "must-not-cross-ingress" },
+        },
+        {
+          companyId,
+          agentId,
+          runId: turn.runId!,
+          seq: 4,
+          eventType: "adapter_internal",
+          message: "internal adapter canary",
+          payload: { secret: "must-not-cross-ingress" },
+        },
+        {
+          companyId,
+          agentId,
+          runId: turn.runId!,
+          seq: 5,
+          eventType: "tool_call",
+          message: "Using read",
+          payload: {
+            toolCallId: "call-1",
+            toolName: "read",
+            args: { path: "README.md" },
+            providerInternal: "must-not-cross-ingress",
+          },
+        },
+        {
+          companyId,
+          agentId,
+          runId: other.runId!,
+          seq: 1,
+          eventType: "assistant_delta",
+          message: "secret other thread",
+          payload: { text: "secret other thread" },
+        },
+      ]);
+
+      await expect(service.status(scope)).resolves.toMatchObject({
+        issueId: turn.issueId,
+        run: { id: turn.runId, status: "queued" },
+      });
+      const afterFirst = await service.events({ ...scope, afterSeq: 1 });
+      expect(afterFirst).toMatchObject({
+        issueId: turn.issueId,
+        nextSeq: 5,
+      });
+      expect(afterFirst.events.map((event) => event.eventType)).toEqual([
+        "agent_settled",
+        "tool_call",
+      ]);
+      expect(afterFirst.events[1]?.payload).toEqual({
+        toolCallId: "call-1",
+        toolName: "read",
+        args: { path: "README.md" },
+      });
+      const scoped = await service.events(scope);
+      expect(scoped.events.map((event) => event.message)).not.toContain(
+        "secret other thread",
+      );
+      expect(JSON.stringify(scoped)).not.toContain("must-not-cross-ingress");
+      expect(scoped.events.map((event) => event.eventType)).not.toContain(
+        "lifecycle",
+      );
+      await expect(
+        service.status({ ...scope, agentId: otherAgentId }),
       ).rejects.toMatchObject({ status: 404 });
     });
   },
