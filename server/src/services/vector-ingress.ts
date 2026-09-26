@@ -150,6 +150,13 @@ function projectVectorEventPayload(eventType: string, payload: unknown) {
   }
 }
 
+function projectVectorTranscriptMessage(
+  eventType: string,
+  _message: string | null,
+): string | null {
+  return eventType === "error" ? "Agent run failed" : null;
+}
+
 export interface VectorIngressTurnResult {
   companyId: string;
   agentId: string;
@@ -701,7 +708,7 @@ export function vectorIngressService(
         rank: 1 as const,
         id: String(event.id),
         eventType: event.eventType,
-        message: event.message,
+        message: projectVectorTranscriptMessage(event.eventType, event.message),
         payload: projectVectorEventPayload(event.eventType, event.payload),
       })),
       ...terminalRuns.map((run) => ({

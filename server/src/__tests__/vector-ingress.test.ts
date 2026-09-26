@@ -936,6 +936,16 @@ const support = await getEmbeddedPostgresTestSupport();
           payload: { delta: "Partial second answer" },
           createdAt: times.secondText,
         },
+        {
+          companyId,
+          agentId,
+          runId: second.runId!,
+          seq: 2,
+          eventType: "error",
+          message: "private event failure detail",
+          payload: { source: "provider", internalTrace: "do-not-leak" },
+          createdAt: new Date("2026-09-25T20:00:06.500Z"),
+        },
       ]);
       await db
         .update(heartbeatRuns)
@@ -952,7 +962,7 @@ const support = await getEmbeddedPostgresTestSupport();
           status: "failed",
           finishedAt: times.secondFailed,
           error: "private provider failure",
-          nextEventSeq: 2,
+          nextEventSeq: 3,
         })
         .where(eq(heartbeatRuns.id, second.runId!));
 
@@ -980,6 +990,7 @@ const support = await getEmbeddedPostgresTestSupport();
         "run_terminal",
         "user_turn",
         "assistant_delta",
+        "error",
         "run_terminal",
       ]);
       expect(replayed[2]?.payload).toEqual({
@@ -993,6 +1004,8 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(wire).not.toContain("Operator note");
       expect(wire).not.toContain("do-not-leak");
       expect(wire).not.toContain("private provider failure");
+      expect(wire).not.toContain("private event failure detail");
+      expect(replayed.at(-2)?.message).toBe("Agent run failed");
       expect(wire).not.toContain(first.issueId);
       expect(wire).not.toContain(first.runId!);
       expect(wire).not.toContain(second.runId!);
