@@ -33,10 +33,13 @@ const toolPolicySchema = z.object({
     permissions: z.object({ filesystem: z.boolean(), shell: z.boolean() }).strict(),
   }).strict()),
 }).strict().superRefine((policy, ctx) => {
-  if (policy.profile !== "engineering" && (policy.builtinTools.length > 0 || policy.extensions.length > 0)) {
+  const restrictedExtensions = policy.profile === "standard"
+    ? [chatCallbackExtension, speakExtension] : [stagingCallbackExtension];
+  if (policy.profile !== "engineering" && (policy.builtinTools.length > 0
+      || stableJson(policy.extensions) !== stableJson(restrictedExtensions))) {
     ctx.addIssue({
       code: "custom",
-      message: `${policy.profile} Vector profiles must not provision ambient Pi tools or extensions`,
+      message: `${policy.profile} Vector profiles must not provision ambient Pi tools or unapproved extensions`,
     });
   }
 });
@@ -174,13 +177,39 @@ const vectorWorkloadContractSchema = z.object({
   }
 });
 
+const speakExtension = {
+  name: "vector.speak",
+  tools: ["speak"],
+  permissions: { filesystem: false, shell: false },
+};
+
+const chatCallbackExtension = {
+  name: "vector.tool-bridge",
+  tools: ["ask_user", "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
+  permissions: { filesystem: false, shell: false },
+};
+
+const stagingCallbackExtension = {
+  name: "vector.tool-bridge",
+  tools: [
+    "apply_audience_plan", "apply_campaign_plan", "apply_charter_plan", "apply_setting_plan",
+    "consult_advisors", "describe_relation", "dmv.get_pipeline_health", "dmv.list_audit_back",
+    "dmv.list_recent_pipeline_failures", "draft_action", "get_business_context", "inspect_audiences",
+    "inspect_campaigns", "inspect_client_charter", "inspect_settings", "inspect_voice", "list_capabilities",
+    "plan_audience_change", "plan_campaign_change", "plan_charter_change", "plan_setting_change",
+    "present_strategy_plan", "pull_check_evidence", "query_data", "run_report", "verify_audience_plan",
+    "verify_campaign_plan", "verify_charter_plan", "verify_setting_plan",
+  ],
+  permissions: { filesystem: false, shell: false },
+};
+
 const engineeringToolPolicy = {
   builtinTools: ["bash", "edit", "find", "grep", "ls", "read", "write"],
   extensions: [{
     name: "funkydev.vault-reference",
     tools: ["vault_read", "vault_search"],
     permissions: { filesystem: true, shell: false },
-  }],
+  }, chatCallbackExtension, speakExtension],
 };
 
 const researchPolicy = {
@@ -298,6 +327,9 @@ export const vectorInstallationManifestSchema = z.object({
   workloads: z.array(vectorWorkloadContractSchema).default([]),
   toolPolicy: toolPolicySchema,
 }).strict().superRefine((manifest, ctx) => {
+  if (manifest.toolPolicy.profile !== manifest.profile) {
+    ctx.addIssue({ code: "custom", path: ["toolPolicy", "profile"], message: "tool policy must match the installation profile" });
+  }
   for (const [label, values] of [
     ["company.mutableFields", manifest.company.mutableFields],
     ["agent.mutableFields", manifest.agent.mutableFields],

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   reconcileVectorInstallation,
+  vectorInstallationManifestSchema,
   type VectorProvisioningPort,
 } from "./vector-installation-provisioning.js";
 
@@ -30,6 +31,14 @@ async function fixture() {
       name: "funkydev.vault-reference",
       tools: ["vault_read", "vault_search"],
       permissions: { filesystem: true, shell: false },
+    }, {
+      name: "vector.tool-bridge",
+      tools: ["ask_user", "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
+      permissions: { filesystem: false, shell: false },
+    }, {
+      name: "vector.speak",
+      tools: ["speak"],
+      permissions: { filesystem: false, shell: false },
     }],
   };
   const manifest = {
@@ -89,6 +98,23 @@ function memoryPort(): VectorProvisioningPort & { companies: any[]; ownerships: 
 }
 
 describe("Vector installation provisioning", () => {
+  it("accepts sealed Standard speak authority but rejects engineering or changed capabilities", async () => {
+    const f = await fixture();
+    const standard = {
+      ...f.manifest, profile: "standard",
+      agent: { ...f.manifest.agent, name: "Standard Chat", role: "standard-chat" },
+      toolPolicy: { profile: "standard", builtinTools: [], extensions: [f.toolPolicy.extensions[1], f.toolPolicy.extensions[2]] },
+    };
+    expect(vectorInstallationManifestSchema.safeParse(standard).success).toBe(true);
+    for (const extensions of [[], [f.toolPolicy.extensions[0]], [f.toolPolicy.extensions[1]],
+      [{ ...f.toolPolicy.extensions[2], permissions: { filesystem: true, shell: false } }],
+      [{ ...f.toolPolicy.extensions[2], tools: ["speak", "bash"] }]]) {
+      expect(vectorInstallationManifestSchema.safeParse({ ...standard, toolPolicy: { ...standard.toolPolicy, extensions } }).success).toBe(false);
+    }
+    expect(vectorInstallationManifestSchema.safeParse({ ...f.manifest, toolPolicy: { ...f.toolPolicy, extensions: [f.toolPolicy.extensions[0]] } }).success).toBe(false);
+    expect(vectorInstallationManifestSchema.safeParse({ ...standard, toolPolicy: { ...standard.toolPolicy, profile: "engineering" } }).success).toBe(false);
+  });
+
   it("creates once and retries with identical stable ids", async () => {
     const f = await fixture();
     const port = memoryPort();
@@ -203,7 +229,19 @@ describe("Vector installation provisioning", () => {
       recoverySchedule: researchRecovery,
       bridge: researchBridge,
     });
-    const restrictedPolicy = { profile: "staging", builtinTools: [], extensions: [] };
+    const restrictedPolicy = { profile: "staging", builtinTools: [], extensions: [{
+      name: "vector.tool-bridge",
+      tools: [
+        "apply_audience_plan", "apply_campaign_plan", "apply_charter_plan", "apply_setting_plan",
+        "consult_advisors", "describe_relation", "dmv.get_pipeline_health", "dmv.list_audit_back",
+        "dmv.list_recent_pipeline_failures", "draft_action", "get_business_context", "inspect_audiences",
+        "inspect_campaigns", "inspect_client_charter", "inspect_settings", "inspect_voice", "list_capabilities",
+        "plan_audience_change", "plan_campaign_change", "plan_charter_change", "plan_setting_change",
+        "present_strategy_plan", "pull_check_evidence", "query_data", "run_report", "verify_audience_plan",
+        "verify_campaign_plan", "verify_charter_plan", "verify_setting_plan",
+      ],
+      permissions: { filesystem: false, shell: false },
+    }] };
     const manifest = {
       ...f.manifest,
       profile: "staging",
