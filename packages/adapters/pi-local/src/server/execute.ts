@@ -523,6 +523,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const preparedRuntimeConfig = await preparePiRuntimeConfig({
     env,
     forceManagedAgentDir: vectorProfilePolicy.restricted,
+    vectorProviderAuthority: ctx.vectorProviderAuthority,
   });
   const localAgentConfigDir = preparedRuntimeConfig.agentConfigDir ?? "";
   if (localAgentConfigDir) {

@@ -10,6 +10,7 @@ async function writeFakePiCommand(commandPath: string): Promise<void> {
 if (process.argv.includes("--list-models")) {
   console.log("provider  model");
   console.log("google    gemini-3-flash-preview");
+  console.log("router    Qwen3.8-Flash");
   process.exit(0);
 }
 console.log(JSON.stringify({ type: "agent_start" }));
@@ -59,6 +60,7 @@ const fs = require("node:fs");
 if (process.argv.includes("--list-models")) {
   console.log("provider  model");
   console.log("google    gemini-3-flash-preview");
+  console.log("router    Qwen3.8-Flash");
   process.exit(0);
 }
 ${envDumpPath ? `fs.writeFileSync(${JSON.stringify(envDumpPath)}, JSON.stringify(process.env));` : ""}
@@ -156,6 +158,7 @@ describe("pi_local execute", () => {
       DATABASE_MIGRATION_URL: "postgres://private-migration",
       PAPERCLIP_VECTOR_INGRESS_SECRET: "private-ingress-secret",
       PAPERCLIP_VECTOR_TOOL_BRIDGE_SECRET: "private-tool-secret",
+      PAPERCLIP_VECTOR_PROVIDER_BRIDGE_SECRET: "private-provider-secret",
       GLEISS_DATABASE_URL: "postgres://private-gleiss",
       OPENROUTER_API_KEY: "provider-key-is-allowed",
     });
@@ -179,11 +182,27 @@ describe("pi_local execute", () => {
         config: {
           command: commandPath,
           cwd: workspace,
-          model: "google/gemini-3-flash-preview",
+          model: "router/Qwen3.8-Flash",
           executionMode: "rpc",
           promptTemplate: "Check the environment.",
         },
-        context: {},
+        context: {
+          vectorProviderAuthority: {
+            providerId: "router",
+            baseUrl: "http://127.0.0.1:1250",
+            api: "anthropic-messages",
+            apiKey: "run-private-router.jwt.signature",
+            models: [{
+              id: "Qwen3.8-Flash",
+              name: "Qwen3.8-Flash",
+              contextWindow: 131072,
+              maxTokens: 32768,
+              reasoning: true,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            }],
+          },
+        },
         authToken: "run-scoped-paperclip-token",
         onLog: async () => {},
       });
@@ -200,10 +219,12 @@ describe("pi_local execute", () => {
         "PAPERCLIP_DATABASE_PROFILE",
         "PAPERCLIP_VECTOR_INGRESS_SECRET",
         "PAPERCLIP_VECTOR_TOOL_BRIDGE_SECRET",
+        "PAPERCLIP_VECTOR_PROVIDER_BRIDGE_SECRET",
         "GLEISS_DATABASE_URL",
       ]) {
         expect(spawned).not.toHaveProperty(forbidden);
       }
+      expect(JSON.stringify(spawned)).not.toContain("run-private-router.jwt.signature");
     } finally {
       for (const key of Object.keys(process.env)) {
         if (!(key in saved)) delete process.env[key];

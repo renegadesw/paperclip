@@ -128,7 +128,38 @@ ambiguous transport failure is not retried with the same ID because a mutating
 tool may already have executed. Higher-level recovery must inspect state before
 issuing a new request ID.
 
+## Run-scoped Vector model authority (disabled by default)
+
+A turn may carry a second opaque, non-secret `providerAuthorityHandle`. It is
+accepted only when signed Vector ingress and the complete provider bridge
+configuration are enabled:
+
+- `PAPERCLIP_VECTOR_PROVIDER_BRIDGE_URL` is the exact literal-loopback Vector OS
+  endpoint `http://127.x.x.x:<port>/internal/paperclip/v1/providers/redeem`.
+- `PAPERCLIP_VECTOR_PROVIDER_BRIDGE_SECRET` is an independent secret of at
+  least 32 characters.
+- `PAPERCLIP_VECTOR_INSTALLATION_ID` and `PAPERCLIP_VECTOR_PROFILE` bind the
+  redemption to the installed runtime scope.
+
+Paperclip retains the opaque handle only in process memory, persists only its
+SHA-256 digest and session-scope marker on the exact run, and redeems it just
+before adapter execution. The redemption request is exact-body HMAC signed and
+binds installation, profile, company, agent, conversation, session, and run.
+Vector OS returns a short-lived router URL and token. Paperclip validates the
+expiry, fetches the router's runtime catalog without following redirects, and
+writes one run-private Pi `models.json` in a `0700` managed directory with mode
+`0600`. Pi receives only `PI_CODING_AGENT_DIR`; the opaque handle, bridge secret,
+router token, and database credentials are not child environment variables or
+invocation metadata. The managed directory is removed after execution.
+
+Provider grants are memory-only and fail closed after a Paperclip restart. The
+run cannot fall back to a deployment-wide provider credential when its provider
+authority is missing, expired, mismatched, or unavailable. When the bridge is
+enabled, a Vector-managed agent pinned to a `router/...` model requires this
+authority on every run; a browser/session identity without a router grant is not
+silently upgraded or allowed to use ambient provider credentials.
+
 This commit establishes the secure callback contract and Pi injection. It does
-not install a FunkyDev filesystem extension, mount the Vector OS handler, resolve
-real authority handles, or connect a product tool executor. Therefore it does
-not make the path end-to-end functional by itself.
+not mount the Vector OS tool/provider handlers, mint real authority handles, or
+connect a product tool executor/provider exchange. Therefore it does not make
+the path end-to-end functional by itself.

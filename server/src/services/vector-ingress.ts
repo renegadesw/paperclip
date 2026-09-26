@@ -30,6 +30,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { issueService } from "./issues.js";
 import { logActivity } from "./activity-log.js";
 import type { VectorToolPendingDescriptor } from "./vector-tool-authority.js";
+import type { VectorProviderPendingDescriptor } from "./vector-provider-authority.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
@@ -56,6 +57,7 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   body: string;
   attachmentIds?: string[];
   authorityHandle?: string;
+  providerAuthorityHandle?: string;
   launchContext?: VectorWorkloadLaunchContext;
 }
 
@@ -238,6 +240,19 @@ export interface VectorIngressToolAuthority {
   }): Promise<void>;
 }
 
+export interface VectorIngressProviderAuthority {
+  registerPending(input: VectorIngressScope & {
+    issueId: string;
+    commentId: string;
+    authorityHandle: string;
+  }): VectorProviderPendingDescriptor;
+  bindRun(input: VectorIngressScope & {
+    issueId: string;
+    runId: string;
+    authorityHandle: string;
+  }): Promise<void>;
+}
+
 export interface VectorIngressTurnResult {
   companyId: string;
   agentId: string;
@@ -320,6 +335,7 @@ export function vectorIngressService(
     heartbeat?: VectorIngressHeartbeat;
     responsibleUserId?: string;
     toolAuthority?: VectorIngressToolAuthority;
+    providerAuthority?: VectorIngressProviderAuthority;
   } = {},
 ) {
   const issuesSvc = issueService(db);
@@ -893,6 +909,11 @@ export function vectorIngressService(
         code: "vector_tool_authority_disabled",
       });
     }
+    if (input.providerAuthorityHandle && !options.providerAuthority) {
+      throw conflict("Vector provider authority is disabled", {
+        code: "vector_provider_authority_disabled",
+      });
+    }
     await assertWorkloadLaunch(input);
     const { issue, ownerId } = await resolveConversation(input);
     const mapping = hasCompleteOwnerScope(input)
@@ -1013,14 +1034,27 @@ export function vectorIngressService(
           authorityHandle: input.authorityHandle,
         })
       : null;
+    const pendingProviderAuthority = input.providerAuthorityHandle
+      ? options.providerAuthority!.registerPending({
+          companyId: input.companyId,
+          agentId: input.agentId,
+          externalSessionId: input.externalSessionId,
+          issueId: issue.id,
+          commentId: comment.id,
+          authorityHandle: input.providerAuthorityHandle,
+        })
+      : null;
     let deliveredRunId: string | null = null;
     await deliverConversationComments(db, issue, async (agentId, wakeup) => {
-      const targetWake = wakeup.idempotencyKey === `conversation-comment:${comment.id}` && pendingAuthority
+      const targetWake = wakeup.idempotencyKey === `conversation-comment:${comment.id}` && (pendingAuthority || pendingProviderAuthority)
         ? {
             ...wakeup,
             contextSnapshot: {
               ...wakeup.contextSnapshot,
-              vectorToolAuthorityPending: pendingAuthority,
+              ...(pendingAuthority ? { vectorToolAuthorityPending: pendingAuthority } : {}),
+              ...(pendingProviderAuthority
+                ? { vectorProviderAuthorityPending: pendingProviderAuthority }
+                : {}),
             },
           }
         : wakeup;
@@ -1079,6 +1113,21 @@ export function vectorIngressService(
         issueId: issue.id,
         runId,
         authorityHandle: input.authorityHandle,
+      });
+    }
+    if (input.providerAuthorityHandle) {
+      if (!runId) {
+        throw conflict("Vector provider authority requires a created run", {
+          code: "vector_provider_authority_run_missing",
+        });
+      }
+      await options.providerAuthority!.bindRun({
+        companyId: input.companyId,
+        agentId: input.agentId,
+        externalSessionId: input.externalSessionId,
+        issueId: issue.id,
+        runId,
+        authorityHandle: input.providerAuthorityHandle,
       });
     }
 

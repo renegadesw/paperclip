@@ -162,6 +162,10 @@ import {
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { prepareActiveVectorToolRuntimeAccess } from "./vector-tool-authority.js";
+import {
+  hasActiveVectorProviderAuthorityBridge,
+  prepareActiveVectorProviderRuntimeAccess,
+} from "./vector-provider-authority.js";
 import { logger } from "../middleware/logger.js";
 import {
   createGitRemoteAuthProvider,
@@ -23604,9 +23608,20 @@ export function heartbeatService(
             issueId: issueRef?.id ?? null,
             pending: context.vectorToolAuthorityPending,
           });
+          const vectorProviderAuthority = await prepareActiveVectorProviderRuntimeAccess({
+            runId: run.id,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issueRef?.id ?? null,
+            pending: context.vectorProviderAuthorityPending,
+            bound: context.vectorProviderAuthority,
+            required: hasActiveVectorProviderAuthorityBridge() &&
+              typeof runtimeConfig.model === "string" &&
+              runtimeConfig.model.startsWith("router/"),
+          });
           if (nativeRuntimeResolution.kind === "native") {
-            if (vectorToolAuthority) {
-              throw new Error("Vector tool authority requires an adapter runtime");
+            if (vectorToolAuthority || vectorProviderAuthority) {
+              throw new Error("Vector runtime authority requires an adapter runtime");
             }
             if (!nativeExecution || !nativeRunnerInstanceId)
               throw new Error("native_runtime_selection_not_persisted");
@@ -23949,6 +23964,7 @@ export function heartbeatService(
                     runtimeMcp,
                     runtimeTools,
                     vectorToolAuthority: vectorToolAuthority ?? undefined,
+                    vectorProviderAuthority: vectorProviderAuthority ?? undefined,
                     onLog,
                     onMeta: onAdapterMeta,
                     onEvent: onAdapterEvent,

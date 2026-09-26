@@ -30,6 +30,7 @@ import {
   vectorConversationOwnerId,
   vectorIngressService,
   type VectorIngressHeartbeat,
+  type VectorIngressProviderAuthority,
   type VectorIngressToolAuthority,
 } from "../services/vector-ingress.js";
 import type { VectorRuntimeScope } from "../services/vector-runtime-scope.js";
@@ -558,6 +559,52 @@ const support = await getEmbeddedPostgresTestSupport();
         commentId: result.commentId,
       });
       expect(JSON.stringify(context)).not.toContain("opaque-vector-handle");
+    });
+
+    it("persists only a provider marker and never the opaque provider handle", async () => {
+      const commentMarker = {
+        version: 1 as const,
+        handleSha256: "b".repeat(64),
+        sessionScope: "provider-session-scope",
+        commentId: "filled-by-register",
+      };
+      const registerPending = vi.fn((input: { commentId: string }) => ({
+        ...commentMarker,
+        commentId: input.commentId,
+      }));
+      const bindRun = vi.fn().mockResolvedValue(undefined);
+      const providerAuthority = { registerPending, bindRun } as unknown as VectorIngressProviderAuthority;
+      const service = vectorIngressService(db, { heartbeat, providerAuthority });
+      const result = await service.addTurn({
+        companyId,
+        agentId,
+        externalSessionId: "provider-authority-thread",
+        clientRequestId: "provider-authority-turn",
+        body: "Use the delegated model route",
+        providerAuthorityHandle: "opaque-provider-authority-handle",
+      });
+      expect(registerPending).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        commentId: result.commentId,
+        authorityHandle: "opaque-provider-authority-handle",
+      }));
+      expect(bindRun).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        runId: result.runId,
+        authorityHandle: "opaque-provider-authority-handle",
+      }));
+      const context = await db.select({ value: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, result.runId!))
+        .then((rows) => rows[0]?.value);
+      expect(context?.vectorProviderAuthorityPending).toEqual({
+        ...commentMarker,
+        commentId: result.commentId,
+      });
+      expect(JSON.stringify(context)).not.toContain("opaque-provider-authority-handle");
     });
 
     it("replays one client request only with the same authority handle", async () => {

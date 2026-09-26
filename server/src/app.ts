@@ -186,6 +186,11 @@ import {
   setActiveVectorToolAuthorityBridge,
   VectorToolAuthorityBridge,
 } from "./services/vector-tool-authority.js";
+import {
+  resolveVectorProviderAuthorityConfig,
+  setActiveVectorProviderAuthorityBridge,
+  VectorProviderAuthorityBridge,
+} from "./services/vector-provider-authority.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -594,15 +599,21 @@ export async function createApp(
     opts.vectorRuntimeScope ?? null,
   );
   const vectorToolAuthorityConfig = resolveVectorToolAuthorityConfig(process.env);
+  const vectorProviderAuthorityConfig = resolveVectorProviderAuthorityConfig(process.env);
   setActiveVectorToolAuthorityBridge(null);
-  if (vectorToolAuthorityConfig && !vectorIngressAuth) {
-    throw new Error("Vector tool authority requires signed Vector ingress");
+  setActiveVectorProviderAuthorityBridge(null);
+  if ((vectorToolAuthorityConfig || vectorProviderAuthorityConfig) && !vectorIngressAuth) {
+    throw new Error("Vector runtime authority requires signed Vector ingress");
   }
   if (vectorIngressAuth) {
     const vectorToolAuthority = vectorToolAuthorityConfig
       ? new VectorToolAuthorityBridge(db, vectorToolAuthorityConfig)
       : null;
+    const vectorProviderAuthority = vectorProviderAuthorityConfig
+      ? new VectorProviderAuthorityBridge(db, vectorProviderAuthorityConfig)
+      : null;
     setActiveVectorToolAuthorityBridge(vectorToolAuthority);
+    setActiveVectorProviderAuthorityBridge(vectorProviderAuthority);
     // This service-to-service boundary has its own exact-body HMAC and direct
     // loopback-peer check. Keep it outside the board mutation router: Vector OS
     // is neither a board session nor an agent API-key principal.
@@ -614,6 +625,7 @@ export async function createApp(
           heartbeat: connectionIntentHeartbeat,
           responsibleUserId: vectorIngressAuth.responsibleUserId,
           toolAuthority: vectorToolAuthority ?? undefined,
+          providerAuthority: vectorProviderAuthority ?? undefined,
         }),
         toolAuthority: vectorToolAuthority ?? undefined,
       }),

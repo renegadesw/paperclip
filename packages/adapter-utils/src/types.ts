@@ -226,6 +226,14 @@ export interface AdapterExecutionContext {
     bearerToken: string;
     tools: readonly string[];
   };
+  /** Deployment-owned, run-scoped Vector model route. Never sourced from agent config. */
+  vectorProviderAuthority?: {
+    providerId: string;
+    baseUrl: string;
+    api: string;
+    apiKey: string;
+    models: readonly Record<string, unknown>[];
+  };
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onMeta?: (meta: AdapterInvocationMeta) => Promise<void>;
   onEvent?: (event: AdapterRuntimeEvent) => Promise<void>;

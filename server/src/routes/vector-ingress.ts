@@ -105,6 +105,7 @@ const turnSchema = z.object({
   body: z.string().min(1).max(1_000_000),
   attachmentIds: z.array(z.string().uuid()).max(20).optional(),
   authorityHandle: z.string().trim().min(1).max(1024).optional(),
+  providerAuthorityHandle: z.string().trim().min(1).max(1024).optional(),
   launchContext: vectorWorkloadLaunchSchema.optional(),
 }).superRefine(requireCompleteOwnerScope);
 
