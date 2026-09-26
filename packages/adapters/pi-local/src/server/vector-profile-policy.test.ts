@@ -209,15 +209,15 @@ describe("Vector Pi profile isolation", () => {
     })).rejects.toThrow("forbids packaged Pi extensions with filesystem or shell authority");
   });
 
-  it("records callback-bound legacy tools as blocked rather than claiming name-only parity", () => {
+  it("records callback-bound tools by their implemented authority parity", () => {
     const statuses = new Map(FUNKYDEV_CAPABILITY_INVENTORY.map((entry) => [entry.capability, entry.status]));
     expect(statuses.get("vault-reference")).toBe("ported");
     expect(statuses.get("voice-marker")).toBe("ported");
     expect(statuses.get("pi-builtins")).toBe("native");
-    expect(statuses.get("operator-question")).toBe("blocked");
-    expect(statuses.get("todos")).toBe("blocked");
+    expect(statuses.get("operator-question")).toBe("ported");
+    expect(statuses.get("todos")).toBe("ported");
     expect(statuses.get("github-broker")).toBe("blocked");
-    expect(statuses.get("personal-memory")).toBe("blocked");
+    expect(statuses.get("personal-memory")).toBe("ported");
     expect(statuses.get("vector-os-mcp")).toBe("blocked");
     expect(statuses.get("rctl")).toBe("external");
   });

@@ -53,14 +53,14 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
   {
     capability: "operator-question",
     tools: ["ask_user"],
-    status: "blocked",
-    dependency: "Paperclip must route Pi extension_ui_request/response over the Vector chat continuation contract.",
+    status: "ported",
+    dependency: "Uses the run-scoped Vector callback authority and durable llm.paperclip_questions continuation state.",
   },
   {
     capability: "todos",
     tools: ["todo_add", "todo_list", "todo_update", "todo_mark_done"],
-    status: "blocked",
-    dependency: "The current tools call legacy /v1/todos endpoints with a legacy session token.",
+    status: "ported",
+    dependency: "Uses the run-scoped Vector callback authority and durable llm.paperclip_todos state; workers are bound to their launched todo.",
   },
   {
     capability: "github-broker",
@@ -71,8 +71,8 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
   {
     capability: "personal-memory",
     tools: ["memory_save", "memory_search", "memory_forget"],
-    status: "blocked",
-    dependency: "The current tools call legacy /v1/memories endpoints and require run-scoped user authority.",
+    status: "ported",
+    dependency: "Uses the run-scoped Vector callback authority and canonical owner-scoped personal memory store.",
   },
   {
     capability: "voice-marker",

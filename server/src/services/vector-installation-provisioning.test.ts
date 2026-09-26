@@ -35,7 +35,7 @@ async function fixture() {
       permissions: { filesystem: true, shell: false },
     }, {
       name: "vector.tool-bridge",
-      tools: ["ask_user", "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
+      tools: ["ask_user", "github_api", "github_manage", "github_read", "github_repo", "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
       permissions: { filesystem: false, shell: false },
     }, {
       name: "vector.speak",
@@ -119,7 +119,14 @@ describe("Vector installation provisioning", () => {
       ...f.manifest, profile: "standard",
       agent: { ...f.manifest.agent, name: "Standard Chat", role: "standard-chat" },
       additionalAgents: [worker],
-      toolPolicy: { profile: "standard", builtinTools: [], extensions: [f.toolPolicy.extensions[1], f.toolPolicy.extensions[2]] },
+      toolPolicy: {
+        profile: "standard",
+        builtinTools: [],
+        extensions: [{
+          ...f.toolPolicy.extensions[1],
+          tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
+        }, f.toolPolicy.extensions[2]],
+      },
     };
     expect(vectorInstallationManifestSchema.safeParse(standard).success).toBe(true);
     expect(vectorInstallationManifestSchema.safeParse({ ...standard, additionalAgents: [] }).success).toBe(false);
