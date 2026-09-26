@@ -554,6 +554,7 @@ const support = await getEmbeddedPostgresTestSupport();
         clientRequestId: "authority-turn",
         body: "Use my memory",
         authorityHandle: "opaque-vector-handle",
+        authorityTools: ["memory_search"],
       });
       expect(registerPending).toHaveBeenCalledWith(expect.objectContaining({
         companyId,
@@ -561,6 +562,7 @@ const support = await getEmbeddedPostgresTestSupport();
         issueId: result.issueId,
         commentId: result.commentId,
         authorityHandle: "opaque-vector-handle",
+        allowedTools: ["memory_search"],
       }));
       expect(bindRun).toHaveBeenCalledWith(expect.objectContaining({
         companyId,
@@ -627,7 +629,7 @@ const support = await getEmbeddedPostgresTestSupport();
 
     it("replays one client request only with the same authority handle", async () => {
       const toolAuthority = new VectorToolAuthorityBridge(db, {
-        endpoint: new URL("http://127.0.0.1:32160/internal/paperclip/v1/tools/call"),
+        endpoint: new URL("http://127.0.0.1:32160/inbound/paperclip/v1/tools/call"),
         callbackUrl: new URL("http://127.0.0.1:3100/api/internal/vector/v1/tools/callback"),
         installationId: "test-installation",
         profile: "standard",
@@ -643,6 +645,7 @@ const support = await getEmbeddedPostgresTestSupport();
         clientRequestId: "authority-replay-turn",
         body: "Search memory once",
         authorityHandle: "opaque-authority-replay-handle",
+        authorityTools: ["memory_search"],
       };
       const first = await service.addTurn(input);
       await expect(service.addTurn(input)).resolves.toMatchObject({

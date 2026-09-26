@@ -6,7 +6,7 @@ import { heartbeatRuns, type Db } from "@paperclipai/db";
 import { conflict, unauthorized, unprocessable } from "../errors.js";
 
 const CALLBACK_PATH = "/api/internal/vector/v1/tools/callback";
-const VECTOR_TOOL_PATH = "/internal/paperclip/v1/tools/call";
+const VECTOR_TOOL_PATH = "/inbound/paperclip/v1/tools/call";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
 const MAX_RESPONSE_BYTES = 1_000_000;
 const DEFAULT_CALLBACK_TIMEOUT_MS = 30_000;
@@ -46,6 +46,7 @@ type Grant = VectorToolAuthorityScope & {
   bearerToken: string;
   expiresAt: number;
   requestIds: Set<string>;
+  allowedTools: string[];
 };
 
 type PendingGrant = Omit<VectorToolAuthorityScope, "runId"> & {
@@ -54,6 +55,7 @@ type PendingGrant = Omit<VectorToolAuthorityScope, "runId"> & {
   handleSha256: string;
   sessionScope: string;
   expiresAt: number;
+  allowedTools: string[];
 };
 
 export type VectorToolAuthorityConfig = {
@@ -236,6 +238,7 @@ export class VectorToolAuthorityBridge {
   registerPending(input: Omit<VectorToolAuthorityScope, "runId"> & {
     commentId: string;
     authorityHandle: string;
+    allowedTools?: readonly string[];
   }): VectorToolPendingDescriptor {
     const authorityHandle = input.authorityHandle.trim();
     if (!authorityHandle || authorityHandle.length > 1024 || !input.commentId.trim()) {
@@ -244,6 +247,17 @@ export class VectorToolAuthorityBridge {
       });
     }
     const handleSha256 = createHash("sha256").update(authorityHandle).digest("hex");
+    const requestedTools = input.allowedTools ?? this.config.allowedTools;
+    const allowedTools = [...new Set(requestedTools)].sort();
+    if (
+      allowedTools.length === 0 ||
+      allowedTools.length !== requestedTools.length ||
+      allowedTools.some((tool) => !this.config.allowedTools.includes(tool))
+    ) {
+      throw unprocessable("Vector tool authority exceeds the installed tool surface", {
+        code: "vector_tool_not_approved",
+      });
+    }
     const sessionScope = vectorToolSessionScope(input);
     const key = this.pendingKey(input);
     const existing = this.pending.get(key);
@@ -253,7 +267,8 @@ export class VectorToolAuthorityBridge {
         existing.agentId !== input.agentId ||
         existing.issueId !== input.issueId ||
         existing.externalSessionId !== input.externalSessionId ||
-        existing.authorityHandle !== authorityHandle
+        existing.authorityHandle !== authorityHandle ||
+        JSON.stringify(existing.allowedTools) !== JSON.stringify(allowedTools)
       ) {
         throw conflict("Vector tool authority is already pending for different scope", {
           code: "vector_tool_authority_scope_conflict",
@@ -265,6 +280,7 @@ export class VectorToolAuthorityBridge {
         authorityHandle,
         handleSha256,
         sessionScope,
+        allowedTools,
         expiresAt: this.now() + this.config.ttlSeconds * 1000,
       });
     }
@@ -322,6 +338,7 @@ export class VectorToolAuthorityBridge {
       issueId: grant.issueId,
       runId: input.runId,
       authorityHandle: grant.authorityHandle,
+      allowedTools: grant.allowedTools,
     });
     const access = this.runtimeAccess(input);
     if (!access) {
@@ -332,7 +349,7 @@ export class VectorToolAuthorityBridge {
     return access;
   }
 
-  async bindRun(input: VectorToolAuthorityScope & { authorityHandle: string }): Promise<void> {
+  async bindRun(input: VectorToolAuthorityScope & { authorityHandle: string; allowedTools?: readonly string[] }): Promise<void> {
     const authorityHandle = input.authorityHandle.trim();
     if (!authorityHandle || authorityHandle.length > 1024) {
       throw unprocessable("Vector tool authority handle is invalid", {
@@ -341,6 +358,12 @@ export class VectorToolAuthorityBridge {
     }
     const handleSha256 = createHash("sha256").update(authorityHandle).digest("hex");
     const sessionScope = vectorToolSessionScope(input);
+    const allowedTools = [...new Set(input.allowedTools ?? this.config.allowedTools)].sort();
+    if (allowedTools.length === 0 || allowedTools.some((tool) => !this.config.allowedTools.includes(tool))) {
+      throw unprocessable("Vector tool authority exceeds the installed tool surface", {
+        code: "vector_tool_not_approved",
+      });
+    }
     const [bound] = await this.db
       .update(heartbeatRuns)
       .set({
@@ -383,7 +406,8 @@ export class VectorToolAuthorityBridge {
       existing.agentId !== input.agentId ||
       existing.issueId !== input.issueId ||
       existing.sessionScope !== sessionScope ||
-      existing.authorityHandle !== authorityHandle
+      existing.authorityHandle !== authorityHandle ||
+      JSON.stringify(existing.allowedTools) !== JSON.stringify(allowedTools)
     )) {
       throw conflict("Vector tool authority is already bound to different scope", {
         code: "vector_tool_authority_scope_conflict",
@@ -398,6 +422,7 @@ export class VectorToolAuthorityBridge {
       bearerToken: randomBytes(32).toString("base64url"),
       expiresAt: this.now() + this.config.ttlSeconds * 1000,
       requestIds: new Set(),
+      allowedTools,
     });
   }
 
@@ -413,7 +438,7 @@ export class VectorToolAuthorityBridge {
     return {
       callbackUrl: this.config.callbackUrl.toString(),
       bearerToken: grant.bearerToken,
-      tools: this.config.allowedTools,
+      tools: grant.allowedTools,
     };
   }
 
@@ -429,7 +454,7 @@ export class VectorToolAuthorityBridge {
     if (!grant || grant.expiresAt <= this.now()) {
       throw unauthorized("Vector tool callback token is invalid or expired");
     }
-    if (!this.config.allowedTools.includes(input.tool)) {
+    if (!grant.allowedTools.includes(input.tool)) {
       throw unprocessable("Vector tool is not approved for this installation profile", {
         code: "vector_tool_not_approved",
       });

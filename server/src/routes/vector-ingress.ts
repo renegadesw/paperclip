@@ -127,6 +127,7 @@ const turnSchema = z.object({
   body: z.string().min(1).max(1_000_000),
   attachmentIds: z.array(z.string().uuid()).max(20).optional(),
   authorityHandle: z.string().trim().min(1).max(1024).optional(),
+  authorityTools: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/)).min(1).max(64).optional(),
   providerAuthorityHandle: z.string().trim().min(1).max(1024).optional(),
   launchContext: vectorWorkloadLaunchSchema.optional(),
   roleContext: vectorRoleTurnSchema.optional(),
@@ -135,6 +136,14 @@ const turnSchema = z.object({
   requireCompleteOwnerScope(value, ctx);
   if ([value.launchContext, value.roleContext, value.personaContext].filter(Boolean).length > 1) {
     ctx.addIssue({ code: "custom", message: "launchContext, roleContext, and personaContext are mutually exclusive" });
+  }
+  if (Boolean(value.authorityHandle) !== Boolean(value.authorityTools)) {
+    ctx.addIssue({ code: "custom", message: "authorityHandle and authorityTools must be supplied together" });
+  }
+  if (value.launchContext?.tools.length &&
+      JSON.stringify([...new Set(value.launchContext.tools)].sort()) !==
+        JSON.stringify([...(value.authorityTools ?? [])].sort())) {
+    ctx.addIssue({ code: "custom", message: "workload authorityTools must exactly match launchContext.tools" });
   }
 });
 
