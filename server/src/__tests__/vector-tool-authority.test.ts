@@ -156,6 +156,83 @@ const support = await getEmbeddedPostgresTestSupport();
     });
   });
 
+  it("consumes pending authority before adapter dispatch and fails closed after restart", async () => {
+    const run = await createRun();
+    const bridge = new VectorToolAuthorityBridge(db, config(), vi.fn());
+    const descriptor = bridge.registerPending({
+      companyId,
+      agentId,
+      externalSessionId: "browser-session-pending",
+      issueId,
+      commentId: randomUUID(),
+      authorityHandle: "opaque-pending-handle",
+    });
+    expect(descriptor).toMatchObject({
+      version: 1,
+      handleSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      sessionScope: expect.any(String),
+      commentId: expect.any(String),
+    });
+    expect(JSON.stringify(descriptor)).not.toContain("opaque-pending-handle");
+
+    let releaseBind!: () => void;
+    let bindEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { bindEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseBind = resolve; });
+    const originalBind = bridge.bindRun.bind(bridge);
+    vi.spyOn(bridge, "bindRun").mockImplementation(async (input) => {
+      bindEntered();
+      await release;
+      return originalBind(input);
+    });
+    let adapterStarted = false;
+    const dispatch = (async () => {
+      const access = await bridge.bindPendingRun({ companyId, agentId, issueId, runId: run.id, pending: descriptor });
+      adapterStarted = true;
+      return access;
+    })();
+    await entered;
+    expect(adapterStarted).toBe(false);
+    releaseBind();
+    const firstAccess = await dispatch;
+    expect(firstAccess).toMatchObject({ tools: ["fs.read", "fs.write"] });
+    expect(adapterStarted).toBe(true);
+
+    // Heartbeat/provider retries retain the pending descriptor in the durable
+    // run snapshot. In the same process they must reach the adapter with the
+    // exact original runtime grant rather than attempting to consume it again.
+    let retryAdapterAccess: typeof firstAccess | null = null;
+    retryAdapterAccess = await bridge.bindPendingRun({
+      companyId,
+      agentId,
+      issueId,
+      runId: run.id,
+      pending: descriptor,
+    });
+    expect(retryAdapterAccess).toEqual(firstAccess);
+
+    const secondRun = await createRun();
+    const pendingBeforeRestart = bridge.registerPending({
+      companyId,
+      agentId,
+      externalSessionId: "browser-session-restart",
+      issueId,
+      commentId: randomUUID(),
+      authorityHandle: "opaque-restart-handle",
+    });
+    const restarted = new VectorToolAuthorityBridge(db, config(), vi.fn());
+    await expect(restarted.bindPendingRun({
+      companyId,
+      agentId,
+      issueId,
+      runId: secondRun.id,
+      pending: pendingBeforeRestart,
+    })).rejects.toMatchObject({
+      status: 409,
+      details: { code: "vector_tool_authority_pending_missing" },
+    });
+  });
+
   it("proxies exact signed scope, rejects unknown tools and rejects replay", async () => {
     const run = await createRun();
     const fetchMock = vi.fn(async (_url: URL, init?: RequestInit) => {
