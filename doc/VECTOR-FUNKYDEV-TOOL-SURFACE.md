@@ -19,10 +19,10 @@ also contains:
 | Capability | Tools | Paperclip status |
 | --- | --- | --- |
 | Read-only Vault reference | `vault_search`, `vault_read` | Ported as a package asset; runtime selection requires the sealed engineering release manifest |
-| Operator question | `ask_user` | Blocked: needs RPC UI request/response continuation through Vector OS |
-| Todos | `todo_add`, `todo_list`, `todo_update`, `todo_mark_done` | Blocked: current extension calls legacy `/v1/todos` |
+| Operator question | `ask_user` | Paperclip callback bridge packaged; Vector OS must provide the durable question executor before activation |
+| Todos | `todo_add`, `todo_list`, `todo_update`, `todo_mark_done` | Paperclip callback bridge packaged; Vector OS must provide owner-scoped executors before activation |
 | GitHub broker | `github_read`, `github_manage`, `github_api`, `github_repo` | Blocked: current extension calls legacy broker endpoints with a legacy session capability |
-| Personal memory | `memory_save`, `memory_search`, `memory_forget` | Blocked: current extension calls legacy memory endpoints and needs run-scoped user authority |
+| Personal memory | `memory_save`, `memory_search`, `memory_forget` | Paperclip callback bridge packaged; Vector OS must provide the three owner-scoped executors before activation |
 | Voice marker | `speak` | Blocked: local extension is reusable, but the Paperclip event still needs projection onto the existing Vector client frame contract |
 | LLM meter | no model-callable tool | Not ported: Paperclip owns its run usage/cost accounting |
 | Vector `/os/mcp` | server-defined analyst tools | Not current FunkyDev behavior; it belongs to the `funky-analyst` path and must not be imported without an explicit Vector identity contract |
@@ -52,6 +52,7 @@ Paperclip process. The entry is shaped as:
   "path": "/absolute/release/tool-assets/engineering/funkydev-vault-reference.ts",
   "sha256": "b1620c829005975722da51115dd57ab17783b76523a90f3abe3cbab043525ce9",
   "tools": ["vault_read", "vault_search"],
+  "delivery": "local",
   "permissions": { "filesystem": true, "shell": false }
 }
 ```
@@ -96,11 +97,10 @@ negative contracts.
 ## Remaining compatibility seams
 
 Do not copy the remaining legacy extensions until their authority exists on
-the new path. Their minimum contracts are:
+the new path. Paperclip now supplies a private, run-scoped callback capability
+for the approved todo, question, and memory tool names, but activation still
+depends on matching Vector OS executors. The remaining minimum contracts are:
 
-- a run-scoped Paperclip-to-Vector capability that names the acting user,
-  installation, session/run, and allowed operation surface without placing a
-  master credential in Pi's env or transcript;
 - Vector OS compatibility endpoints for memory, GitHub and task/todo calls, or
   replacements whose response and refusal semantics are intentionally mapped;
 - bidirectional handling of Pi's `extension_ui_request` and

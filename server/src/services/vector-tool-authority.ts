@@ -9,6 +9,14 @@ const CALLBACK_PATH = "/api/internal/vector/v1/tools/callback";
 const VECTOR_TOOL_PATH = "/internal/paperclip/v1/tools/call";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
 const MAX_RESPONSE_BYTES = 1_000_000;
+const DEFAULT_CALLBACK_TIMEOUT_MS = 30_000;
+const ASK_USER_CALLBACK_TIMEOUT_MS = 15 * 60_000;
+
+export function vectorToolCallbackTimeoutMs(tool: string): number {
+  return tool === "ask_user"
+    ? ASK_USER_CALLBACK_TIMEOUT_MS
+    : DEFAULT_CALLBACK_TIMEOUT_MS;
+}
 
 export type VectorToolAuthorityScope = {
   companyId: string;
@@ -82,7 +90,7 @@ function requireLoopbackHttpUrl(raw: string, expectedPath: string, envName: stri
   return url;
 }
 
-function packagedToolNames(raw: string | undefined): string[] {
+function packagedToolNames(raw: string | undefined, activeProfile: string): string[] {
   if (!raw?.trim()) return [];
   let value: unknown;
   try {
@@ -98,12 +106,25 @@ function packagedToolNames(raw: string | undefined): string[] {
       throw new Error(`Packaged Pi extension entry ${index} must be an object`);
     }
     const record = entry as Record<string, unknown>;
-    const unknownKeys = Object.keys(record).filter((key) => !["path", "sha256", "tools"].includes(key));
+    const unknownKeys = Object.keys(record).filter((key) =>
+      !["profile", "path", "sha256", "tools", "permissions", "delivery"].includes(key)
+    );
     if (unknownKeys.length > 0) {
       throw new Error(`Packaged Pi extension entry ${index} contains unknown fields`);
     }
     if (typeof record.path !== "string" || !path.isAbsolute(record.path)) {
       throw new Error(`Packaged Pi extension entry ${index} requires an absolute path`);
+    }
+    if (typeof record.profile !== "string" || !record.profile.trim()) {
+      throw new Error(`Packaged Pi extension entry ${index} requires a profile`);
+    }
+    if (record.profile.trim().toLowerCase() !== activeProfile) {
+      throw new Error(`Packaged Pi extension entry ${index} does not match the active profile`);
+    }
+    if (record.delivery !== "local" && record.delivery !== "callback") {
+      throw new Error(
+        `Packaged Pi extension entry ${index} requires delivery "local" or "callback"`,
+      );
     }
     if (typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.sha256)) {
       throw new Error(`Packaged Pi extension entry ${index} requires a lowercase SHA-256 digest`);
@@ -117,7 +138,7 @@ function packagedToolNames(raw: string | undefined): string[] {
     )) {
       throw new Error(`Packaged Pi extension entry ${index} contains an invalid tool name`);
     }
-    return tools as string[];
+    return record.delivery === "callback" ? tools as string[] : [];
   });
   return [...new Set(names)].sort();
 }
@@ -140,7 +161,10 @@ export function resolveVectorToolAuthorityConfig(
   if (secret!.length < 32) {
     throw new Error("PAPERCLIP_VECTOR_TOOL_BRIDGE_SECRET must be at least 32 characters");
   }
-  const allowedTools = packagedToolNames(env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS);
+  const allowedTools = packagedToolNames(
+    env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS,
+    profile!,
+  );
   if (allowedTools.length === 0) {
     throw new Error("Vector tool authority requires at least one packaged extension tool");
   }
@@ -463,7 +487,7 @@ export class VectorToolAuthorityBridge {
         }),
       },
       body: rawBody,
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(vectorToolCallbackTimeoutMs(input.tool)),
     });
     const body = Buffer.from(await response.arrayBuffer());
     if (body.length > MAX_RESPONSE_BYTES) {

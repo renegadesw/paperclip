@@ -87,15 +87,24 @@ that field only when the complete tool bridge configuration is present:
   characters. It is not the Vector ingress secret or a user bearer.
 - `PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS` is the existing deployment-owned,
   hash-pinned extension manifest. Its strict `tools` lists are the maximum tool
-  set. Agent configuration cannot add a tool.
+  set. Agent configuration cannot add a tool. Only entries with
+  `"delivery":"callback"` enter the run capability. Local entries, such as the
+  Vault reader, remain outside the callback bridge.
 
 Paperclip binds a SHA-256 digest of the authority handle plus the installation profile
 and external-session scope to the exact company, agent, conversation, and active
-run. It then mints a random callback bearer for that run and injects only the
-callback URL, bearer, and approved tool names into the Pi process. The callback
-does not accept caller-selected scope. Paperclip reconstructs the bound scope,
-signs the exact body with the bridge secret, and sends it to Vector OS over
-literal loopback with redirects disabled.
+run. It then mints a random callback bearer for that run and writes the callback
+URL, bearer, and approved tool names to a run-private `0600` capability file in a
+`0700` directory. Pi receives only the capability-file path. The packaged bridge
+extension reads and unlinks the file once at module load. Paperclip removes the
+directory after execution and omits the path from invocation metadata. Remote Pi
+execution fails closed until it has an equivalent private delivery channel.
+
+The callback does not accept caller-selected scope. Paperclip reconstructs the
+bound scope, signs the exact body with the bridge secret, and sends it to Vector
+OS over literal loopback with redirects disabled. Ordinary callbacks have a
+30-second bound. The blocking `ask_user` continuation has a distinct 15-minute
+bound and remains tied to run cancellation.
 
 Callback grants and replay state are memory-only. A Paperclip restart invalidates
 all callback bearers; the persisted run binding hash remains as a fail-closed

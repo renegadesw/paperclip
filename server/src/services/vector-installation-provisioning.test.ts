@@ -472,7 +472,7 @@ describe("Vector installation provisioning", () => {
     second.manifest.agent = {
       ...second.manifest.agent,
       id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      name: "FunkyDev Two",
+      name: "FunkyDev",
     };
     const port = memoryPort();
     await reconcileVectorInstallation(port, {

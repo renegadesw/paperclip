@@ -11,6 +11,7 @@ import {
 import {
   resolveVectorToolAuthorityConfig,
   signVectorToolRequest,
+  vectorToolCallbackTimeoutMs,
   VectorToolAuthorityBridge,
 } from "../services/vector-tool-authority.js";
 import {
@@ -33,6 +34,11 @@ function config() {
 }
 
 describe("Vector tool authority configuration", () => {
+  it("allows the blocking ask_user continuation without widening ordinary tool timeouts", () => {
+    expect(vectorToolCallbackTimeoutMs("ask_user")).toBe(15 * 60_000);
+    expect(vectorToolCallbackTimeoutMs("todo_write")).toBe(30_000);
+  });
+
   it("is disabled by default and requires a complete literal-loopback configuration", () => {
     expect(resolveVectorToolAuthorityConfig({})).toBeNull();
     expect(() => resolveVectorToolAuthorityConfig({
@@ -41,7 +47,14 @@ describe("Vector tool authority configuration", () => {
       PAPERCLIP_VECTOR_INSTALLATION_ID: "t480-funkydev",
       PAPERCLIP_VECTOR_PROFILE: "engineering",
       PAPERCLIP_VECTOR_TOOL_BRIDGE_SECRET: bridgeSecret,
-      PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS: JSON.stringify([{ path: "/opt/vector/extensions/fs.ts", sha256: "a".repeat(64), tools: ["fs.read"] }]),
+      PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS: JSON.stringify([{
+        profile: "engineering",
+        path: "/opt/vector/extensions/fs.ts",
+        sha256: "a".repeat(64),
+        tools: ["fs.read"],
+        permissions: { filesystem: false, shell: false },
+        delivery: "callback",
+      }]),
     })).toThrow(/literal loopback/);
     expect(() => resolveVectorToolAuthorityConfig({
       PAPERCLIP_VECTOR_TOOL_BRIDGE_URL: "http://127.0.0.1:32160/internal/paperclip/v1/tools/call",
@@ -56,7 +69,22 @@ describe("Vector tool authority configuration", () => {
       PAPERCLIP_VECTOR_PROFILE: "engineering",
       PAPERCLIP_VECTOR_TOOL_BRIDGE_SECRET: bridgeSecret,
       PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS: JSON.stringify([
-        { path: "/opt/vector/extensions/fs.ts", sha256: "a".repeat(64), tools: ["fs.write", "fs.read", "fs.read"] },
+        {
+          profile: "engineering",
+          path: "/opt/vector/extensions/vault.ts",
+          sha256: "b".repeat(64),
+          tools: ["vault_read"],
+          permissions: { filesystem: true, shell: false },
+          delivery: "local",
+        },
+        {
+          profile: "engineering",
+          path: "/opt/vector/extensions/vector-tool-bridge.ts",
+          sha256: "a".repeat(64),
+          tools: ["fs.write", "fs.read", "fs.read"],
+          permissions: { filesystem: false, shell: false },
+          delivery: "callback",
+        },
       ]),
     })?.allowedTools).toEqual(["fs.read", "fs.write"]);
   });

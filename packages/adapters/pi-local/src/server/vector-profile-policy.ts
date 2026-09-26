@@ -16,6 +16,7 @@ type PackagedExtension = {
   path: string;
   sha256: string;
   tools: string[];
+  delivery: "local" | "callback";
   permissions: {
     filesystem: boolean;
     shell: boolean;
@@ -225,6 +226,7 @@ function parsePackagedExtensions(raw: string | undefined, activeProfile: string)
     const tools = Array.isArray(record.tools)
       ? record.tools.map((tool) => typeof tool === "string" ? tool.trim() : "")
       : [];
+    const delivery = record.delivery === undefined ? "local" : record.delivery;
     const permissions = typeof record.permissions === "object" && record.permissions !== null && !Array.isArray(record.permissions)
       ? record.permissions as Record<string, unknown>
       : {};
@@ -244,6 +246,11 @@ function parsePackagedExtensions(raw: string | undefined, activeProfile: string)
     if (tools.some((tool) => !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(tool))) {
       throw new Error(`Packaged Pi extension entry ${index} contains an invalid tool name.`);
     }
+    if (delivery !== "local" && delivery !== "callback") {
+      throw new Error(
+        `Packaged Pi extension entry ${index} requires delivery "local" or "callback".`,
+      );
+    }
     if (typeof permissions.filesystem !== "boolean" || typeof permissions.shell !== "boolean") {
       throw new Error(
         `Packaged Pi extension entry ${index} must explicitly declare boolean filesystem and shell permissions.`,
@@ -259,6 +266,7 @@ function parsePackagedExtensions(raw: string | undefined, activeProfile: string)
       path: path.resolve(extensionPath),
       sha256,
       tools: Array.from(new Set(tools)),
+      delivery,
       permissions: {
         filesystem: permissions.filesystem,
         shell: permissions.shell,

@@ -58,12 +58,72 @@ import { ensurePiModelConfiguredAndAvailable } from "./models.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { buildPiBuiltinToolArgs } from "./tools.js";
 import { prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
+import { prepareVectorToolCapability } from "./vector-tool-capability.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 const PAPERCLIP_SESSIONS_DIR = path.join(os.homedir(), ".pi", "paperclips");
 const PI_AGENT_SKILLS_DIR = path.join(os.homedir(), ".pi", "agent", "skills");
+
+const VECTOR_PI_INHERITED_ENV_KEYS = new Set([
+  "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+  "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "USER", "USERNAME",
+  "LOGNAME", "SHELL", "LANG", "LANGUAGE", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP",
+  "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+  "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE_URL",
+  "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+  "OPENROUTER_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "XAI_API_KEY",
+  "OLLAMA_HOST", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+  "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+]);
+
+const VECTOR_PI_EXPLICIT_ENV_KEYS = new Set([
+  ...VECTOR_PI_INHERITED_ENV_KEYS,
+  "AGENT_HOME",
+  "PI_CODING_AGENT_DIR",
+  "PI_BUILTIN_MODELS_PATH",
+  "PI_VAULT_REFERENCE_ROOT",
+  "PAPERCLIP_AGENT_ID",
+  "PAPERCLIP_COMPANY_ID",
+  "PAPERCLIP_API_URL",
+  "PAPERCLIP_API_KEY",
+  "PAPERCLIP_RUN_ID",
+  "PAPERCLIP_TASK_ID",
+  "PAPERCLIP_ISSUE_WORK_MODE",
+  "PAPERCLIP_WAKE_REASON",
+  "PAPERCLIP_WAKE_COMMENT_ID",
+  "PAPERCLIP_APPROVAL_ID",
+  "PAPERCLIP_APPROVAL_STATUS",
+  "PAPERCLIP_LINKED_ISSUE_IDS",
+  "PAPERCLIP_WAKE_PAYLOAD_JSON",
+  "PAPERCLIP_VECTOR_TOOL_AUTHORITY_FILE",
+]);
+
+function vectorPiExplicitEnvKeyAllowed(key: string): boolean {
+  return VECTOR_PI_EXPLICIT_ENV_KEYS.has(key)
+    || key.startsWith("PAPERCLIP_RUNTIME_TOOLS_")
+    || key.startsWith("PAPERCLIP_WORKSPACE_");
+}
+
+export function projectVectorEmbeddedPiEnvironment(
+  inherited: NodeJS.ProcessEnv,
+  explicit: Record<string, string>,
+): Record<string, string> {
+  const projected: Record<string, string> = {};
+  for (const [key, value] of Object.entries(inherited)) {
+    if (VECTOR_PI_INHERITED_ENV_KEYS.has(key) && typeof value === "string") {
+      projected[key] = value;
+    }
+  }
+  for (const [key, value] of Object.entries(explicit)) {
+    if (vectorPiExplicitEnvKeyAllowed(key)) projected[key] = value;
+  }
+  return projected;
+}
 
 // Pi's RPC mode is intentionally driven through a tiny Node supervisor instead
 // of piping a prompt directly into the CLI. Closing Pi's stdin immediately
@@ -386,12 +446,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ...buildRuntimeToolsEnv(ctx.runtimeTools),
   };
   env.PAPERCLIP_RUN_ID = runId;
-  const applyVectorToolAuthorityEnv = () => {
-    if (!ctx.vectorToolAuthority) return;
-    env.PAPERCLIP_VECTOR_TOOL_CALLBACK_URL = ctx.vectorToolAuthority.callbackUrl;
-    env.PAPERCLIP_VECTOR_TOOL_CALLBACK_TOKEN = ctx.vectorToolAuthority.bearerToken;
-    env.PAPERCLIP_VECTOR_TOOL_NAMES = ctx.vectorToolAuthority.tools.join(",");
-  };
 
   const wakeTaskId =
     (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
@@ -443,9 +497,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
-  // Apply the server-owned capability after mutable agent env is resolved so
-  // even the engineering profile cannot replace or widen this run binding.
-  applyVectorToolAuthorityEnv();
   // Materialize custom Pi providers (PAPERCLIP_PI_PROVIDERS) into a managed
   // PI_CODING_AGENT_DIR before runtimeEnv is computed, so both local validation
   // and the spawned Pi process resolve models against the managed models.json.
@@ -457,7 +508,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (localAgentConfigDir) {
     env.PI_CODING_AGENT_DIR = localAgentConfigDir;
   }
+  let cleanupVectorToolCapability: () => Promise<void> = async () => undefined;
   try {
+    const vectorToolCapability = await prepareVectorToolCapability(
+      ctx.vectorToolAuthority,
+      { remote: executionTargetIsRemote },
+    );
+    cleanupVectorToolCapability = vectorToolCapability.cleanup;
+    Object.assign(env, vectorToolCapability.env);
     // Prepend installed skill `bin/` dirs to PATH so an agent's bash tool can
     // invoke skill binaries (e.g. `paperclip-get-issue`) by name. Without this,
     // any pi_local agent whose AGENTS.md calls a skill command via bash hits
@@ -468,7 +526,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const skillBinDirs = piSkillEntries
       .filter((entry) => injectedSkillKeys.has(entry.key) && entry.source.length > 0)
       .map((entry) => path.join(entry.source, "bin"));
-    const mergedEnv = ensurePathInEnv({ ...process.env, ...env });
+    const vectorEmbeddedRpc = executionMode === "rpc"
+      && process.env.PAPERCLIP_DATABASE_PROFILE?.trim() === "vector-embedded";
+    const mergedEnv = ensurePathInEnv(
+      vectorEmbeddedRpc
+        ? projectVectorEmbeddedPiEnvironment(process.env, env)
+        : { ...process.env, ...env },
+    );
     const pathKey =
       typeof mergedEnv.Path === "string" && mergedEnv.Path.length > 0 && !mergedEnv.PATH
         ? "Path"
@@ -512,6 +576,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       includeRuntimeKeys: ["HOME"],
       resolvedCommand,
     });
+    delete loggedEnv.PAPERCLIP_VECTOR_TOOL_AUTHORITY_FILE;
 
     if (!executionTargetIsRemote) {
       await ensurePiModelConfiguredAndAvailable({
@@ -580,7 +645,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           executionTargetIsRemote,
           executionCwd: effectiveExecutionCwd,
         });
-        applyVectorToolAuthorityEnv();
         if (adapterExecutionTargetUsesManagedHome(executionTarget) && preparedRemoteRuntime.runtimeRootDir) {
           env.HOME = preparedRemoteRuntime.runtimeRootDir;
         }
@@ -614,13 +678,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         Object.assign(env, paperclipBridge.env);
         loggedEnv = buildInvocationEnvForLogs(env, {
           runtimeEnv: Object.fromEntries(
-            Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+            Object.entries(ensurePathInEnv(
+              vectorEmbeddedRpc
+                ? projectVectorEmbeddedPiEnvironment(process.env, env)
+                : { ...process.env, ...env },
+            )).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",
             ),
           ),
           includeRuntimeKeys: ["HOME"],
           resolvedCommand,
         });
+        delete loggedEnv.PAPERCLIP_VECTOR_TOOL_AUTHORITY_FILE;
       }
     }
 
@@ -873,9 +942,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const processArgs = executionMode === "rpc"
         ? ["-e", PI_RPC_TURN_SUPERVISOR, command, JSON.stringify(args)]
         : args;
+      const processEnvSource = executionTargetIsRemote && vectorEmbeddedRpc
+        ? ensurePathInEnv(projectVectorEmbeddedPiEnvironment(process.env, env))
+        : executionTargetIsRemote
+          ? env
+          : runtimeEnv;
+      const processEnv = Object.fromEntries(
+        Object.entries(processEnvSource).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      );
       const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, processCommand, processArgs, {
         cwd,
-        env: executionTargetIsRemote ? env : runtimeEnv,
+        env: processEnv,
+        inheritProcessEnv: !vectorEmbeddedRpc,
         stdin: executionMode === "rpc" ? rpcPrompt : undefined,
         timeoutSec,
         graceSec,
@@ -1019,6 +1099,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ]);
     }
   } finally {
-    await preparedRuntimeConfig.cleanup();
+    await Promise.all([
+      cleanupVectorToolCapability(),
+      preparedRuntimeConfig.cleanup(),
+    ]);
   }
 }
