@@ -54,6 +54,13 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
 
     const eventType = asString(event.type, "");
 
+    if (eventType === "response" && event.success === false) {
+      const command = asString(event.command, "command");
+      const error = asString(event.error, "").trim() || "Pi RPC command failed.";
+      result.errors.push(`${command}: ${error}`);
+      continue;
+    }
+
     // Pi can exit successfully after a provider failure. The terminal assistant
     // message carries that failure in both message_end and turn_end envelopes.
     const terminalMessages = eventType === "agent_end"
@@ -86,6 +93,16 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
           const content = lastMessage.content as string | Array<{ type: string; text?: string }>;
           result.finalMessage = extractTextContent(content);
         }
+      }
+      continue;
+    }
+
+    if (eventType === "message_end") {
+      const message = asRecord(event.message);
+      if (message?.role === "assistant") {
+        const content = message.content as string | Array<{ type: string; text?: string }>;
+        const text = extractTextContent(content);
+        if (text) result.finalMessage = text;
       }
       continue;
     }

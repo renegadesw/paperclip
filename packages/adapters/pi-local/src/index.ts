@@ -1,7 +1,7 @@
 export const type = "pi_local";
 export const label = "Pi";
 
-export const SANDBOX_INSTALL_COMMAND = "npm install -g @earendil-works/pi-coding-agent@0.74.0";
+export const SANDBOX_INSTALL_COMMAND = "npm install -g @earendil-works/pi-coding-agent@0.84.1";
 
 export const models: Array<{ id: string; label: string }> = [];
 
@@ -27,6 +27,7 @@ Core fields:
 - model (string, required): Pi model id in provider/model format (for example xai/grok-4)
 - thinking (string, optional): thinking level (off, minimal, low, medium, high, xhigh)
 - command (string, optional): defaults to "pi"
+- executionMode (string, optional): "json" (upstream-compatible default) or "rpc"; Vector deployments select "rpc"
 - env (object, optional): KEY=VALUE environment variables
 
 Operational fields:
@@ -38,5 +39,6 @@ Notes:
 - Paperclip requires an explicit \`model\` value for \`pi_local\` agents.
 - Sessions are stored in ~/.pi/paperclips/ and resumed with --session.
 - All tools (read, bash, edit, write, grep, find, ls) are enabled by default.
-- Agent instructions are appended to Pi's system prompt via --append-system-prompt, while the user task is sent via -p.
+- Agent instructions are appended to Pi's system prompt via --append-system-prompt. In json mode the user task is sent via -p; in rpc mode it is sent as a prompt command and stdin remains open until agent_settled.
+- PAPERCLIP_PI_EXECUTION_MODE may set the deployment-wide default when an agent does not specify executionMode.
 `;
