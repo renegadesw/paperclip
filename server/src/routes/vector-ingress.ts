@@ -73,6 +73,24 @@ function requireCompleteOwnerScope(
 
 const scopeSchema = z.object(scopeShape).superRefine(requireCompleteOwnerScope);
 
+const vectorWorkloadLaunchSchema = z.object({
+  schemaVersion: z.literal(1),
+  workloadKey: boundedOpaqueId("workloadKey", 96),
+  queue: z.enum(["research", "tasks"]),
+  taskId: boundedOpaqueId("taskId", 256),
+  attempt: z.number().int().positive(),
+  leaseTokenSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  role: boundedOpaqueId("role", 128),
+  model: z.string().trim().max(256),
+  tools: z.array(boundedOpaqueId("tool", 128)).max(32),
+  noBuiltinTools: z.boolean(),
+  systemPrompt: z.string().min(1).max(750_000),
+  metadata: z.record(
+    z.string().trim().min(1).max(128),
+    z.string().max(4096),
+  ).refine((value) => Object.keys(value).length <= 64, "metadata has too many entries"),
+}).strict();
+
 const ownerScopeSchema = z.object({
   companyId: z.string().uuid(),
   agentId: z.string().uuid(),
@@ -87,6 +105,7 @@ const turnSchema = z.object({
   body: z.string().min(1).max(1_000_000),
   attachmentIds: z.array(z.string().uuid()).max(20).optional(),
   authorityHandle: z.string().trim().min(1).max(1024).optional(),
+  launchContext: vectorWorkloadLaunchSchema.optional(),
 }).superRefine(requireCompleteOwnerScope);
 
 const toolCallbackSchema = z.object({

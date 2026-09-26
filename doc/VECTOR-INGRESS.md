@@ -50,11 +50,22 @@ correctly.
 All routes are under `/api/internal/vector/v1`.
 
 `POST /turns` accepts `companyId`, `agentId`, `externalSessionId`,
-`clientRequestId`, `body`, and optional `attachmentIds`. The external session
+`clientRequestId`, `body`, optional `attachmentIds`, and an optional
+`launchContext`. The external session
 identifier is stored only as a stable SHA-256-derived conversation owner. The
 response includes the Paperclip company, agent, issue, comment, wake request,
 and run identifiers. Replaying the same `clientRequestId` with the same body
 and attachments returns the original result; changing either is `409`.
+
+`launchContext` is reserved for Vector database-authorized workloads. It carries
+the workload key, queue, task/attempt identity, SHA-256 of the lease token,
+role, model policy, exact tool names, restricted-builtin declaration, dynamic
+system prompt, and bounded execution metadata. Paperclip accepts it only with a
+complete owner scope and only when it exactly matches the target agent's
+release-provisioned workload contract. The raw lease token remains in Vector OS
+and never enters Paperclip. The admitted system prompt is added to Pi's system
+prompt for that run; the canonical context is also retained with the run and
+comment so retries cannot change it behind the same request ID.
 
 `POST /sessions/reset` accepts the same scope and a `clientRequestId`. It queues
 Paperclip's existing `/new` conversation command, preserving visible history

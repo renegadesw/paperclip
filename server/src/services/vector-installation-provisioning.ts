@@ -671,11 +671,23 @@ export async function reconcileVectorInstallation(
           manifestRevision: manifest.manifestRevision,
           rosterCatalogSha256,
         },
-        vectorWorkloads: {
-          schemaVersion: 1,
-          catalogSha256: workloadCatalogSha256,
-          keys: workloadKeys,
-        },
+         vectorWorkloads: {
+           schemaVersion: 1,
+           catalogSha256: workloadCatalogSha256,
+           keys: workloadKeys,
+           contracts: manifest.workloads
+             .filter((workload) => workload.agentId === desired.id)
+             .map((workload) => ({
+               key: workload.key,
+               kind: workload.kind,
+               executionShape: workload.executionShape,
+               role: desired.role,
+               toolSurface: [...workload.toolSurface].sort(),
+               modelPolicy: workload.policy.modelPolicy,
+               runtimeAuthority: workload.runtimeAuthority,
+             }))
+             .sort((left, right) => left.key.localeCompare(right.key)),
+         },
       },
     };
     let agent = await port.getAgent(desired.id);
