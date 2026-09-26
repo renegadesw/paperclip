@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { assertMigrationsCurrent, closeRegisteredClients, createDb } from "@paperclipai/db";
 import {
   provisionVectorInstallation,
+  vectorInstallationManifestSchema,
   type VectorProvisioningInput,
 } from "./services/vector-installation-provisioning.js";
 
@@ -13,7 +14,7 @@ function requiredEnv(name: string): string {
 
 export async function runVectorProvisionFromEnvironment(): Promise<void> {
   const databaseUrl = requiredEnv("DATABASE_URL");
-  const manifest = JSON.parse(requiredEnv("PAPERCLIP_VECTOR_PROVISION_MANIFEST_JSON"));
+  const manifest = vectorInstallationManifestSchema.parse(JSON.parse(requiredEnv("PAPERCLIP_VECTOR_PROVISION_MANIFEST_JSON")));
   const effectiveToolPolicy = JSON.parse(requiredEnv("PAPERCLIP_VECTOR_TOOL_POLICY_JSON"));
   const input: VectorProvisioningInput = {
     manifest,
@@ -26,7 +27,10 @@ export async function runVectorProvisionFromEnvironment(): Promise<void> {
   // standalone public-schema default, even if public has lookalike tables.
   // Provisioning is not a migration command and must not repair drift here.
   await assertMigrationsCurrent(databaseUrl, "vector-embedded");
-  const db = createDb(databaseUrl, { deploymentProfile: "vector-embedded" });
+  const db = createDb(databaseUrl, {
+    deploymentProfile: "vector-embedded",
+    vectorRuntimeScope: { companyId: manifest.company.id, installationId: manifest.installationId },
+  });
   try {
     const receipt = await provisionVectorInstallation(db, input);
     process.stdout.write(`${JSON.stringify(receipt)}\n`);

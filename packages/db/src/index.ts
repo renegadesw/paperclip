@@ -50,6 +50,7 @@ export {
 export { issueRelations } from "./schema/issue_relations.js";
 export {
   installVectorRuntimeIsolation,
+  assertVectorRuntimeIsolation,
   vectorIsolationRelations,
   VECTOR_RUNTIME_DATABASE_ROLE,
 } from "./vector-runtime-isolation.js";

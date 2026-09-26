@@ -1968,6 +1968,20 @@
       "when": 1790395855307,
       "tag": "0282_sharp_doomsday",
       "breakpoints": true
+    },
+    {
+      "idx": 283,
+      "version": "7",
+      "when": 1790409362502,
+      "tag": "0283_superb_wind_dancer",
+      "breakpoints": true
+    },
+    {
+      "idx": 284,
+      "version": "7",
+      "when": 1790409523161,
+      "tag": "0284_condemned_the_renegades",
+      "breakpoints": true
     }
   ]
 }

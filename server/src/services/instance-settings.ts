@@ -467,7 +467,7 @@ export function instanceSettingsService(db: Db, options: InstanceSettingsService
         updatedAt: now,
       })
       .onConflictDoUpdate({
-        target: [instanceSettings.singletonKey],
+        target: [instanceSettings.vectorInstallationId, instanceSettings.singletonKey],
         set: {
           updatedAt: now,
         },

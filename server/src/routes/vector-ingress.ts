@@ -1,3 +1,4 @@
+import { localBoardUserId } from "../local-board-identity.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -323,7 +324,7 @@ export function resolveVectorIngressAuthConfig(
     secret,
     maxClockSkewSeconds,
     responsibleUserId:
-      env[VECTOR_INGRESS_RESPONSIBLE_USER_ENV]?.trim() || "local-board",
+      env[VECTOR_INGRESS_RESPONSIBLE_USER_ENV]?.trim() || localBoardUserId(env),
     scope,
   };
 }

@@ -96,7 +96,7 @@ describe("announcement routes and durable dismissals", () => {
     }
     expect(await db.select().from(announcementDismissals)).toHaveLength(0);
     expect(await db.select().from(activityLog)).toHaveLength(0);
-    expect(await db.select().from(announcementPublications)).toEqual([{ announcementId: item.id }]);
+    expect(await db.select().from(announcementPublications)).toEqual([{ announcementId: item.id, vectorInstallationId: "" }]);
   });
   it("accepts offline retries for validated IDs after withdrawal and restart", async () => {
     await request(app()).get("/api/announcements/current");

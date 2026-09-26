@@ -1,9 +1,11 @@
 import { pgTable, uuid, text, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { authUsers } from "./auth.js";
+import { vectorInstallationColumn } from "../vector-installation-column.js";
 
 export const boardApiKeys = pgTable(
   "board_api_keys",
   {
+    vectorInstallationId: vectorInstallationColumn(),
     id: uuid("id").primaryKey().defaultRandom(),
     userId: text("user_id").notNull().references(() => authUsers.id, { onDelete: "cascade" }),
     name: text("name").notNull(),

@@ -14,6 +14,7 @@ vi.mock("@paperclipai/db", () => ({
 }));
 vi.mock("../services/vector-installation-provisioning.js", () => ({
   provisionVectorInstallation: calls.provision,
+  vectorInstallationManifestSchema: { parse: (value: unknown) => value },
 }));
 import { runVectorProvisionFromEnvironment } from "../vector-provision.js";
 
@@ -21,7 +22,7 @@ describe("Vector installer schema boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubEnv("DATABASE_URL", "postgres://fixture/vector");
-    vi.stubEnv("PAPERCLIP_VECTOR_PROVISION_MANIFEST_JSON", "{}");
+    vi.stubEnv("PAPERCLIP_VECTOR_PROVISION_MANIFEST_JSON", JSON.stringify({ installationId: "standard-test", company: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } }));
     vi.stubEnv("PAPERCLIP_VECTOR_TOOL_POLICY_JSON", "{}");
     vi.stubEnv("PAPERCLIP_VECTOR_PROFILE", "standard");
     vi.stubEnv("PAPERCLIP_VECTOR_STAGED_RELEASE_ROOT", "/fixture/staged");
@@ -37,7 +38,9 @@ describe("Vector installer schema boundary", () => {
   it("checks the llm migration journal and opens only the embedded profile", async () => {
     await runVectorProvisionFromEnvironment();
     expect(calls.assertMigrationsCurrent).toHaveBeenCalledWith("postgres://fixture/vector", "vector-embedded");
-    expect(calls.createDb).toHaveBeenCalledWith("postgres://fixture/vector", { deploymentProfile: "vector-embedded" });
+    expect(calls.createDb).toHaveBeenCalledWith("postgres://fixture/vector", {
+      deploymentProfile: "vector-embedded", vectorRuntimeScope: { installationId: "standard-test", companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    });
     expect(calls.assertMigrationsCurrent.mock.invocationCallOrder[0]).toBeLessThan(calls.createDb.mock.invocationCallOrder[0]);
     expect(calls.provision).toHaveBeenCalledWith(calls.db, expect.objectContaining({ selectedProfile: "standard" }));
     expect(calls.closeRegisteredClients).toHaveBeenCalledWith("postgres://fixture/vector");

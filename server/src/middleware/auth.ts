@@ -1,3 +1,4 @@
+import { localBoardUserId } from "../local-board-identity.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
@@ -221,7 +222,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       opts.deploymentMode === "local_trusted"
         ? {
             type: "board",
-            userId: "local-board",
+            userId: localBoardUserId(),
             userName: "Local Board",
             userEmail: null,
             isInstanceAdmin: true,

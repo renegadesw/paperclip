@@ -1,3 +1,4 @@
+import { localBoardUserId } from "./local-board-identity.js";
 import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -5,7 +6,7 @@ import { companies, companyMemberships, instanceUserRoles } from "@paperclipai/d
 import type { DeploymentMode } from "@paperclipai/shared";
 import { ensureHumanRoleDefaultGrants } from "./services/principal-access-compatibility.js";
 
-const LOCAL_BOARD_USER_ID = "local-board";
+const LOCAL_BOARD_USER_ID = localBoardUserId();
 const CLAIM_TTL_MS = 1000 * 60 * 60 * 24;
 
 type ChallengeStatus = "available" | "claimed" | "expired" | "invalid";

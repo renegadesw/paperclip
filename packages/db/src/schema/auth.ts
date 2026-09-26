@@ -1,6 +1,8 @@
 import { pgTable, text, timestamp, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { vectorInstallationColumn } from "../vector-installation-column.js";
 
 export const authUsers = pgTable("user", {
+  vectorInstallationId: vectorInstallationColumn(),
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull(),
@@ -11,6 +13,7 @@ export const authUsers = pgTable("user", {
 });
 
 export const authSessions = pgTable("session", {
+  vectorInstallationId: vectorInstallationColumn(),
   id: text("id").primaryKey(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   token: text("token").notNull(),
@@ -38,6 +41,7 @@ export const authSessions = pgTable("session", {
 export const authAccounts = pgTable(
   "account",
   {
+    vectorInstallationId: vectorInstallationColumn(),
     id: text("id").primaryKey(),
     issuer: text("issuer").notNull(),
     accountId: text("account_id").notNull(),
@@ -54,11 +58,12 @@ export const authAccounts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (table) => ({
-    issuerAccountIdUq: uniqueIndex("account_issuer_account_id_uq").on(table.issuer, table.accountId),
+    issuerAccountIdUq: uniqueIndex("account_issuer_account_id_uq").on(table.vectorInstallationId, table.issuer, table.accountId),
   }),
 );
 
 export const authVerifications = pgTable("verification", {
+  vectorInstallationId: vectorInstallationColumn(),
   id: text("id").primaryKey(),
   identifier: text("identifier").notNull(),
   value: text("value").notNull(),

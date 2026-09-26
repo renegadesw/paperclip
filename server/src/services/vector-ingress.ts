@@ -1,3 +1,4 @@
+import { localBoardUserId } from "../local-board-identity.js";
 import { createHash } from "node:crypto";
 import {
   and,
@@ -364,7 +365,7 @@ export function vectorIngressService(
 ) {
   const issuesSvc = issueService(db);
   const heartbeat = options.heartbeat ?? heartbeatService(db);
-  const responsibleUserId = options.responsibleUserId?.trim() || "local-board";
+  const responsibleUserId = options.responsibleUserId?.trim() || localBoardUserId();
 
   async function assertTargetAgent(scope: VectorIngressScope) {
     const agent = await db
