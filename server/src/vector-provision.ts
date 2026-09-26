@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { closeRegisteredClients, createDb } from "@paperclipai/db";
+import { assertMigrationsCurrent, closeRegisteredClients, createDb } from "@paperclipai/db";
 import {
   provisionVectorInstallation,
   type VectorProvisioningInput,
@@ -22,7 +22,11 @@ export async function runVectorProvisionFromEnvironment(): Promise<void> {
     stagedReleaseRoot: requiredEnv("PAPERCLIP_VECTOR_STAGED_RELEASE_ROOT"),
     activeReleaseRoot: requiredEnv("PAPERCLIP_VECTOR_ACTIVE_RELEASE_ROOT"),
   };
-  const db = createDb(databaseUrl);
+  // This entrypoint is exclusively the Vector installer. Never inherit the
+  // standalone public-schema default, even if public has lookalike tables.
+  // Provisioning is not a migration command and must not repair drift here.
+  await assertMigrationsCurrent(databaseUrl, "vector-embedded");
+  const db = createDb(databaseUrl, { deploymentProfile: "vector-embedded" });
   try {
     const receipt = await provisionVectorInstallation(db, input);
     process.stdout.write(`${JSON.stringify(receipt)}\n`);
