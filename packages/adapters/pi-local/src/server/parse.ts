@@ -1,3 +1,4 @@
+import type { AdapterRuntimeEvent } from "@paperclipai/adapter-utils";
 import { asNumber, asString, parseJson, parseObject } from "@paperclipai/adapter-utils/server-utils";
 
 interface ParsedPiOutput {
@@ -26,6 +27,137 @@ function extractTextContent(content: string | Array<{ type: string; text?: strin
     .filter((c) => c.type === "text" && c.text)
     .map((c) => c.text!)
     .join("");
+}
+
+function normalizeToolPayload(value: unknown): unknown {
+  return value === undefined ? null : value;
+}
+
+function readUsagePayload(message: Record<string, unknown> | null): Record<string, unknown> | null {
+  const usage = parseObject(message?.usage);
+  if (Object.keys(usage).length === 0) return null;
+  const cost = parseObject(usage.cost);
+  return {
+    inputTokens: asNumber(usage.inputTokens ?? usage.input, 0),
+    outputTokens: asNumber(usage.outputTokens ?? usage.output, 0),
+    cachedInputTokens: asNumber(usage.cachedInputTokens ?? usage.cacheRead, 0),
+    costUsd: asNumber(cost.total ?? usage.costUsd, 0),
+  };
+}
+
+/**
+ * Map one Pi JSON/RPC output line to provider-neutral Paperclip runtime events.
+ * Event payloads retain Pi's authoritative tool-call ID so concurrent calls to
+ * the same tool never get paired by name or by arrival order.
+ */
+export function extractPiRuntimeEvents(line: string): AdapterRuntimeEvent[] {
+  const event = parseJson(line.trim());
+  if (!event) return [];
+  const eventType = asString(event.type, "");
+
+  if (eventType === "message_update") {
+    const assistantEvent = parseObject(event.assistantMessageEvent);
+    if (asString(assistantEvent.type, "") !== "text_delta") return [];
+    const delta = asString(assistantEvent.delta, "");
+    return delta
+      ? [{ eventType: "assistant_delta", stream: "stdout", message: delta, payload: { text: delta, delta } }]
+      : [];
+  }
+
+  if (eventType === "tool_execution_start") {
+    const toolCallId = asString(event.toolCallId, "");
+    const toolName = asString(event.toolName, "");
+    return [{
+      eventType: "tool_call",
+      stream: "stdout",
+      message: toolName ? `Using ${toolName}` : undefined,
+      payload: { toolCallId, toolName, args: normalizeToolPayload(event.args) },
+    }];
+  }
+
+  if (eventType === "tool_execution_update") {
+    const toolCallId = asString(event.toolCallId, "");
+    const toolName = asString(event.toolName, "");
+    return [{
+      eventType: "tool_update",
+      stream: "stdout",
+      payload: {
+        toolCallId,
+        toolName,
+        args: normalizeToolPayload(event.args),
+        partialResult: normalizeToolPayload(event.partialResult),
+      },
+    }];
+  }
+
+  if (eventType === "tool_execution_end") {
+    const toolCallId = asString(event.toolCallId, "");
+    const toolName = asString(event.toolName, "");
+    return [{
+      eventType: "tool_result",
+      stream: "stdout",
+      level: event.isError === true ? "error" : "info",
+      payload: {
+        toolCallId,
+        toolName,
+        result: normalizeToolPayload(event.result),
+        isError: event.isError === true,
+      },
+    }];
+  }
+
+  if (eventType === "turn_end") {
+    const message = asRecord(event.message);
+    const text = message
+      ? extractTextContent(message.content as string | Array<{ type: string; text?: string }>)
+      : "";
+    const events: AdapterRuntimeEvent[] = [];
+    if (text) {
+      events.push({
+        eventType: "assistant_final",
+        stream: "stdout",
+        message: text,
+        payload: { text, stopReason: asString(message?.stopReason, "") || null },
+      });
+    }
+    const usage = readUsagePayload(message);
+    if (usage) events.push({ eventType: "usage", stream: "stdout", payload: usage });
+    if (message?.role === "assistant" && message.stopReason === "error") {
+      const error = asString(message.errorMessage, "").trim() || "Pi provider request failed.";
+      events.push({ eventType: "error", stream: "stdout", level: "error", message: error, payload: { source: "provider" } });
+    }
+    return events;
+  }
+
+  if (eventType === "agent_settled") {
+    return [{ eventType: "agent_settled", stream: "system", message: "Pi agent settled", payload: { settled: true } }];
+  }
+
+  if (eventType === "response" && event.success === false) {
+    const command = asString(event.command, "command");
+    const error = asString(event.error, "").trim() || "Pi RPC command failed.";
+    return [{
+      eventType: "error",
+      stream: "stdout",
+      level: "error",
+      message: `${command}: ${error}`,
+      payload: { source: "rpc", command, requestId: asString(event.id, "") || null },
+    }];
+  }
+
+  if (eventType === "auto_retry_end" && event.success !== true) {
+    const error = asString(event.finalError, "").trim() || "Pi exhausted automatic retries without producing a response.";
+    return [{ eventType: "error", stream: "stdout", level: "error", message: error, payload: { source: "auto_retry" } }];
+  }
+
+  if (eventType === "error") {
+    const error = asString(event.message, "").trim();
+    return error
+      ? [{ eventType: "error", stream: "stdout", level: "error", message: error, payload: { source: "pi" } }]
+      : [];
+  }
+
+  return [];
 }
 
 export function parsePiJsonl(stdout: string): ParsedPiOutput {

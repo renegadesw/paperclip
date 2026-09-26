@@ -53,9 +53,10 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
-import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
+import { extractPiRuntimeEvents, isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
 import { ensurePiModelConfiguredAndAvailable } from "./models.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
+import { buildPiBuiltinToolArgs } from "./tools.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -764,7 +765,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (modelId) args.push("--model", modelId);
       if (thinking) args.push("--thinking", thinking);
 
-      args.push("--tools", "read,bash,edit,write,grep,find,ls");
+      args.push(...buildPiBuiltinToolArgs(config, {
+        vectorProfile: process.env.PAPERCLIP_VECTOR_PROFILE,
+        extraArgs,
+      }));
       args.push("--session", sessionFile);
       args.push("--skill", remoteSkillsDir ?? PI_AGENT_SKILLS_DIR);
 
@@ -810,10 +814,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         // Keep the last (potentially incomplete) line in the buffer
         stdoutBuffer = lines.pop() || "";
 
-        // Emit complete lines
+        // Emit complete lines and their normalized live-runtime events. Raw
+        // stdout remains unchanged for the run log and aggregate parser.
         for (const line of lines) {
           if (line) {
             await onLog(stream, line + "\n");
+            for (const event of extractPiRuntimeEvents(line)) {
+              await ctx.onEvent?.(event);
+            }
           }
         }
       };
@@ -843,6 +851,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // Flush any remaining buffer content
       if (stdoutBuffer) {
         await onLog("stdout", stdoutBuffer);
+        for (const event of extractPiRuntimeEvents(stdoutBuffer)) {
+          await ctx.onEvent?.(event);
+        }
       }
 
       return {

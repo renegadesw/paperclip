@@ -74,6 +74,30 @@ process.stdin.on("data", (chunk) => {
   console.log(JSON.stringify({ type: "agent_start" }));
   console.log(JSON.stringify({ type: "turn_start" }));
   console.log(JSON.stringify({
+    type: "message_update",
+    assistantMessageEvent: { type: "text_delta", delta: "RPC " }
+  }));
+  console.log(JSON.stringify({
+    type: "tool_execution_start",
+    toolCallId: "rpc-tool-call-1",
+    toolName: "read",
+    args: { path: "README.md" }
+  }));
+  console.log(JSON.stringify({
+    type: "tool_execution_update",
+    toolCallId: "rpc-tool-call-1",
+    toolName: "read",
+    args: { path: "README.md" },
+    partialResult: { content: "partial" }
+  }));
+  console.log(JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "rpc-tool-call-1",
+    toolName: "read",
+    result: { content: "complete" },
+    isError: false
+  }));
+  console.log(JSON.stringify({
     type: "message_end",
     message: {
       role: "assistant",
@@ -113,9 +137,12 @@ describe("pi_local execute", () => {
     await writeRpcPiCommand(commandPath, argsDumpPath, promptDumpPath, stdinClosedPath);
 
     const previousHome = process.env.HOME;
+    const previousVectorProfile = process.env.PAPERCLIP_VECTOR_PROFILE;
     process.env.HOME = root;
+    process.env.PAPERCLIP_VECTOR_PROFILE = "standard";
 
     try {
+      const events: Array<{ eventType: string; payload?: Record<string, unknown> }> = [];
       const result = await execute({
         runId: "run-pi-rpc",
         agent: {
@@ -141,6 +168,7 @@ describe("pi_local execute", () => {
         context: {},
         authToken: "run-jwt-token",
         onLog: async () => {},
+        onEvent: async (event) => { events.push(event); },
       });
 
       expect(result.exitCode).toBe(0);
@@ -152,14 +180,30 @@ describe("pi_local execute", () => {
       const args = JSON.parse(await fs.readFile(argsDumpPath, "utf8")) as string[];
       expect(args).toContain("rpc");
       expect(args).not.toContain("-p");
+      expect(args).toContain("--no-builtin-tools");
+      expect(args).not.toContain("--tools");
       expect(args.at(-1)).not.toBe("Work the RPC task.");
 
       const prompt = JSON.parse(await fs.readFile(promptDumpPath, "utf8")) as Record<string, unknown>;
       expect(prompt).toMatchObject({ type: "prompt", message: "Work the RPC task." });
       expect(String(prompt.id)).toContain("run-pi-rpc");
+
+      expect(events.map((event) => event.eventType)).toEqual([
+        "assistant_delta",
+        "tool_call",
+        "tool_update",
+        "tool_result",
+        "assistant_final",
+        "usage",
+        "agent_settled",
+      ]);
+      expect(events.filter((event) => event.eventType.startsWith("tool")).map((event) => event.payload?.toolCallId))
+        .toEqual(["rpc-tool-call-1", "rpc-tool-call-1", "rpc-tool-call-1"]);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
+      if (previousVectorProfile === undefined) delete process.env.PAPERCLIP_VECTOR_PROFILE;
+      else process.env.PAPERCLIP_VECTOR_PROFILE = previousVectorProfile;
       await fs.rm(root, { recursive: true, force: true });
     }
   });
