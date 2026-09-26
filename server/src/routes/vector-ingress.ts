@@ -103,6 +103,16 @@ const vectorRoleTurnSchema = z.object({
   ).refine((value) => Object.keys(value).length <= 64, "metadata has too many entries"),
 }).strict();
 
+const vectorPersonaTurnSchema = z.object({
+  schemaVersion: z.literal(1),
+  personaId: z.string().uuid(),
+  personaName: boundedOpaqueId("personaName", 128),
+  personaVersion: z.string().regex(/^[a-f0-9]{12}$/),
+  model: z.string().trim().min(1).max(256),
+  noBuiltinTools: z.literal(true),
+  systemPrompt: z.string().min(1).max(750_000),
+}).strict();
+
 const ownerScopeSchema = z.object({
   companyId: z.string().uuid(),
   agentId: z.string().uuid(),
@@ -120,10 +130,11 @@ const turnSchema = z.object({
   providerAuthorityHandle: z.string().trim().min(1).max(1024).optional(),
   launchContext: vectorWorkloadLaunchSchema.optional(),
   roleContext: vectorRoleTurnSchema.optional(),
+  personaContext: vectorPersonaTurnSchema.optional(),
 }).superRefine((value, ctx) => {
   requireCompleteOwnerScope(value, ctx);
-  if (value.launchContext && value.roleContext) {
-    ctx.addIssue({ code: "custom", message: "launchContext and roleContext are mutually exclusive" });
+  if ([value.launchContext, value.roleContext, value.personaContext].filter(Boolean).length > 1) {
+    ctx.addIssue({ code: "custom", message: "launchContext, roleContext, and personaContext are mutually exclusive" });
   }
 });
 

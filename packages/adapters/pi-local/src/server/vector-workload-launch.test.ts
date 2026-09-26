@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { appendVectorRoleSystemPrompt, appendVectorWorkloadSystemPrompt } from "./execute.js";
+import {
+  appendVectorPersonaSystemPrompt,
+  appendVectorRoleSystemPrompt,
+  appendVectorWorkloadSystemPrompt,
+} from "./execute.js";
 
 describe("Vector workload launch system prompt", () => {
   it("appends only a complete admitted workload prompt", () => {
@@ -46,6 +50,31 @@ describe("Vector role turn system prompt", () => {
       role: "funky-analyst",
       systemPrompt: "Dynamic",
       noBuiltinTools: false,
+    })).toThrow("malformed");
+  });
+});
+
+describe("Vector persona system prompt", () => {
+  it("appends only a complete admitted standard persona", () => {
+    const result = appendVectorPersonaSystemPrompt("Static agent policy.", {
+      schemaVersion: 1,
+      personaId: "00000000-0000-0000-0000-000000000023",
+      personaVersion: "abcdef012345",
+      noBuiltinTools: true,
+      systemPrompt: "Friendly standard-chat persona.",
+    });
+    expect(result).toContain("Static agent policy.");
+    expect(result).toContain("selected standard-chat persona");
+    expect(result).toContain("Friendly standard-chat persona.");
+  });
+
+  it("fails closed on partial persona context", () => {
+    expect(() => appendVectorPersonaSystemPrompt("Static", {
+      schemaVersion: 1,
+      personaId: "00000000-0000-0000-0000-000000000023",
+      personaVersion: "wrong",
+      noBuiltinTools: true,
+      systemPrompt: "Friendly",
     })).toThrow("malformed");
   });
 });

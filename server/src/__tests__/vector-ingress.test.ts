@@ -280,6 +280,7 @@ const support = await getEmbeddedPostgresTestSupport();
     let otherCompanyId: string;
     let agentId: string;
     let otherAgentId: string;
+    let standardAgentId: string;
     let heartbeat: VectorIngressHeartbeat;
 
     beforeAll(async () => {
@@ -291,6 +292,7 @@ const support = await getEmbeddedPostgresTestSupport();
       otherCompanyId = randomUUID();
       agentId = randomUUID();
       otherAgentId = randomUUID();
+      standardAgentId = randomUUID();
       await db.insert(companies).values([
         {
           id: companyId,
@@ -341,6 +343,22 @@ const support = await getEmbeddedPostgresTestSupport();
           role: "assistant",
           status: "idle",
           adapterType: "process",
+        },
+        {
+          id: standardAgentId,
+          companyId,
+          name: "Standard Chat",
+          role: "standard-chat",
+          status: "idle",
+          adapterType: "pi_local",
+          adapterConfig: { model: "router/Qwen3.8-Flash" },
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "stecke1-standard",
+              profile: "standard",
+            },
+          },
         },
       ]);
       await instanceSettingsService(db).updateExperimental({
@@ -732,6 +750,105 @@ const support = await getEmbeddedPostgresTestSupport();
       })).rejects.toMatchObject({
         status: 409,
         details: { code: "vector_role_contract_mismatch" },
+      });
+    });
+
+    it("persists an admitted standard persona without copying its prompt into comments", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const personaContext = {
+        schemaVersion: 1 as const,
+        personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Sage",
+        personaVersion: "abcdef012345",
+        model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const,
+        systemPrompt: "Be a calm, precise collaborator.",
+      };
+      const base = {
+        companyId,
+        agentId: standardAgentId,
+        externalSessionId: "standard-persona-session",
+        ownerId: "vector-user:user-1",
+        installationId: "stecke1-standard",
+        profileId: "standard",
+      };
+      const first = await service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-1",
+        body: "Hello there.",
+        personaContext,
+      });
+      const firstRun = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, first.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(firstRun.vectorPersonaTurn).toEqual(personaContext);
+      const firstComment = await db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(eq(issueComments.id, first.commentId))
+        .then((rows) => rows[0]?.body);
+      expect(firstComment).toBe("Hello there.");
+      expect(firstComment).not.toContain(personaContext.systemPrompt);
+
+      const second = await service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-2",
+        body: "Continue.",
+      });
+      const secondRun = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, second.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(secondRun.vectorPersonaTurn).toEqual(personaContext);
+
+      await expect(service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-3",
+        body: "Switch persona.",
+        personaContext: { ...personaContext, personaName: "Different" },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_persona_continuity_mismatch" },
+      });
+    });
+
+    it("fails standard persona turns closed on omission and model mismatch", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const base = {
+        companyId,
+        agentId: standardAgentId,
+        ownerId: "vector-user:user-2",
+        installationId: "stecke1-standard",
+        profileId: "standard",
+        body: "Hello.",
+      };
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "standard-persona-missing",
+        clientRequestId: "standard-persona-missing-1",
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_persona_required" },
+      });
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "standard-persona-model-drift",
+        clientRequestId: "standard-persona-model-drift-1",
+        personaContext: {
+          schemaVersion: 1,
+          personaId: "00000000-0000-0000-0000-000000000023",
+          personaName: "Sage",
+          personaVersion: "abcdef012345",
+          model: "router/unapproved-model",
+          noBuiltinTools: true,
+          systemPrompt: "Be a calm, precise collaborator.",
+        },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_persona_contract_mismatch" },
       });
     });
 

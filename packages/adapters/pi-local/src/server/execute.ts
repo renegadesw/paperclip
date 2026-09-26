@@ -331,6 +331,26 @@ export function appendVectorRoleSystemPrompt(base: string, rawRole: unknown): st
   ]);
 }
 
+export function appendVectorPersonaSystemPrompt(base: string, rawPersona: unknown): string {
+  const vectorPersonaTurn = parseObject(rawPersona);
+  if (Object.keys(vectorPersonaTurn).length === 0) return base;
+  const schemaVersion = vectorPersonaTurn.schemaVersion;
+  const personaId = asString(vectorPersonaTurn.personaId, "").trim();
+  const personaVersion = asString(vectorPersonaTurn.personaVersion, "").trim();
+  const dynamicSystemPrompt = asString(vectorPersonaTurn.systemPrompt, "").trim();
+  if (
+    schemaVersion !== 1 || !personaId || !/^[a-f0-9]{12}$/.test(personaVersion) ||
+    !dynamicSystemPrompt || vectorPersonaTurn.noBuiltinTools !== true
+  ) {
+    throw new Error("Signed Vector persona turn context is malformed.");
+  }
+  return joinPromptSections([
+    base,
+    "Vector OS admitted this selected standard-chat persona through the signed, installation-scoped ingress. It applies to this conversation and remains subordinate to Paperclip's deployment and agent safety policy.",
+    dynamicSystemPrompt,
+  ]);
+}
+
 function normalizeExecutionCwd(candidate: string, remote: boolean): string {
   return remote ? path.posix.normalize(candidate) : path.resolve(candidate);
 }
@@ -838,6 +858,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     systemPromptExtension = appendVectorRoleSystemPrompt(
       systemPromptExtension,
       context.vectorRoleTurn,
+    );
+    systemPromptExtension = appendVectorPersonaSystemPrompt(
+      systemPromptExtension,
+      context.vectorPersonaTurn,
     );
 
     const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");

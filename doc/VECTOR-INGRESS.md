@@ -50,8 +50,8 @@ correctly.
 All routes are under `/api/internal/vector/v1`.
 
 `POST /turns` accepts `companyId`, `agentId`, `externalSessionId`,
-`clientRequestId`, `body`, optional `attachmentIds`, and an optional
-`launchContext`. The external session
+`clientRequestId`, `body`, optional `attachmentIds`, and at most one optional
+`launchContext`, `roleContext`, or `personaContext`. The external session
 identifier is stored only as a stable SHA-256-derived conversation owner. The
 response includes the Paperclip company, agent, issue, comment, wake request,
 and run identifiers. Replaying the same `clientRequestId` with the same body
@@ -66,6 +66,18 @@ release-provisioned workload contract. The raw lease token remains in Vector OS
 and never enters Paperclip. The admitted system prompt is added to Pi's system
 prompt for that run; the canonical context is also retained with the run and
 comment so retries cannot change it behind the same request ID.
+
+`personaContext` is the trusted Standard Chat persona selected by Vector OS. It
+carries the catalog UUID, display name, 12-character catalog-version digest,
+provisioned model, restricted-builtin declaration, and catalog-owned system
+prompt. It is accepted only for a provisioned `standard` installation and a
+`standard-chat` agent whose adapter model exactly matches. The first turn of a
+Standard Chat conversation must provide this context. Paperclip stores it only
+in the run context, never in the user-visible issue comment, inherits it for
+later turns in the same conversation, and rejects attempts to change it. Pi
+adds the admitted persona prompt beneath the static deployment and agent safety
+policy. A caller cannot supply tools, environment, or an arbitrary prompt
+outside this signed catalog context.
 
 `POST /sessions/reset` accepts the same scope and a `clientRequestId`. It queues
 Paperclip's existing `/new` conversation command, preserving visible history

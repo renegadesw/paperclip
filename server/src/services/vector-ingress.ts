@@ -60,6 +60,7 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   providerAuthorityHandle?: string;
   launchContext?: VectorWorkloadLaunchContext;
   roleContext?: VectorRoleTurnContext;
+  personaContext?: VectorPersonaTurnContext;
 }
 
 export interface VectorWorkloadLaunchContext {
@@ -84,6 +85,16 @@ export interface VectorRoleTurnContext {
   noBuiltinTools: true;
   systemPrompt: string;
   metadata: Record<string, string>;
+}
+
+export interface VectorPersonaTurnContext {
+  schemaVersion: 1;
+  personaId: string;
+  personaName: string;
+  personaVersion: string;
+  model: string;
+  noBuiltinTools: true;
+  systemPrompt: string;
 }
 
 export interface VectorIngressCancelInput extends VectorIngressScope {
@@ -449,6 +460,79 @@ export function vectorIngressService(
         code: "vector_role_contract_mismatch",
       });
     }
+  }
+
+  async function assertPersonaTurn(
+    input: VectorIngressTurnInput,
+    personaContext: VectorPersonaTurnContext,
+  ) {
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector persona turn requires complete owner scope", {
+        code: "vector_persona_owner_scope_required",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const adapterConfig = eventPayloadRecord(agent.adapterConfig);
+    const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
+    if (
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId ||
+      input.profileId !== "standard" ||
+      agent.role !== "standard-chat" ||
+      personaContext.model !== configuredModel ||
+      personaContext.noBuiltinTools !== true
+    ) {
+      throw conflict("Vector persona turn differs from the provisioned agent contract", {
+        code: "vector_persona_contract_mismatch",
+      });
+    }
+  }
+
+  function persistedPersonaContext(raw: unknown): VectorPersonaTurnContext | null {
+    const value = eventPayloadRecord(raw);
+    const keys = Object.keys(value).sort();
+    const expected = ["model", "noBuiltinTools", "personaId", "personaName", "personaVersion", "schemaVersion", "systemPrompt"];
+    if (
+      !sameStrings(keys, expected) || value.schemaVersion !== 1 ||
+      typeof value.personaId !== "string" || typeof value.personaName !== "string" ||
+      typeof value.personaVersion !== "string" || typeof value.model !== "string" ||
+      value.noBuiltinTools !== true || typeof value.systemPrompt !== "string"
+    ) return null;
+    return value as unknown as VectorPersonaTurnContext;
+  }
+
+  async function resolvePersonaTurn(
+    input: VectorIngressTurnInput,
+    issue: { id: string },
+  ): Promise<VectorPersonaTurnContext | null> {
+    const priorRun = await latestConversationRun(input, issue);
+    const prior = persistedPersonaContext(priorRun?.contextSnapshot?.vectorPersonaTurn);
+    const requested = input.personaContext ?? null;
+    if (
+      requested && prior &&
+      (requested.schemaVersion !== prior.schemaVersion ||
+        requested.personaId !== prior.personaId ||
+        requested.personaName !== prior.personaName ||
+        requested.personaVersion !== prior.personaVersion ||
+        requested.model !== prior.model ||
+        requested.noBuiltinTools !== prior.noBuiltinTools ||
+        requested.systemPrompt !== prior.systemPrompt)
+    ) {
+      throw conflict("Vector persona cannot change within an existing conversation", {
+        code: "vector_persona_continuity_mismatch",
+      });
+    }
+    const effective = requested ?? prior;
+    if (!effective && input.profileId === "standard") {
+      throw conflict("Vector standard-chat requires an admitted persona", {
+        code: "vector_persona_required",
+      });
+    }
+    if (effective) await assertPersonaTurn(input, effective);
+    return effective;
   }
 
   async function getConversation(scope: VectorIngressScope) {
@@ -956,6 +1040,7 @@ export function vectorIngressService(
     const mapping = hasCompleteOwnerScope(input)
       ? await bindConversationOwner(input, issue.id)
       : null;
+    const personaContext = await resolvePersonaTurn(input, issue);
     const requestedAttachmentIds = [...new Set(input.attachmentIds ?? [])];
     const effectiveBody = input.launchContext
       ? `[VECTOR_WORKLOAD_LAUNCH_V1]\n${JSON.stringify(input.launchContext)}\n\n${input.body}`
@@ -1112,7 +1197,9 @@ export function vectorIngressService(
       ? { vectorWorkloadLaunch: input.launchContext }
       : input.roleContext
         ? { vectorRoleTurn: input.roleContext }
-        : {});
+        : personaContext
+          ? { vectorPersonaTurn: personaContext }
+          : {});
 
     const receipt = await db
       .select({
