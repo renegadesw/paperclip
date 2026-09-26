@@ -54,6 +54,8 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
+import { getStorageService, type StorageService } from "../storage/index.js";
+import { hydrateVectorIngressImages } from "./vector-ingress-image-hydration.js";
 import {
   and,
   asc,
@@ -9171,6 +9173,8 @@ export type HeartbeatEnvironmentRuntime = ReturnType<
 >;
 
 export interface HeartbeatServiceOptions {
+  /** Storage seam for bounded, ephemeral Vector image hydration. */
+  vectorImageStorage?: StorageService;
   /** Test seam before the atomic native runtime handoff. */
   beforeNativeRuntimeSelection?: (runId: string) => Promise<void>;
   /** Test seam immediately before the durable chat-control admission check. */
@@ -23889,6 +23893,28 @@ export function heartbeatService(
                   }
                 : {}),
             };
+            const vectorImageAttachmentIds = Array.isArray(context.vectorIngressImageAttachmentIds)
+              ? context.vectorIngressImageAttachmentIds.filter((value): value is string => typeof value === "string")
+              : [];
+            if (vectorImageAttachmentIds.length > 0) {
+              // Runs may be claimed by the scheduler/recovery heartbeat rather
+              // than the ingress-local instance. Resolve the same configured
+              // storage authority at execution time unless a test seam was
+              // explicitly supplied.
+              const imageStorage = options.vectorImageStorage ?? getStorageService();
+              const imageCommentId = readNonEmptyString(context.wakeCommentId) ?? readNonEmptyString(context.commentId);
+              if (!issueRef || !imageCommentId) {
+                throw new Error("Vector image hydration authority is incomplete");
+              }
+              adapterContext.vectorIngressImages = await hydrateVectorIngressImages({
+                db,
+                storage: imageStorage,
+                companyId: agent.companyId,
+                issueId: issueRef.id,
+                commentId: imageCommentId,
+                attachmentIds: vectorImageAttachmentIds,
+              });
+            }
             const runtimeTools = createAdapterRuntimeToolAccess({
               agentId: agent.id,
               companyId: agent.companyId,

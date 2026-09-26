@@ -16,6 +16,7 @@ import {
 import {
   agentWakeupRequests,
   agents,
+  assets,
   heartbeatRunEvents,
   heartbeatRuns,
   issueAttachments,
@@ -32,6 +33,12 @@ import { issueService } from "./issues.js";
 import { logActivity } from "./activity-log.js";
 import type { VectorToolPendingDescriptor } from "./vector-tool-authority.js";
 import type { VectorProviderPendingDescriptor } from "./vector-provider-authority.js";
+import type { StorageService } from "../storage/index.js";
+import {
+  isVectorIngressImageAsset,
+  validateVectorIngressImages,
+  type VectorIngressImageInput,
+} from "./vector-ingress-images.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
@@ -58,6 +65,7 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   clientRequestId: string;
   body: string;
   attachmentIds?: string[];
+  images?: VectorIngressImageInput[];
   authorityHandle?: string;
   authorityTools?: string[];
   providerAuthorityHandle?: string;
@@ -361,6 +369,7 @@ export function vectorIngressService(
     responsibleUserId?: string;
     toolAuthority?: VectorIngressToolAuthority;
     providerAuthority?: VectorIngressProviderAuthority;
+    storage?: StorageService;
   } = {},
 ) {
   const issuesSvc = issueService(db);
@@ -974,6 +983,34 @@ export function vectorIngressService(
         .orderBy(asc(heartbeatRuns.finishedAt), asc(heartbeatRuns.id))
         .limit(limit + 1),
     ]);
+    const commentImageRows = comments.length === 0
+      ? []
+      : await db
+          .select({
+            commentId: issueAttachments.issueCommentId,
+            attachmentId: issueAttachments.id,
+            contentType: assets.contentType,
+            byteSize: assets.byteSize,
+            sha256: assets.sha256,
+            originalFilename: assets.originalFilename,
+            objectKey: assets.objectKey,
+          })
+          .from(issueAttachments)
+          .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
+          .where(and(
+            eq(issueAttachments.companyId, input.companyId),
+            eq(issueAttachments.issueId, issue.id),
+            eq(assets.companyId, input.companyId),
+            inArray(issueAttachments.issueCommentId, comments.map((comment) => comment.id)),
+          ))
+          .orderBy(asc(assets.originalFilename), asc(issueAttachments.id));
+    const imagesByComment = new Map<string, Array<Record<string, unknown>>>();
+    for (const row of commentImageRows) {
+      if (!row.commentId || !isVectorIngressImageAsset({ ...row, companyId: input.companyId, issueId: issue.id })) continue;
+      const current = imagesByComment.get(row.commentId) ?? [];
+      current.push({ attachmentId: row.attachmentId, mimeType: row.contentType, byteSize: row.byteSize, sha256: row.sha256 });
+      imagesByComment.set(row.commentId, current);
+    }
     const candidates: TranscriptCandidate[] = [
       ...comments.map((comment) => ({
         at: comment.createdAt,
@@ -981,7 +1018,12 @@ export function vectorIngressService(
         id: comment.id,
         eventType: "user_turn",
         message: null,
-        payload: { text: comment.body },
+        payload: {
+          text: comment.body,
+          ...(imagesByComment.get(comment.id)?.length
+            ? { images: imagesByComment.get(comment.id) }
+            : {}),
+        },
       })),
       ...runEvents.map((event) => ({
         at: event.createdAt,
@@ -1046,6 +1088,10 @@ export function vectorIngressService(
       : null;
     const personaContext = await resolvePersonaTurn(input, issue);
     const requestedAttachmentIds = [...new Set(input.attachmentIds ?? [])];
+    const validatedImages = validateVectorIngressImages(input.images);
+    if (validatedImages.length > 0 && !options.storage) {
+      throw conflict("Vector image storage is disabled", { code: "vector_ingress_image_storage_disabled" });
+    }
     const effectiveBody = input.launchContext
       ? `[VECTOR_WORKLOAD_LAUNCH_V1]\n${JSON.stringify(input.launchContext)}\n\n${input.body}`
       : input.roleContext
@@ -1053,6 +1099,7 @@ export function vectorIngressService(
       : input.body;
     let replayed = false;
 
+    let vectorImageAttachmentIds: string[] = [];
     const comment = await db.transaction(async (tx) => {
       const [locked] = await tx
         .select({ id: issues.id })
@@ -1080,9 +1127,17 @@ export function vectorIngressService(
         )
         .then((rows) => rows[0] ?? null);
       if (existing) {
-        const existingAttachmentIds = await tx
-          .select({ id: issueAttachments.id })
+        const existingAttachments = await tx
+          .select({
+            id: issueAttachments.id,
+            contentType: assets.contentType,
+            byteSize: assets.byteSize,
+            sha256: assets.sha256,
+            originalFilename: assets.originalFilename,
+            objectKey: assets.objectKey,
+          })
           .from(issueAttachments)
+          .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
           .where(
             and(
               eq(issueAttachments.companyId, input.companyId),
@@ -1090,16 +1145,27 @@ export function vectorIngressService(
               eq(issueAttachments.issueCommentId, existing.id),
             ),
           )
-          .then((rows) => rows.map((row) => row.id));
+          .orderBy(asc(assets.originalFilename), asc(issueAttachments.id));
+        const existingVectorImages = existingAttachments.filter((row) =>
+          isVectorIngressImageAsset({ ...row, companyId: input.companyId, issueId: issue.id }));
+        const existingAttachmentIds = existingAttachments
+          .filter((row) => !isVectorIngressImageAsset({ ...row, companyId: input.companyId, issueId: issue.id }))
+          .map((row) => row.id);
         if (
           existing.body !== effectiveBody ||
-          !sameStrings(existingAttachmentIds, requestedAttachmentIds)
+          !sameStrings(existingAttachmentIds, requestedAttachmentIds) ||
+          existingVectorImages.length !== validatedImages.length ||
+          existingVectorImages.some((row, index) => {
+            const expected = validatedImages[index];
+            return !expected || row.contentType !== expected.mimeType || row.byteSize !== expected.byteSize || row.sha256 !== expected.sha256 || row.originalFilename !== expected.filename;
+          })
         ) {
           throw conflict(
             "Vector clientRequestId was already used for a different turn",
             { code: "vector_ingress_idempotency_conflict" },
           );
         }
+        vectorImageAttachmentIds = existingVectorImages.map((row) => row.id);
         replayed = true;
         if (mapping) {
           await tx
@@ -1125,6 +1191,32 @@ export function vectorIngressService(
         },
         tx,
       );
+      for (const image of validatedImages) {
+        const stored = await options.storage!.putFile({
+          companyId: input.companyId,
+          namespace: `vector-ingress/${issue.id}`,
+          originalFilename: image.filename,
+          contentType: image.mimeType,
+          body: image.bytes,
+        });
+        const [asset] = await tx.insert(assets).values({
+          companyId: input.companyId,
+          provider: stored.provider,
+          objectKey: stored.objectKey,
+          contentType: stored.contentType,
+          byteSize: stored.byteSize,
+          sha256: stored.sha256,
+          originalFilename: stored.originalFilename,
+          createdByUserId: responsibleUserId,
+        }).returning({ id: assets.id });
+        const [attachment] = await tx.insert(issueAttachments).values({
+          companyId: input.companyId,
+          issueId: issue.id,
+          issueCommentId: inserted.id,
+          assetId: asset!.id,
+        }).returning({ id: issueAttachments.id });
+        vectorImageAttachmentIds.push(attachment!.id);
+      }
       if (mapping) {
         await tx.insert(vectorIngressTurns).values({
           conversationId: mapping.id,
@@ -1183,6 +1275,9 @@ export function vectorIngressService(
               // Per-turn presentation hint, never stored in user comments or
               // inherited by subsequent turns. It grants no tool authority.
               vectorVoiceActive: input.voiceActive === true,
+              ...(vectorImageAttachmentIds.length > 0
+                ? { vectorIngressImageAttachmentIds: vectorImageAttachmentIds }
+                : {}),
               ...(pendingAuthority ? { vectorToolAuthorityPending: pendingAuthority } : {}),
               ...(pendingProviderAuthority
                 ? { vectorProviderAuthorityPending: pendingProviderAuthority }

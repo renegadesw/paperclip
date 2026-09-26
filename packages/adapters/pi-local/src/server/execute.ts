@@ -61,6 +61,13 @@ import { prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
 import { prepareVectorToolCapability } from "./vector-tool-capability.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { appendVectorVoiceContext } from "./vector-voice-context.js";
+import {
+  buildPiRpcPrompt,
+  parseVectorIngressImages,
+  redactVectorIngressImages,
+  sanitizePiOutput,
+  sanitizePiOutputLine,
+} from "./vector-images.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -416,6 +423,8 @@ async function readSavedSessionCwd(input: {
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+  const vectorIngressImages = parseVectorIngressImages(context.vectorIngressImages);
+  const sensitiveImageData = vectorIngressImages.map((image) => image.data);
   const executionTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
@@ -895,11 +904,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? ""
       : renderTemplate(promptTemplate, templateData);
     const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+    const vectorImageNote = vectorIngressImages.length > 0
+      ? "The image attachments for this turn are supplied natively with this prompt. Do not attempt to download them or request Paperclip API credentials."
+      : "";
     const userPrompt = joinPromptSections([
       renderedBootstrapPrompt,
       wakePrompt,
       taskContextNote,
       sessionHandoffNote,
+      vectorImageNote,
       renderedHeartbeatPrompt,
     ]);
     const promptMetrics = {
@@ -964,6 +977,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
 
     const runAttempt = async (sessionFile: string) => {
+      if (vectorIngressImages.length > 0 && executionMode !== "rpc") {
+        throw new Error("Vector ingress images require Pi RPC execution mode");
+      }
       const args = buildArgs(sessionFile);
       if (onMeta) {
         await onMeta({
@@ -975,16 +991,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           env: loggedEnv,
           prompt: userPrompt,
           promptMetrics,
-          context,
+          context: redactVectorIngressImages(context),
         });
       }
 
       // Buffer stdout by lines to handle partial JSON chunks
       let stdoutBuffer = "";
+      let stderrBuffer = "";
       const bufferedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
         if (stream === "stderr") {
-          // Pass stderr through immediately (not JSONL)
-          await onLog(stream, chunk);
+          // Buffer by lines so a base64 payload split across process chunks
+          // cannot cross the persistent-log boundary unredacted.
+          stderrBuffer += chunk;
+          const lines = stderrBuffer.split("\n");
+          stderrBuffer = lines.pop() || "";
+          for (const line of lines) {
+            await onLog(stream, sanitizePiOutputLine(line, sensitiveImageData) + "\n");
+          }
           return;
         }
 
@@ -995,22 +1018,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         stdoutBuffer = lines.pop() || "";
 
         // Emit complete lines and their normalized live-runtime events. Raw
-        // stdout remains unchanged for the run log and aggregate parser.
+        // Persisted stdout is normalized only to remove image payload bytes;
+        // the aggregate parser consumes the same sanitized JSONL.
         for (const line of lines) {
           if (line) {
-            await onLog(stream, line + "\n");
-            for (const event of extractPiRuntimeEvents(line)) {
+            const sanitizedLine = sanitizePiOutputLine(line, sensitiveImageData);
+            await onLog(stream, sanitizedLine + "\n");
+            for (const event of extractPiRuntimeEvents(sanitizedLine)) {
               await ctx.onEvent?.(event);
             }
           }
         }
       };
 
-      const rpcPrompt = `${JSON.stringify({
-        id: `paperclip-${runId}`,
-        type: "prompt",
-        message: userPrompt,
-      })}\n`;
+      const rpcPrompt = buildPiRpcPrompt(runId, userPrompt, vectorIngressImages);
       const processCommand = executionMode === "rpc" ? "node" : command;
       const processArgs = executionMode === "rpc"
         ? ["-e", PI_RPC_TURN_SUPERVISOR, command, JSON.stringify(args)]
@@ -1041,16 +1062,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       // Flush any remaining buffer content
       if (stdoutBuffer) {
-        await onLog("stdout", stdoutBuffer);
-        for (const event of extractPiRuntimeEvents(stdoutBuffer)) {
+        const sanitizedTail = sanitizePiOutputLine(stdoutBuffer, sensitiveImageData);
+        await onLog("stdout", sanitizedTail);
+        for (const event of extractPiRuntimeEvents(sanitizedTail)) {
           await ctx.onEvent?.(event);
         }
       }
+      if (stderrBuffer) {
+        await onLog("stderr", sanitizePiOutputLine(stderrBuffer, sensitiveImageData));
+      }
 
+      const sanitizedStdout = sanitizePiOutput(proc.stdout, sensitiveImageData);
+      const sanitizedStderr = sanitizePiOutput(proc.stderr, sensitiveImageData);
       return {
-        proc,
-        rawStderr: proc.stderr,
-        parsed: parsePiJsonl(proc.stdout),
+        proc: { ...proc, stdout: sanitizedStdout, stderr: sanitizedStderr },
+        rawStderr: sanitizedStderr,
+        parsed: parsePiJsonl(sanitizedStdout),
       };
     };
 

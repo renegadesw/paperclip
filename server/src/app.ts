@@ -537,6 +537,10 @@ export async function createApp(
       verify: captureRawBody,
     }),
   );
+  app.use(
+    "/api/internal/vector/v1",
+    express.json({ limit: "16mb", verify: captureRawBody }),
+  );
   // Chat providers sign the exact request bytes. Capture every webhook media
   // type before the global JSON parser so JSON events and form-encoded action
   // callbacks are verified against the provider's original body.
@@ -593,6 +597,7 @@ export async function createApp(
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
   const connectionIntentHeartbeat = heartbeatService(db, {
     pluginWorkerManager: workerManager,
+    vectorImageStorage: opts.storageService,
   });
   const vectorIngressAuth = resolveVectorIngressAuthConfig(
     process.env,
@@ -626,6 +631,7 @@ export async function createApp(
           responsibleUserId: vectorIngressAuth.responsibleUserId,
           toolAuthority: vectorToolAuthority ?? undefined,
           providerAuthority: vectorProviderAuthority ?? undefined,
+          storage: opts.storageService,
         }),
         toolAuthority: vectorToolAuthority ?? undefined,
       }),

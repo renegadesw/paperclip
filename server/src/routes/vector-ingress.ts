@@ -128,6 +128,11 @@ const turnSchema = z.object({
   body: z.string().min(1).max(1_000_000),
   voiceActive: z.boolean().optional(),
   attachmentIds: z.array(z.string().uuid()).max(20).optional(),
+  images: z.array(z.object({
+    type: z.literal("image"),
+    data: z.string().min(1).max(9_786_712).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    mimeType: z.enum(["image/jpeg", "image/png", "image/gif", "image/webp"]),
+  }).strict()).max(8).optional(),
   authorityHandle: z.string().trim().min(1).max(1024).optional(),
   authorityTools: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/)).min(1).max(64).optional(),
   providerAuthorityHandle: z.string().trim().min(1).max(1024).optional(),

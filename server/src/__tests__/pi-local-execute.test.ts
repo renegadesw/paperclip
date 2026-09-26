@@ -54,6 +54,7 @@ async function writeRpcPiCommand(
   promptDumpPath: string,
   stdinClosedPath: string,
   envDumpPath?: string,
+  echoPromptImages = false,
 ): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -75,6 +76,11 @@ process.stdin.on("data", (chunk) => {
   handled = true;
   const command = JSON.parse(buffer.slice(0, newline));
   fs.writeFileSync(${JSON.stringify(promptDumpPath)}, JSON.stringify(command));
+  if (${JSON.stringify(echoPromptImages)}) {
+    const userMessage = { role: "user", content: command.images || [] };
+    console.log(JSON.stringify({ type: "message_start", message: userMessage }));
+    console.log(JSON.stringify({ type: "agent_end", messages: [userMessage] }));
+  }
   console.log(JSON.stringify({ type: "response", command: "prompt", success: true, id: command.id }));
   console.log(JSON.stringify({ type: "agent_start" }));
   console.log(JSON.stringify({ type: "turn_start" }));
@@ -131,6 +137,60 @@ process.stdin.on("end", () => {
 }
 
 describe("pi_local execute", () => {
+  it("keeps Pi-echoed image bytes out of logs, metadata, and result JSON", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-image-redaction-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "pi");
+    const argsDumpPath = path.join(root, "args.json");
+    const promptDumpPath = path.join(root, "prompt.json");
+    const stdinClosedPath = path.join(root, "stdin-closed");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeRpcPiCommand(commandPath, argsDumpPath, promptDumpPath, stdinClosedPath, undefined, true);
+
+    const previousHome = process.env.HOME;
+    const previousVectorProfile = process.env.PAPERCLIP_VECTOR_PROFILE;
+    const previousVectorPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_VECTOR_PROFILE = "standard";
+    process.env.PAPERCLIP_VECTOR_PI_COMMAND = commandPath;
+    const data = "/9j/AA==";
+    const logs: string[] = [];
+    const metadata: unknown[] = [];
+    try {
+      const result = await execute({
+        runId: "run-pi-image-redaction",
+        agent: {
+          id: "agent-image-redaction", companyId: "company-image-redaction",
+          name: "Pi RPC Agent", adapterType: "pi_local", adapterConfig: {},
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath, cwd: workspace, model: "google/gemini-3-flash-preview",
+          executionMode: "rpc", promptTemplate: "Describe the supplied image.",
+        },
+        context: { vectorIngressImages: [{ type: "image", data, mimeType: "image/jpeg" }] },
+        authToken: "run-jwt-token",
+        onLog: async (_stream, chunk) => { logs.push(chunk); },
+        onMeta: async (meta) => { metadata.push(meta); },
+      });
+      const privatePrompt = await fs.readFile(promptDumpPath, "utf8");
+      expect(privatePrompt).toContain(data);
+      expect(JSON.stringify(logs)).not.toContain(data);
+      expect(JSON.stringify(metadata)).not.toContain(data);
+      expect(JSON.stringify(result.resultJson)).not.toContain(data);
+      expect(JSON.stringify(logs)).toContain("[redacted image data]");
+      expect(result.summary).toBe("RPC reply");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousVectorProfile === undefined) delete process.env.PAPERCLIP_VECTOR_PROFILE;
+      else process.env.PAPERCLIP_VECTOR_PROFILE = previousVectorProfile;
+      if (previousVectorPiCommand === undefined) delete process.env.PAPERCLIP_VECTOR_PI_COMMAND;
+      else process.env.PAPERCLIP_VECTOR_PI_COMMAND = previousVectorPiCommand;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps vector-embedded database and controller secrets out of the spawned RPC process", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-env-isolation-"));
     const workspace = path.join(root, "workspace");

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import express from "express";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
@@ -36,6 +37,8 @@ import {
 import type { VectorRuntimeScope } from "../services/vector-runtime-scope.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { VectorToolAuthorityBridge } from "../services/vector-tool-authority.js";
+import type { StorageService } from "../storage/index.js";
+import { hydrateVectorIngressImages } from "../services/vector-ingress-image-hydration.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -163,11 +166,23 @@ describe("Vector ingress service authentication", () => {
 
     await signedPost(app, path, body).expect(201);
     expect(addTurn).toHaveBeenCalledExactlyOnceWith(body);
+    const imageBody = {
+      ...body,
+      clientRequestId: "request-image",
+      images: [{ type: "image", data: "/9j/AA==", mimeType: "image/jpeg" }],
+    };
+    await signedPost(app, path, imageBody).expect(201);
+    expect(addTurn).toHaveBeenLastCalledWith(imageBody);
+    await signedPost(app, path, {
+      ...imageBody,
+      clientRequestId: "request-image-invalid",
+      images: [{ type: "image", data: "%%%", mimeType: "image/jpeg" }],
+    }).expect(400);
     await signedPost(app, path, { ...body, externalSessionId: " padded" }).expect(
       400,
     );
     await signedPost(app, path, { ...body, ownerId: "owner-only" }).expect(400);
-    expect(addTurn).toHaveBeenCalledTimes(1);
+    expect(addTurn).toHaveBeenCalledTimes(2);
     await request(app).post(path).send(body).expect(401);
     await signedPost(app, path, body, "1699999000").expect(401);
     await request(app)
@@ -214,7 +229,7 @@ describe("Vector ingress service authentication", () => {
       ...runtimeScope,
       installationId: "stecke1-standard",
     }).expect(401);
-    expect(addTurn).toHaveBeenCalledTimes(1);
+    expect(addTurn).toHaveBeenCalledTimes(2);
     expect(inventory).toHaveBeenCalledTimes(1);
   });
 
@@ -531,6 +546,86 @@ const support = await getEmbeddedPostgresTestSupport();
       await expect(
         service.addTurn({ ...input, attachmentIds: [attachment.id] }),
       ).rejects.toMatchObject({ status: 409 });
+    });
+
+    it("stores image turns once, binds ownership, and projects metadata without bytes", async () => {
+      const objects = new Map<string, Buffer>();
+      let puts = 0;
+      const storage = {
+        provider: "local_disk",
+        async putFile(input: { companyId: string; namespace: string; originalFilename: string | null; contentType: string; body: Buffer }) {
+          puts += 1;
+          const objectKey = `${input.companyId}/${input.namespace}/${puts}`;
+          objects.set(objectKey, input.body);
+          return {
+            provider: "local_disk", objectKey, contentType: input.contentType,
+            byteSize: input.body.length,
+            sha256: (await import("node:crypto")).createHash("sha256").update(input.body).digest("hex"),
+            originalFilename: input.originalFilename,
+          };
+        },
+        async getObject(readCompanyId: string, objectKey: string) {
+          if (!objectKey.startsWith(`${readCompanyId}/`)) throw new Error("foreign company");
+          return { stream: Readable.from([objects.get(objectKey)!]) };
+        },
+        async headObject() { return { exists: true }; },
+        async deleteObject() {},
+      } as StorageService;
+      const service = vectorIngressService(db, { heartbeat, storage });
+      const input = {
+        companyId,
+        agentId,
+        ownerId: "image-owner",
+        installationId: "stg1-staging",
+        profileId: "staging",
+        externalSessionId: "image-thread",
+        clientRequestId: "image-turn-1",
+        body: "Describe this image",
+        images: [{ type: "image" as const, data: "/9j/AA==", mimeType: "image/jpeg" as const }],
+      };
+      const first = await service.addTurn(input);
+      const replay = await service.addTurn(input);
+      expect(replay).toMatchObject({ commentId: first.commentId, replayed: true });
+      expect(puts).toBe(1);
+      const attachments = await db
+        .select({
+          id: issueAttachments.id,
+          companyId: issueAttachments.companyId,
+          issueId: issueAttachments.issueId,
+          commentId: issueAttachments.issueCommentId,
+          contentType: assets.contentType,
+          byteSize: assets.byteSize,
+        })
+        .from(issueAttachments)
+        .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
+        .where(eq(issueAttachments.issueCommentId, first.commentId));
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]).toMatchObject({ companyId, issueId: first.issueId, commentId: first.commentId, contentType: "image/jpeg", byteSize: 4 });
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, first.runId!));
+      expect(run?.contextSnapshot).toMatchObject({ vectorIngressImageAttachmentIds: [attachments[0]!.id] });
+      expect(JSON.stringify(run?.contextSnapshot)).not.toContain("/9j/AA==");
+      await expect(hydrateVectorIngressImages({
+        db, storage, companyId, issueId: first.issueId, commentId: first.commentId,
+        attachmentIds: [attachments[0]!.id],
+      })).resolves.toEqual(input.images);
+      await expect(hydrateVectorIngressImages({
+        db, storage, companyId, issueId: first.issueId, commentId: randomUUID(),
+        attachmentIds: [attachments[0]!.id],
+      })).rejects.toThrow(/ownership mismatch/);
+
+      const transcript = await service.transcript({
+        companyId, agentId, ownerId: input.ownerId, installationId: input.installationId,
+        profileId: input.profileId, externalSessionId: input.externalSessionId,
+      });
+      const userTurn = transcript.events.find((event) => event.eventType === "user_turn");
+      expect(userTurn?.payload).toMatchObject({
+        text: input.body,
+        images: [{ attachmentId: attachments[0]!.id, mimeType: "image/jpeg", byteSize: 4 }],
+      });
+      expect(JSON.stringify(userTurn)).not.toContain("/9j/AA==");
+
+      await expect(service.addTurn({ ...input, images: [{ ...input.images[0], data: "/9j/AQ==" }] }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_ingress_idempotency_conflict" } });
     });
 
     it("persists only pending authority scope before wakeup and confirms the created run", async () => {
