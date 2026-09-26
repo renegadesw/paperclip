@@ -260,6 +260,41 @@ describe("parsePiJsonl", () => {
     const parsed = parsePiJsonl(stdout);
     expect(parsed.errors).toEqual([]);
   });
+
+  it("surfaces failed RPC command responses", () => {
+    const parsed = parsePiJsonl(JSON.stringify({
+      type: "response",
+      command: "prompt",
+      success: false,
+      error: "agent is already streaming",
+    }));
+
+    expect(parsed.errors).toEqual(["prompt: agent is already streaming"]);
+  });
+
+  it("does not double-count usage repeated in message_end and turn_end", () => {
+    const message = {
+      role: "assistant",
+      content: "Done",
+      usage: {
+        input: 11,
+        output: 7,
+        cacheRead: 3,
+        cost: { total: 0.0042 },
+      },
+    };
+    const parsed = parsePiJsonl([
+      JSON.stringify({ type: "message_end", message }),
+      JSON.stringify({ type: "turn_end", message, toolResults: [] }),
+    ].join("\n"));
+
+    expect(parsed.usage).toEqual({
+      inputTokens: 11,
+      outputTokens: 7,
+      cachedInputTokens: 3,
+      costUsd: 0.0042,
+    });
+  });
 });
 
 describe("isPiUnknownSessionError", () => {

@@ -63,6 +63,81 @@ const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const PAPERCLIP_SESSIONS_DIR = path.join(os.homedir(), ".pi", "paperclips");
 const PI_AGENT_SKILLS_DIR = path.join(os.homedir(), ".pi", "agent", "skills");
 
+// Pi's RPC mode is intentionally driven through a tiny Node supervisor instead
+// of piping a prompt directly into the CLI. Closing Pi's stdin immediately
+// after the prompt races the asynchronous turn: Pi accepts the command and can
+// then exit before the provider emits an assistant message. The supervisor
+// keeps stdin open until Pi reports the authoritative `agent_settled` event,
+// then closes it so the one-heartbeat process exits normally. Because the
+// supervisor and Pi share a process group, Paperclip's existing run cancellation
+// still terminates the complete tree.
+const PI_RPC_TURN_SUPERVISOR = String.raw`
+const { spawn } = require("node:child_process");
+
+const piCommand = process.argv[1];
+const piArgs = JSON.parse(process.argv[2]);
+const child = spawn(piCommand, piArgs, {
+  cwd: process.cwd(),
+  env: process.env,
+  stdio: ["pipe", "pipe", "pipe"],
+});
+
+let input = "";
+let stdoutBuffer = "";
+let stdinClosed = false;
+
+function closeChildStdin() {
+  if (stdinClosed) return;
+  stdinClosed = true;
+  child.stdin.end();
+}
+
+function inspectLine(line) {
+  if (!line.trim()) return;
+  try {
+    const event = JSON.parse(line);
+    if (event.type === "agent_settled") closeChildStdin();
+    if (
+      event.type === "response" &&
+      event.command === "prompt" &&
+      event.success === false
+    ) closeChildStdin();
+  } catch {
+    // Pi owns stdout. Forward malformed/non-JSON lines unchanged and let the
+    // adapter parser decide whether they are meaningful.
+  }
+}
+
+child.stdout.on("data", (chunk) => {
+  const text = String(chunk);
+  process.stdout.write(text);
+  stdoutBuffer += text;
+  const lines = stdoutBuffer.split("\n");
+  stdoutBuffer = lines.pop() || "";
+  for (const line of lines) inspectLine(line);
+});
+child.stdout.on("end", () => inspectLine(stdoutBuffer));
+child.stderr.pipe(process.stderr);
+
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  if (!child.killed && !child.stdin.destroyed) child.stdin.write(input);
+});
+
+child.on("error", (error) => {
+  process.stderr.write("[paperclip] Failed to start Pi RPC child: " + error.message + "\n");
+  process.exitCode = 1;
+});
+child.on("close", (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exitCode = code ?? 1;
+});
+`;
+
 function firstNonEmptyLine(text: string): string {
   return (
     text
@@ -237,6 +312,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const command = asString(config.command, "pi");
   const model = asString(config.model, "").trim();
   const thinking = asString(config.thinking, "").trim();
+  const executionMode = asString(
+    config.executionMode,
+    process.env.PAPERCLIP_PI_EXECUTION_MODE ?? "json",
+  ).trim();
+  if (executionMode !== "json" && executionMode !== "rpc") {
+    throw new Error(
+      `Unsupported Pi executionMode "${executionMode}". Expected "json" or "rpc".`,
+    );
+  }
 
   // Parse model into provider and model id
   const provider = parseModelProvider(model);
@@ -668,9 +752,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const buildArgs = (sessionFile: string): string[] => {
       const args: string[] = [];
 
-      // Use JSON mode for structured output with print mode (non-interactive)
-      args.push("--mode", "json");
-      args.push("-p"); // Non-interactive mode: process prompt and exit
+      args.push("--mode", executionMode);
+      if (executionMode === "json") {
+        args.push("-p"); // Non-interactive mode: process prompt and exit
+      }
 
       // Use --append-system-prompt to extend Pi's default system prompt
       args.push("--append-system-prompt", renderedSystemPromptExtension);
@@ -685,8 +770,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       if (extraArgs.length > 0) args.push(...extraArgs);
 
-      // Add the user prompt as the last argument
-      args.push(userPrompt);
+      if (executionMode === "json") {
+        // Print/JSON mode accepts the user prompt as its final argument. RPC
+        // mode receives the same prompt as a line-delimited command on stdin.
+        args.push(userPrompt);
+      }
 
       return args;
     };
@@ -730,9 +818,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       };
 
-      const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
+      const rpcPrompt = `${JSON.stringify({
+        id: `paperclip-${runId}`,
+        type: "prompt",
+        message: userPrompt,
+      })}\n`;
+      const processCommand = executionMode === "rpc" ? "node" : command;
+      const processArgs = executionMode === "rpc"
+        ? ["-e", PI_RPC_TURN_SUPERVISOR, command, JSON.stringify(args)]
+        : args;
+      const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, processCommand, processArgs, {
         cwd,
         env: executionTargetIsRemote ? env : runtimeEnv,
+        stdin: executionMode === "rpc" ? rpcPrompt : undefined,
         timeoutSec,
         graceSec,
         onSpawn,
