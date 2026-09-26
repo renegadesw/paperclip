@@ -3,6 +3,7 @@ import { constants as fsConstants, type Stats } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-profiles";
 
 const VERSION = 1 as const;
 const MARKER_KEY = "vectorLegacyPiContext";
@@ -63,7 +64,7 @@ function absolute(value: string) {
 
 function serviceForProfile(profileId: string): VectorLegacyService | null {
   if (profileId === "engineering" || profileId === "standard") return "nexuslink-chat";
-  if (profileId === "staging") return "funky";
+  if (isVectorFunkyServerProfile(profileId)) return "funky";
   return null;
 }
 

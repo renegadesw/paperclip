@@ -4,13 +4,14 @@ import path from "node:path";
 import { type Db, routineTriggers, routines, vectorInstallationOwnerships } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
+import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-profiles";
 import { agentService } from "./agents.js";
 import { companyService } from "./companies.js";
 import { VECTOR_SCHEDULE_KEYS } from "./vector-schedule-routine-dispatch.js";
 
 const UUID = z.string().uuid();
 const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
-const vectorProfileSchema = z.enum(["engineering", "standard", "staging"]);
+const vectorProfileSchema = z.enum(["engineering", "standard", "staging", "production"]);
 
 const companyMutableField = z.enum(["name", "description", "budgetMonthlyCents"]);
 const agentMutableField = z.enum([
@@ -420,17 +421,17 @@ export const vectorInstallationManifestSchema = z.object({
       ctx.addIssue({ code: "custom", path: ["workloads"], message: "standard installs do not own Funky workload schedules" });
     }
   }
-  if (manifest.profile === "staging") {
+  if (isVectorFunkyServerProfile(manifest.profile)) {
     const expectedRoles = ["funky-advisor", "funky-analyst", "funky-scout"];
     if (stableJson(roles) !== stableJson(expectedRoles)) {
-      ctx.addIssue({ code: "custom", path: ["additionalAgents"], message: "staging installs require exactly Funky analyst, Scout, and Advisor agents" });
+      ctx.addIssue({ code: "custom", path: ["additionalAgents"], message: `${manifest.profile} installs require exactly Funky analyst, Scout, and Advisor agents` });
     }
     const expectedWorkloads = [
       "curation", "current_scout", "demand_scout", "dmv_audit_back_triage",
       "dmv_review", "macro_scout", "synthesis",
     ];
     if (stableJson([...workloadKeys].sort()) !== stableJson(expectedWorkloads)) {
-      ctx.addIssue({ code: "custom", path: ["workloads"], message: "staging installs require the complete Vector workload catalog" });
+      ctx.addIssue({ code: "custom", path: ["workloads"], message: `${manifest.profile} installs require the complete Vector workload catalog` });
     }
     const roleByAgentId = new Map(allAgents.map((agent) => [agent.id, agent.role]));
     for (const [index, workload] of manifest.workloads.entries()) {
@@ -473,7 +474,7 @@ export const vectorInstallationManifestSchema = z.object({
         runtimeAuthority: "vector_lease_triple",
       };
       if (stableJson(actual) !== stableJson(required)) {
-        ctx.addIssue({ code: "custom", path: ["workloads", index], message: `staging workload ${workload.key} does not match the Vector contract` });
+        ctx.addIssue({ code: "custom", path: ["workloads", index], message: `${manifest.profile} workload ${workload.key} does not match the Vector contract` });
       }
     }
     const dependenciesByWorkload = new Map(manifest.workloads.map((workload) => [
@@ -491,7 +492,7 @@ export const vectorInstallationManifestSchema = z.object({
     ]);
     for (const [workloadKey, expected] of expectedDependencies) {
       if (stableJson(dependenciesByWorkload.get(workloadKey)) !== stableJson(expected)) {
-        ctx.addIssue({ code: "custom", path: ["workloads"], message: `staging workload ${workloadKey} dependencies do not match the Vector contract` });
+        ctx.addIssue({ code: "custom", path: ["workloads"], message: `${manifest.profile} workload ${workloadKey} dependencies do not match the Vector contract` });
       }
     }
     const demandDependency = manifest.workloads
@@ -515,7 +516,7 @@ function deterministicUuid(identity: string) {
 }
 
 export function vectorWorkloadRoutineSeeds(manifest: VectorInstallationManifest) {
-  if (manifest.profile !== "staging") return [];
+  if (!isVectorFunkyServerProfile(manifest.profile)) return [];
   const agentsByRole = new Map([manifest.agent, ...manifest.additionalAgents].map((agent) => [agent.role, agent.id]));
   return ([
     { queue: "research", role: "funky-scout", title: "Vector research queue pump" },
@@ -534,7 +535,7 @@ export function vectorWorkloadRoutineSeeds(manifest: VectorInstallationManifest)
 }
 
 export function vectorScheduleRoutineSeeds(manifest: VectorInstallationManifest) {
-  if (manifest.profile !== "staging") return [];
+  if (!isVectorFunkyServerProfile(manifest.profile)) return [];
   type Schedule = NonNullable<VectorInstallationManifest["workloads"][number]["schedule"]>;
   const schedules = new Map<string, Schedule>();
   const add = (schedule: Schedule | null | undefined) => {
@@ -553,7 +554,7 @@ export function vectorScheduleRoutineSeeds(manifest: VectorInstallationManifest)
   const keys = [...schedules.keys()].sort();
   const expected = [...VECTOR_SCHEDULE_KEYS].sort();
   if (stableJson(keys) !== stableJson(expected)) {
-    throw new Error("staging Vector schedule routine catalog does not match the exact migrated schedule set");
+    throw new Error(`${manifest.profile} Vector schedule routine catalog does not match the exact migrated schedule set`);
   }
   return keys.map((scheduleKey) => {
     const schedule = schedules.get(scheduleKey)!;

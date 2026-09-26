@@ -335,6 +335,8 @@ const support = await getEmbeddedPostgresTestSupport();
     let standardAgentId: string;
     let retiredWorkerAgentId: string;
     let engineeringAgentId: string;
+    let productionCompanyId: string;
+    let productionAgentId: string;
     let heartbeat: VectorIngressHeartbeat;
 
     beforeAll(async () => {
@@ -349,6 +351,8 @@ const support = await getEmbeddedPostgresTestSupport();
       standardAgentId = randomUUID();
       retiredWorkerAgentId = randomUUID();
       engineeringAgentId = randomUUID();
+      productionCompanyId = randomUUID();
+      productionAgentId = randomUUID();
       await db.insert(companies).values([
         {
           id: companyId,
@@ -360,6 +364,14 @@ const support = await getEmbeddedPostgresTestSupport();
           id: otherCompanyId,
           name: "Other",
           issuePrefix: "OTH",
+          requireBoardApprovalForNewAgents: false,
+        },
+        {
+          // prod1 runs the same Funky server roster as stg1 under its own
+          // installation identity and company.
+          id: productionCompanyId,
+          name: "Vector Production",
+          issuePrefix: "VPR",
           requireBoardApprovalForNewAgents: false,
         },
       ]);
@@ -447,6 +459,21 @@ const support = await getEmbeddedPostgresTestSupport();
               schemaVersion: 1,
               installationId: "t480-engineering",
               profile: "engineering",
+            },
+          },
+        },
+        {
+          id: productionAgentId,
+          companyId: productionCompanyId,
+          name: "Funky Scout",
+          role: "funky-scout",
+          status: "idle",
+          adapterType: "process",
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "vector-os-production",
+              profile: "production",
             },
           },
         },
@@ -933,6 +960,91 @@ const support = await getEmbeddedPostgresTestSupport();
         status: 409,
         details: { code: "vector_role_contract_mismatch" },
       });
+    });
+
+    it("admits a trusted production role turn exactly as staging and keeps installations apart", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const roleContext = {
+        schemaVersion: 1 as const,
+        role: "funky-scout",
+        model: "",
+        noBuiltinTools: true as const,
+        systemPrompt: "Use the current Vector analyst charter.",
+        metadata: { persona_version: "persona-v1", run_kind: "title" },
+      };
+      const input = {
+        companyId: productionCompanyId,
+        agentId: productionAgentId,
+        externalSessionId: "trusted-production-role-session",
+        ownerId: "vector-user:user-1",
+        installationId: "vector-os-production",
+        profileId: "production",
+        clientRequestId: "trusted-production-role-turn-1",
+        body: "Name this conversation.",
+        roleContext,
+      };
+      const turn = await service.addTurn(input);
+      const runContext = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toEqual(roleContext);
+
+      for (const [label, patch] of [
+        ["role escalation", { roleContext: { ...roleContext, role: "funky-advisor" } }],
+        ["builtin tool widening", { roleContext: { ...roleContext, noBuiltinTools: false } }],
+        // A staging-scoped turn can never drive the production agent.
+        ["staging scope on a production agent", { installationId: "stg1-staging", profileId: "staging" }],
+        ["production profile on another installation", { installationId: "stg1-staging" }],
+      ] as const) {
+        await expect(service.addTurn({
+          ...input,
+          ...patch,
+          externalSessionId: `trusted-production-role-${label}`,
+          clientRequestId: `trusted-production-role-turn-${label}`,
+        } as typeof input)).rejects.toMatchObject({
+          status: 409,
+          details: { code: "vector_role_contract_mismatch" },
+        });
+      }
+      // A production-scoped turn can never drive the staging agent either.
+      await expect(service.addTurn({
+        ...input,
+        companyId,
+        agentId,
+        externalSessionId: "trusted-production-role-on-staging",
+        clientRequestId: "trusted-production-role-on-staging",
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_role_contract_mismatch" },
+      });
+    });
+
+    it.each([
+      ["staging", "funky", "vector_legacy_context_unavailable"],
+      ["production", "funky", "vector_legacy_context_unavailable"],
+      ["production", "nexuslink-chat", "vector_legacy_context_profile_mismatch"],
+      ["staging", "nexuslink-chat", "vector_legacy_context_profile_mismatch"],
+      ["standard", "nexuslink-chat", "vector_legacy_context_unavailable"],
+      ["standard", "funky", "vector_legacy_context_profile_mismatch"],
+      ["engineering", "funky", "vector_legacy_context_profile_mismatch"],
+      ["demo", "funky", "vector_legacy_context_profile_mismatch"],
+    ] as const)("maps the %s profile's %s legacy service to %s", async (profileId, legacyService, code) => {
+      // Without an importer, an eligible profile/service pair passes the
+      // mapping and stops at the missing importer; an ineligible pair stops
+      // at the mapping.
+      const service = vectorIngressService(db, { heartbeat });
+      await expect(service.importLegacyPiContext({
+        companyId: productionCompanyId,
+        agentId: productionAgentId,
+        ownerId: "vector-user:user-1",
+        installationId: "vector-os-production",
+        profileId,
+        externalSessionId: "legacy-mapping-thread",
+        legacyService,
+        legacyPiSessionId: "legacy-mapping-session",
+      })).rejects.toMatchObject({ status: 409, details: { code } });
     });
 
     it("persists an admitted standard persona without copying its prompt into comments", async () => {

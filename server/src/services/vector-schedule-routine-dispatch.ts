@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-profiles";
 
 const DISPATCH_PATH = "/internal/paperclip/schedules/dispatch";
 const MIN_SECRET_LENGTH = 32;
@@ -68,8 +69,8 @@ export function createVectorScheduleRoutineDispatcher(
   const url = requireLoopbackDispatchUrl(config.url.trim());
   const secret = config.secret.trim();
   if (secret.length < MIN_SECRET_LENGTH) throw new Error("Vector schedule dispatch secret is missing or invalid");
-  if (!config.installationId.trim() || config.profile !== "staging" || !config.companyId.trim()) {
-    throw new Error("Vector schedule dispatch requires complete staging installation scope");
+  if (!config.installationId.trim() || !isVectorFunkyServerProfile(config.profile) || !config.companyId.trim()) {
+    throw new Error("Vector schedule dispatch requires complete Funky server (staging or production) installation scope");
   }
   const fetchImpl = config.fetchImpl ?? fetch;
   const now = config.now ?? Date.now;

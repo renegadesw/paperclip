@@ -6,7 +6,10 @@ import {
 } from "./vector-schedule-routine-dispatch.js";
 
 describe("Vector schedule routine dispatch", () => {
-  it("sends only sealed schedule identity and installation scope", async () => {
+  it.each([
+    ["stg1-staging", "staging"],
+    ["vector-os-production", "production"],
+  ] as const)("sends only sealed schedule identity and %s installation scope", async (installationId, profile) => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = String(init?.body);
       const timestamp = String((init?.headers as Record<string, string>)["x-paperclip-timestamp"]);
@@ -16,8 +19,8 @@ describe("Vector schedule routine dispatch", () => {
         .digest("hex")}`;
       expect((init?.headers as Record<string, string>)["x-paperclip-signature"]).toBe(expected);
       expect(JSON.parse(body)).toEqual(expect.objectContaining({
-        installationId: "stg1-staging",
-        profile: "staging",
+        installationId,
+        profile,
         companyId: "0f6d6b20-b9dd-43fc-8d48-5f8f65c6e047",
         scheduleKey: "fa_research_daily",
       }));
@@ -31,8 +34,8 @@ describe("Vector schedule routine dispatch", () => {
     const dispatcher = createVectorScheduleRoutineDispatcher({
       url: "http://127.0.0.1:8430/internal/paperclip/schedules/dispatch",
       secret: "abcdef0123456789abcdef0123456789",
-      installationId: "stg1-staging",
-      profile: "staging",
+      installationId,
+      profile,
       companyId: "0f6d6b20-b9dd-43fc-8d48-5f8f65c6e047",
       now: () => 1_700_000_000_000,
       fetchImpl: fetchImpl as typeof fetch,
@@ -45,7 +48,7 @@ describe("Vector schedule routine dispatch", () => {
     });
   });
 
-  it("rejects non-loopback URLs, non-staging scope and partial configuration", () => {
+  it("rejects non-loopback URLs, non-Funky-server scope and partial configuration", () => {
     expect(() => createVectorScheduleRoutineDispatcher({
       url: "https://example.com/internal/paperclip/schedules/dispatch",
       secret: "abcdef0123456789abcdef0123456789",
@@ -55,7 +58,17 @@ describe("Vector schedule routine dispatch", () => {
       url: "http://127.0.0.1:8430/internal/paperclip/schedules/dispatch",
       secret: "abcdef0123456789abcdef0123456789",
       installationId: "stecke1-standard", profile: "standard", companyId: randomUUID(),
-    })).toThrow("staging installation scope");
+    })).toThrow("Funky server (staging or production) installation scope");
+    expect(() => createVectorScheduleRoutineDispatcher({
+      url: "http://127.0.0.1:8430/internal/paperclip/schedules/dispatch",
+      secret: "abcdef0123456789abcdef0123456789",
+      installationId: "t480-engineering", profile: "engineering", companyId: randomUUID(),
+    })).toThrow("Funky server (staging or production) installation scope");
+    expect(() => createVectorScheduleRoutineDispatcher({
+      url: "http://127.0.0.1:8430/internal/paperclip/schedules/dispatch",
+      secret: "abcdef0123456789abcdef0123456789",
+      installationId: "vector-os-production", profile: "Production", companyId: randomUUID(),
+    })).toThrow("Funky server (staging or production) installation scope");
     expect(() => vectorScheduleRoutineDispatcherFromEnv({
       PAPERCLIP_VECTOR_SCHEDULE_DISPATCH_URL: "http://127.0.0.1:8430/internal/paperclip/schedules/dispatch",
     })).toThrow("configured together");

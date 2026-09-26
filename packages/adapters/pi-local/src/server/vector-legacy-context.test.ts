@@ -81,6 +81,21 @@ describe("Vector legacy Pi context staging", () => {
     await expect(stageVectorLegacyPiContext({ ...scope, profileId: "production", sourceRoot: f.sourceRoot, sessionsRoot: f.sessionsRoot, ingressSecret: secret })).rejects.toThrow(/scope is malformed/);
   });
 
+  it("maps production to the funky legacy service exactly as staging", async () => {
+    const production = { ...scope, installationId: "vector-os-production", profileId: "production", legacyService: "funky" as const };
+    const f = await fixture(production);
+    const staged = await stageVectorLegacyPiContext({ ...production, sourceRoot: f.sourceRoot, sessionsRoot: f.sessionsRoot, ingressSecret: secret });
+    expect(staged).toMatchObject({ replayed: false });
+    const marker = readVectorLegacyPiContextMarker(staged.sessionParams)!;
+    expect(marker).toMatchObject({ installationId: "vector-os-production", profileId: "production" });
+    await expect(verifyVectorLegacyPiContextFile({ marker, ingressSecret: secret, expected: production, sessionsRoot: f.sessionsRoot })).resolves.toBe(true);
+    // The production receipt never verifies under a staging installation scope.
+    await expect(verifyVectorLegacyPiContextFile({
+      marker, ingressSecret: secret, expected: { ...production, installationId: "stg1-staging", profileId: "staging" }, sessionsRoot: f.sessionsRoot,
+    })).resolves.toBe(false);
+    await expect(stageVectorLegacyPiContext({ ...production, legacyService: "nexuslink-chat", sourceRoot: f.sourceRoot, sessionsRoot: f.sessionsRoot, ingressSecret: secret })).rejects.toThrow(/scope is malformed/);
+  });
+
   it("rejects traversal and a mismatched session header", async () => {
     const f = await fixture();
     await expect(stageVectorLegacyPiContext({ ...scope, legacyPiSessionId: "../other", sourceRoot: f.sourceRoot, sessionsRoot: f.sessionsRoot, ingressSecret: secret })).rejects.toThrow(/scope is malformed/);

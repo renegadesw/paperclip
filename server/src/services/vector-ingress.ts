@@ -30,6 +30,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
+import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-profiles";
 import { deliverConversationComments } from "./agent-conversations.js";
 import { heartbeatService } from "./heartbeat.js";
 import { issueService } from "./issues.js";
@@ -486,14 +487,15 @@ export function vectorIngressService(
     const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
     const adapterConfig = eventPayloadRecord(agent.adapterConfig);
     const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
-    // Role turns are a staging-only surface: the turn must name the target
-    // agent's own provisioned role and carry no builtin tools. Engineering
-    // (FunkyDev, alias `pi`) and standard (standard-chat) never accept one.
+    // Role turns are a Funky server surface (staging and production): the
+    // turn must name the target agent's own provisioned role and carry no
+    // builtin tools. Engineering (FunkyDev, alias `pi`) and standard
+    // (standard-chat) never accept one.
     if (
       provisioning.schemaVersion !== 1 ||
       provisioning.installationId !== input.installationId ||
       provisioning.profile !== input.profileId ||
-      input.profileId !== "staging" ||
+      !isVectorFunkyServerProfile(input.profileId) ||
       input.roleContext.noBuiltinTools !== true ||
       agent.role !== input.roleContext.role ||
       (input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
@@ -760,7 +762,7 @@ export function vectorIngressService(
     const expectedService =
       input.profileId === "engineering" || input.profileId === "standard"
         ? "nexuslink-chat"
-        : input.profileId === "staging"
+        : isVectorFunkyServerProfile(input.profileId)
           ? "funky"
           : null;
     if (!expectedService || input.legacyService !== expectedService) {
