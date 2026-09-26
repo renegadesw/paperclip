@@ -23,7 +23,7 @@ const bridgeSecret = "paperclip-vector-tool-bridge-test-secret-32-plus";
 
 function config() {
   return {
-    endpoint: new URL("http://127.0.0.1:32160/internal/paperclip/v1/tools/call"),
+    endpoint: new URL("http://127.0.0.1:32160/inbound/paperclip/v1/tools/call"),
     callbackUrl: new URL("http://127.0.0.1:3100/api/internal/vector/v1/tools/callback"),
     installationId: "t480-funkydev",
     profile: "engineering",
@@ -42,7 +42,7 @@ describe("Vector tool authority configuration", () => {
   it("is disabled by default and requires a complete literal-loopback configuration", () => {
     expect(resolveVectorToolAuthorityConfig({})).toBeNull();
     expect(() => resolveVectorToolAuthorityConfig({
-      PAPERCLIP_VECTOR_TOOL_BRIDGE_URL: "http://localhost:32160/internal/paperclip/v1/tools/call",
+      PAPERCLIP_VECTOR_TOOL_BRIDGE_URL: "http://localhost:32160/inbound/paperclip/v1/tools/call",
       PAPERCLIP_VECTOR_TOOL_CALLBACK_URL: "http://127.0.0.1:3100/api/internal/vector/v1/tools/callback",
       PAPERCLIP_VECTOR_INSTALLATION_ID: "t480-funkydev",
       PAPERCLIP_VECTOR_PROFILE: "engineering",
@@ -57,13 +57,13 @@ describe("Vector tool authority configuration", () => {
       }]),
     })).toThrow(/literal loopback/);
     expect(() => resolveVectorToolAuthorityConfig({
-      PAPERCLIP_VECTOR_TOOL_BRIDGE_URL: "http://127.0.0.1:32160/internal/paperclip/v1/tools/call",
+      PAPERCLIP_VECTOR_TOOL_BRIDGE_URL: "http://127.0.0.1:32160/inbound/paperclip/v1/tools/call",
     })).toThrow(/requires bridge URL/);
   });
 
   it("derives the approved tool set only from packaged extension policy", () => {
     expect(resolveVectorToolAuthorityConfig({
-      PAPERCLIP_VECTOR_TOOL_BRIDGE_URL: "http://127.0.0.1:32160/internal/paperclip/v1/tools/call",
+      PAPERCLIP_VECTOR_TOOL_BRIDGE_URL: "http://127.0.0.1:32160/inbound/paperclip/v1/tools/call",
       PAPERCLIP_VECTOR_TOOL_CALLBACK_URL: "http://[::1]:3100/api/internal/vector/v1/tools/callback",
       PAPERCLIP_VECTOR_INSTALLATION_ID: "t480-funkydev",
       PAPERCLIP_VECTOR_PROFILE: "engineering",
@@ -181,6 +181,34 @@ const support = await getEmbeddedPostgresTestSupport();
     })).rejects.toMatchObject({
       status: 409,
       details: { code: "vector_tool_authority_scope_conflict" },
+    });
+  });
+
+  it("exposes only the per-run subset admitted by the installed profile", async () => {
+    const run = await createRun();
+    const bridge = new VectorToolAuthorityBridge(db, config(), vi.fn());
+    await bridge.bindRun({
+      companyId,
+      agentId,
+      externalSessionId: "browser-session-narrow",
+      issueId,
+      runId: run.id,
+      authorityHandle: "opaque-authority-narrow",
+      allowedTools: ["fs.read"],
+    });
+    expect(bridge.runtimeAccess({ runId: run.id, companyId, agentId, issueId })?.tools)
+      .toEqual(["fs.read"]);
+    await expect(bridge.bindRun({
+      companyId,
+      agentId,
+      externalSessionId: "browser-session-wide",
+      issueId,
+      runId: (await createRun()).id,
+      authorityHandle: "opaque-authority-wide",
+      allowedTools: ["fs.delete"],
+    })).rejects.toMatchObject({
+      status: 422,
+      details: { code: "vector_tool_not_approved" },
     });
   });
 

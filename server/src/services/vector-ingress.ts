@@ -57,6 +57,7 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   body: string;
   attachmentIds?: string[];
   authorityHandle?: string;
+  authorityTools?: string[];
   providerAuthorityHandle?: string;
   launchContext?: VectorWorkloadLaunchContext;
   roleContext?: VectorRoleTurnContext;
@@ -242,6 +243,7 @@ export interface VectorIngressToolAuthority {
     issueId: string;
     commentId: string;
     authorityHandle: string;
+    allowedTools: readonly string[];
   }): VectorToolPendingDescriptor;
   bindRun(input: VectorIngressScope & {
     issueId: string;
@@ -1071,6 +1073,7 @@ export function vectorIngressService(
           issueId: issue.id,
           commentId: comment.id,
           authorityHandle: input.authorityHandle,
+          allowedTools: input.authorityTools!,
         })
       : null;
     const pendingProviderAuthority = input.providerAuthorityHandle

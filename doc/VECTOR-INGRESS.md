@@ -85,11 +85,12 @@ authority patterns, with bounded depth, entry count, strings, and total budget.
 
 ## Run-scoped Vector tools (disabled by default)
 
-A turn may also carry an opaque, non-secret `authorityHandle`. Paperclip accepts
+A turn may also carry an opaque, non-secret `authorityHandle` and its exact
+`authorityTools` subset. Paperclip accepts
 that field only when the complete tool bridge configuration is present:
 
 - `PAPERCLIP_VECTOR_TOOL_BRIDGE_URL` is the exact literal-loopback Vector OS
-  endpoint `http://127.x.x.x:<port>/internal/paperclip/v1/tools/call`.
+  endpoint `http://127.x.x.x:<port>/inbound/paperclip/v1/tools/call`.
 - `PAPERCLIP_VECTOR_TOOL_CALLBACK_URL` is the exact literal-loopback Paperclip
   callback `http://127.x.x.x:<port>/api/internal/vector/v1/tools/callback`.
 - `PAPERCLIP_VECTOR_INSTALLATION_ID` and `PAPERCLIP_VECTOR_PROFILE` identify the
@@ -98,7 +99,8 @@ that field only when the complete tool bridge configuration is present:
   characters. It is not the Vector ingress secret or a user bearer.
 - `PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS` is the existing deployment-owned,
   hash-pinned extension manifest. Its strict `tools` lists are the maximum tool
-  set. Agent configuration cannot add a tool. Only entries with
+set. The signed turn may narrow that set but cannot widen it. Agent
+configuration cannot add a tool. Only entries with
   `"delivery":"callback"` enter the run capability. Local entries, such as the
   Vault reader, remain outside the callback bridge.
 
