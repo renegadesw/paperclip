@@ -613,6 +613,7 @@ export interface VectorProvisioningPort {
   listAgents(companyId: string): Promise<AgentRecord[]>;
   getAgent(id: string): Promise<AgentRecord | null>;
   createAgent(companyId: string, input: Omit<AgentRecord, "companyId">): Promise<AgentRecord>;
+  updateAgent(id: string, patch: Partial<Omit<AgentRecord, "id" | "companyId">>): Promise<AgentRecord | null>;
 }
 
 export interface VectorProvisioningInput {
@@ -664,6 +665,31 @@ function assertImmutableFields(
   for (const key of Object.keys(expectedRecord)) {
     if (!mutable.has(key)) assertEqual(`${kind}.${key}`, actualRecord[key], expectedRecord[key]);
   }
+}
+
+/**
+ * The manifest revision this installation last provisioned onto an agent.
+ * An agent without a matching provisioning marker was not created by this
+ * installation and is never adopted or rewritten.
+ */
+function storedManifestRevision(
+  agent: AgentRecord,
+  manifest: { installationId: string; profile: string },
+): number {
+  const metadata = agent.metadata;
+  const marker = metadata && typeof metadata === "object" ? metadata.vectorProvisioning : undefined;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) {
+    throw new Error("Vector provisioning agent has no provisioning marker");
+  }
+  const record = marker as Record<string, unknown>;
+  if (record.installationId !== manifest.installationId || record.profile !== manifest.profile) {
+    throw new Error("Vector provisioning agent belongs to another installation");
+  }
+  const revision = record.manifestRevision;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error("Vector provisioning agent has an invalid manifest revision");
+  }
+  return revision;
 }
 
 function containedReleasePath(root: string, relative: string): string {
@@ -807,6 +833,22 @@ export async function reconcileVectorInstallation(
     let agent = await port.getAgent(desired.id);
     if (agent) {
       if (agent.companyId !== company.id) throw new Error("Vector provisioning agent belongs to another company");
+      const storedRevision = storedManifestRevision(agent, manifest);
+      if (storedRevision > manifest.manifestRevision) {
+        throw new Error(
+          `Vector provisioning downgrade refused: agent is at manifest revision ${storedRevision}, manifest is ${manifest.manifestRevision}`,
+        );
+      }
+      if (storedRevision < manifest.manifestRevision) {
+        // A newer revision owns every declared field except operator-mutable ones.
+        const collision = existingAgents.find((candidate) => candidate.id !== agent!.id && candidate.name === desired.name);
+        if (collision) throw new Error("Vector provisioning agent identity collision");
+        const mutable = new Set<string>(desired.mutableFields);
+        const { id: _id, ...declared } = agentExpected;
+        const patch = Object.fromEntries(Object.entries(declared).filter(([key]) => !mutable.has(key)));
+        agent = await port.updateAgent(agent.id, patch);
+        if (!agent || agent.companyId !== company.id) throw new Error("Vector provisioning agent upgrade failed");
+      }
       assertImmutableFields("agent", agent, agentExpected, desired.mutableFields);
     } else {
       const collision = existingAgents.find((candidate) => candidate.name === desired.name);
@@ -874,6 +916,8 @@ function productionPort(db: Db): VectorProvisioningPort {
     listAgents: (companyId) => agents.list(companyId, { includeTerminated: true }) as Promise<AgentRecord[]>,
     getAgent: (id) => agents.getById(id) as Promise<AgentRecord | null>,
     createAgent: (companyId, input) => agents.create(companyId, input) as Promise<AgentRecord>,
+    updateAgent: (id, patch) =>
+      agents.update(id, patch, { recordRevision: { source: "vector_provisioning" } }) as Promise<AgentRecord | null>,
   };
 }
 
