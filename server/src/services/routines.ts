@@ -78,12 +78,18 @@ import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./is
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { runtimePublicOrigin } from "./cloud-runtime-identity.js";
+import {
+  VECTOR_WORKLOAD_ROUTINE_ORIGIN_KIND,
+  type VectorWorkloadQueue,
+  type VectorWorkloadRoutineDispatcher,
+} from "./vector-workload-routine-dispatch.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
 const MAX_ROUTINE_REVISIONS = 100;
+const VECTOR_WORKLOAD_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
 const EXECUTION_ISSUE_TRANSIENT_FAILURE_CODE = "execution_issue_status";
 const EXECUTION_ISSUE_TRANSIENT_FAILURE_STATUSES = ["blocked", "cancelled"] as const;
 const ACTIVITY_GATE_IGNORED_ACTIONS = [
@@ -667,6 +673,7 @@ export function routineService(
     heartbeat?: IssueAssignmentWakeupDeps;
     pluginWorkerManager?: PluginWorkerManager;
     runtimeEnv?: Record<string, string | undefined>;
+    vectorWorkloadDispatcher?: VectorWorkloadRoutineDispatcher | null;
   } = {},
 ) {
   const issueSvc = issueService(db);
@@ -1697,6 +1704,173 @@ export function routineService(
       );
   }
 
+  async function dispatchVectorWorkloadRoutineRun(input: {
+    routine: typeof routines.$inferSelect;
+    trigger: typeof routineTriggers.$inferSelect | null;
+    source: "schedule" | "manual" | "api" | "webhook";
+    payload?: Record<string, unknown> | null;
+    idempotencyKey?: string | null;
+    rejectIdempotencyReplay?: boolean;
+    nextRunAtOverride?: Date | null;
+  }) {
+    const dispatcher = deps.vectorWorkloadDispatcher;
+    if (!dispatcher) throw conflict("Vector workload routine dispatch is not configured");
+    const queue = input.routine.originId as VectorWorkloadQueue | null;
+    if (queue !== "research" && queue !== "tasks") {
+      throw unprocessable("Vector workload routine has an invalid queue identity");
+    }
+    const triggeredAt = new Date();
+    const nextRunAt = input.nextRunAtOverride !== undefined
+      ? input.nextRunAtOverride
+      : input.trigger?.kind === "schedule" && input.trigger.cronExpression && input.trigger.timezone
+        ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
+        : undefined;
+
+    const run = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      await tx.execute(
+        sql`select id from ${routines} where ${routines.id} = ${input.routine.id} and ${routines.companyId} = ${input.routine.companyId} for update`,
+      );
+      if (input.idempotencyKey) {
+        const existing = await txDb
+          .select()
+          .from(routineRuns)
+          .where(and(
+            eq(routineRuns.companyId, input.routine.companyId),
+            eq(routineRuns.routineId, input.routine.id),
+            eq(routineRuns.source, input.source),
+            eq(routineRuns.idempotencyKey, input.idempotencyKey),
+            input.trigger ? eq(routineRuns.triggerId, input.trigger.id) : isNull(routineRuns.triggerId),
+          ))
+          .orderBy(desc(routineRuns.createdAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (existing) {
+          if (input.rejectIdempotencyReplay) throw conflict("Webhook replay detected");
+          return existing;
+        }
+      }
+
+      const activeCutoff = new Date(triggeredAt.getTime() - VECTOR_WORKLOAD_ACTIVE_WINDOW_MS);
+      await txDb
+        .update(routineRuns)
+        .set({
+          status: "failed",
+          failureReason: "Vector workload callback exceeded its bounded dispatch window",
+          completedAt: triggeredAt,
+          updatedAt: triggeredAt,
+        })
+        .where(and(
+          eq(routineRuns.companyId, input.routine.companyId),
+          eq(routineRuns.routineId, input.routine.id),
+          inArray(routineRuns.status, ["received", "running"]),
+          lte(routineRuns.updatedAt, activeCutoff),
+        ));
+      const active = await txDb
+        .select()
+        .from(routineRuns)
+        .where(and(
+          eq(routineRuns.companyId, input.routine.companyId),
+          eq(routineRuns.routineId, input.routine.id),
+          inArray(routineRuns.status, ["received", "running"]),
+          gt(routineRuns.updatedAt, activeCutoff),
+        ))
+        .orderBy(desc(routineRuns.updatedAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+      const [created] = await txDb.insert(routineRuns).values({
+        companyId: input.routine.companyId,
+        routineId: input.routine.id,
+        triggerId: input.trigger?.id ?? null,
+        source: input.source,
+        status: active && input.routine.concurrencyPolicy !== "always_enqueue" ? "coalesced" : "running",
+        triggeredAt,
+        completedAt: active && input.routine.concurrencyPolicy !== "always_enqueue" ? triggeredAt : null,
+        coalescedIntoRunId: active && input.routine.concurrencyPolicy !== "always_enqueue" ? active.id : null,
+        idempotencyKey: input.idempotencyKey ?? null,
+        triggerPayload: input.payload ?? null,
+        dispatchFingerprint: `vector-workload:${queue}`,
+        routineRevisionId: input.routine.latestRevisionId,
+        responsibleUserId: input.routine.responsibleUserId ?? null,
+      }).returning();
+      await updateRoutineTouchedState({
+        routineId: input.routine.id,
+        triggerId: input.trigger?.id ?? null,
+        triggeredAt,
+        status: created.status,
+        nextRunAt,
+      }, txDb);
+      return created;
+    });
+
+    let settled = run;
+    if (run.status === "running") {
+      try {
+        const result = await dispatcher.dispatch({
+          routineRunId: run.id,
+          routineId: input.routine.id,
+          triggerId: input.trigger?.id ?? null,
+          companyId: input.routine.companyId,
+          queue,
+        });
+        const completed = await finalizeRun(run.id, {
+          status: "completed",
+          completedAt: new Date(),
+          triggerPayload: { ...(input.payload ?? {}), dispatch: result },
+        });
+        await updateRoutineTouchedState({
+          routineId: input.routine.id,
+          triggerId: input.trigger?.id ?? null,
+          triggeredAt,
+          status: "completed",
+          nextRunAt,
+        });
+        settled = completed ?? run;
+      } catch (error) {
+        const failureReason = error instanceof Error ? error.message : String(error);
+        const failed = await finalizeRun(run.id, {
+          status: "failed",
+          failureReason,
+          completedAt: new Date(),
+        });
+        await updateRoutineTouchedState({
+          routineId: input.routine.id,
+          triggerId: input.trigger?.id ?? null,
+          triggeredAt,
+          status: "failed",
+          nextRunAt,
+        });
+        settled = failed ?? run;
+      }
+    }
+
+    if (input.source === "schedule" || input.source === "webhook") {
+      try {
+        await logActivity(db, {
+          companyId: input.routine.companyId,
+          actorType: "system",
+          actorId: input.source === "schedule" ? "routine-scheduler" : "routine-webhook",
+          action: "routine.run_triggered",
+          entityType: "routine_run",
+          entityId: settled.id,
+          details: {
+            routineId: input.routine.id,
+            triggerId: input.trigger?.id ?? null,
+            source: settled.source,
+            status: settled.status,
+            vectorWorkloadQueue: queue,
+          },
+        });
+      } catch (error) {
+        logger.warn({ err: error, routineId: input.routine.id, runId: settled.id }, "failed to log Vector workload routine run");
+      }
+    }
+    const telemetryClient = getTelemetryClient();
+    if (telemetryClient) trackRoutineRun(telemetryClient, { source: settled.source, status: settled.status });
+    return settled;
+  }
+
   async function dispatchRoutineRun(input: {
     routine: typeof routines.$inferSelect;
     trigger: typeof routineTriggers.$inferSelect | null;
@@ -1715,6 +1889,9 @@ export function routineService(
     nextRunAtOverride?: Date | null;
     actor?: Actor;
   }) {
+    if (input.routine.originKind === VECTOR_WORKLOAD_ROUTINE_ORIGIN_KIND) {
+      return dispatchVectorWorkloadRoutineRun(input);
+    }
     const projectId = input.projectId ?? input.routine.projectId ?? null;
     const projectWorkspaceId = input.projectWorkspaceId ?? null;
     const assigneeAgentId = input.assigneeAgentId ?? input.routine.assigneeAgentId ?? null;

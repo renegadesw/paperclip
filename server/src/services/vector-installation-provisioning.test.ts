@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   reconcileVectorInstallation,
+  vectorWorkloadRoutineSeeds,
   vectorInstallationManifestSchema,
   type VectorProvisioningPort,
 } from "./vector-installation-provisioning.js";
@@ -329,6 +330,13 @@ describe("Vector installation provisioning", () => {
       toolPolicy: restrictedPolicy,
     };
     const port = memoryPort();
+    const routineSeeds = vectorWorkloadRoutineSeeds(vectorInstallationManifestSchema.parse(manifest));
+    expect(routineSeeds).toMatchObject([
+      { queue: "research", assigneeAgentId: scoutId, cronExpression: "* * * * *", timezone: "UTC" },
+      { queue: "tasks", assigneeAgentId: advisorId, cronExpression: "* * * * *", timezone: "UTC" },
+    ]);
+    expect(new Set(routineSeeds.flatMap((seed) => [seed.routineId, seed.triggerId])).size).toBe(4);
+    expect(vectorWorkloadRoutineSeeds(vectorInstallationManifestSchema.parse(f.manifest))).toEqual([]);
     manifest.workloads[0].schedule.cronExpression = "21 8 * * *";
     await expect(reconcileVectorInstallation(port, {
       ...f,

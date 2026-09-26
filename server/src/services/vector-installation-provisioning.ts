@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { type Db, vectorInstallationOwnerships } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { type Db, routineTriggers, routines, vectorInstallationOwnerships } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { agentService } from "./agents.js";
 import { companyService } from "./companies.js";
@@ -493,6 +493,33 @@ export const vectorInstallationManifestSchema = z.object({
 export type VectorInstallationManifest = z.infer<typeof vectorInstallationManifestSchema>;
 export type VectorToolPolicy = z.infer<typeof toolPolicySchema>;
 
+function deterministicUuid(identity: string) {
+  const hex = createHash("sha256").update(identity).digest("hex").slice(0, 32).split("");
+  hex[12] = "5";
+  hex[16] = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+export function vectorWorkloadRoutineSeeds(manifest: VectorInstallationManifest) {
+  if (manifest.profile !== "staging") return [];
+  const agentsByRole = new Map([manifest.agent, ...manifest.additionalAgents].map((agent) => [agent.role, agent.id]));
+  return ([
+    { queue: "research", role: "funky-scout", title: "Vector research queue pump" },
+    { queue: "tasks", role: "funky-advisor", title: "Vector agentic task queue pump" },
+  ] as const).map((seed) => ({
+    routineId: deterministicUuid(`${manifest.installationId}:paperclip-workload-routine:${seed.queue}`),
+    triggerId: deterministicUuid(`${manifest.installationId}:paperclip-workload-trigger:${seed.queue}`),
+    companyId: manifest.company.id,
+    assigneeAgentId: agentsByRole.get(seed.role)!,
+    queue: seed.queue,
+    title: seed.title,
+    description: `Claims one bounded ${seed.queue} batch from Vector OS and executes it through the trusted Paperclip runtime bridge.`,
+    cronExpression: "* * * * *",
+    timezone: "UTC",
+  }));
+}
+
 type CompanyRecord = {
   id: string;
   name: string;
@@ -795,10 +822,89 @@ function productionPort(db: Db): VectorProvisioningPort {
   };
 }
 
+async function reconcileVectorWorkloadRoutines(db: Db, manifest: VectorInstallationManifest) {
+  for (const seed of vectorWorkloadRoutineSeeds(manifest)) {
+    const routineExpected = {
+      id: seed.routineId,
+      companyId: seed.companyId,
+      title: seed.title,
+      description: seed.description,
+      assigneeAgentId: seed.assigneeAgentId,
+      priority: "medium",
+      status: "active",
+      concurrencyPolicy: "coalesce_if_active",
+      catchUpPolicy: "skip_missed",
+      activityGatePolicy: "always",
+      activityGateScope: "company",
+      originKind: "vector_workload_dispatch",
+      originId: seed.queue,
+    };
+    let routine = await db.select().from(routines).where(and(
+      eq(routines.companyId, seed.companyId),
+      eq(routines.id, seed.routineId),
+    )).then((rows) => rows[0] ?? null);
+    if (!routine) {
+      [routine] = await db.insert(routines).values(routineExpected).returning();
+    }
+    assertEqual("workloadRoutine", {
+      id: routine.id,
+      companyId: routine.companyId,
+      title: routine.title,
+      description: routine.description,
+      assigneeAgentId: routine.assigneeAgentId,
+      priority: routine.priority,
+      status: routine.status,
+      concurrencyPolicy: routine.concurrencyPolicy,
+      catchUpPolicy: routine.catchUpPolicy,
+      activityGatePolicy: routine.activityGatePolicy,
+      activityGateScope: routine.activityGateScope,
+      originKind: routine.originKind,
+      originId: routine.originId,
+    }, routineExpected);
+
+    const triggerExpected = {
+      id: seed.triggerId,
+      companyId: seed.companyId,
+      routineId: seed.routineId,
+      kind: "schedule",
+      label: `${seed.queue} queue pump`,
+      cronExpression: seed.cronExpression,
+      timezone: seed.timezone,
+    };
+    let trigger = await db.select().from(routineTriggers).where(and(
+      eq(routineTriggers.companyId, seed.companyId),
+      eq(routineTriggers.id, seed.triggerId),
+    )).then((rows) => rows[0] ?? null);
+    if (!trigger) {
+      [trigger] = await db.insert(routineTriggers).values({
+        ...triggerExpected,
+        enabled: false,
+        nextRunAt: null,
+      }).returning();
+    }
+    // Enablement and scheduler timestamps are operator/runtime state. Every
+    // other field is sealed so a reinstall cannot silently retarget a pump.
+    assertEqual("workloadRoutineTrigger", {
+      id: trigger.id,
+      companyId: trigger.companyId,
+      routineId: trigger.routineId,
+      kind: trigger.kind,
+      label: trigger.label,
+      cronExpression: trigger.cronExpression,
+      timezone: trigger.timezone,
+    }, triggerExpected);
+  }
+}
+
 export async function provisionVectorInstallation(
   db: Db,
   input: VectorProvisioningInput,
 ): Promise<VectorProvisioningReceipt> {
-  return db.transaction(async (tx) =>
-    reconcileVectorInstallation(productionPort(tx as unknown as Db), input));
+  return db.transaction(async (tx) => {
+    const transactionDb = tx as unknown as Db;
+    const receipt = await reconcileVectorInstallation(productionPort(transactionDb), input);
+    const manifest = vectorInstallationManifestSchema.parse(input.manifest);
+    await reconcileVectorWorkloadRoutines(transactionDb, manifest);
+    return receipt;
+  });
 }

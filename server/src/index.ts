@@ -96,6 +96,7 @@ import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.j
 import { createSecretProposalsService } from "./services/secret-proposals.js";
 import { environmentRuntimeService } from "./services/environment-runtime.js";
 import { createDbAdapterAuthSessionStore } from "./services/device-login-service.js";
+import { vectorWorkloadRoutineDispatcherFromEnv } from "./services/vector-workload-routine-dispatch.js";
 import {
   createDeviceLoginReaper,
   createProductionLoginSessionReaperRuntime,
@@ -1376,7 +1377,10 @@ async function startServerWithDatabaseTeardown(
       heartbeat.drainActiveRunExecutions();
     prepareHotRestartShutdown = heartbeat.prepareHotRestartShutdown;
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
-    const routines = routineService(db as any, { pluginWorkerManager });
+    const routines = routineService(db as any, {
+      pluginWorkerManager,
+      vectorWorkloadDispatcher: vectorWorkloadRoutineDispatcherFromEnv(process.env),
+    });
     const statusCards = statusCardService(db as any);
     const issues = issueService(db as any);
     const mergedPullRequestConfirmations = issueThreadInteractionService(db as any, {
