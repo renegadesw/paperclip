@@ -1,0 +1,591 @@
+{
+  "schema_version": 1,
+  "description": "Legacy native FunkyDev pi tool surface, captured by executing agents/piext/*.ts with typebox 1.3.7. Memory recall is rendered from one stub core note (<CORE_SUMMARY>/<CORE_BODY>) and one standard note (<RECENT_SUMMARY>).",
+  "source": {
+    "repository": "renegadesw/vector-os",
+    "ref": "9bb788cfaaea7f5a14af066e92b2aaf4a73a53a2",
+    "directory": "agents/piext",
+    "files": {
+      "todo.ts": "0a53eae4ce7cb429d398018c317c4e542cd5f5a6f2ec09ea90b0ef0b40f14b0b",
+      "ask_user.ts": "16d5605c3ae82f5cae6527fd5e90f543091e31d28ea7ed20f6bc182b662a7ffb",
+      "github-publish.ts": "cbb5724a508466ab4ffd9974ad25d6d6b56c4bca033aef43e64c91c8b005d6ce",
+      "github-broker.ts": "fe09602ba15c7b9517eb5120f6eb6a1785651dc34fca038ebe265745e08626a4",
+      "github-fd.ts": "d42895ee3842f6ad592e60e17b0a4fb1bbee9e4c9e8d00cdb93d7c8014b62250",
+      "speak.ts": "7666c99ec8ea7ab2cb5a693631848025f3830db708e487eb2c65404743ec9b3e",
+      "memory.ts": "befd21759dc3d21947b08ec6f5f0d9473a4b9c783ba44eba058388f44dd6f966",
+      "vault-reference.ts": "5dc2260773b506b6e594bdaf898028d5616127aa1fb327597b7860499b05a43a",
+      "llm-meter.ts": "1fced656fcf2e03778f01b2a2dc856e838737ab305a584cf054769de9ccd79cf"
+    }
+  },
+  "tools": [
+    {
+      "extension": "ask_user.ts",
+      "name": "ask_user",
+      "label": "Ask user",
+      "description": "Ask the operator a question and BLOCK until they answer. Use ONLY for genuine forks — decisions the operator's answer changes what you do next, and that you cannot resolve from the code, the task, or a sensible default. Do NOT use for status updates, options-with-a-clear-default, or questions you could answer yourself. `choices` is optional suggestions; the operator may pick one or type a different answer. Cancelling returns the same no-answer result as a timeout. This tool blocks for up to 15 minutes; after no answer you may retry or decide without it.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The question, phrased for the operator. One sentence, ending in a question mark, load-bearing on what you'll do next with the answer."
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "label",
+                "value"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "description": "What the operator sees on the button."
+                },
+                "value": {
+                  "type": "string",
+                  "description": "What comes back as the answer if they pick this."
+                }
+              }
+            },
+            "description": "Optional suggestions. The operator may choose one or type a different free-text answer."
+          }
+        }
+      }
+    },
+    {
+      "extension": "github-fd.ts",
+      "name": "github_api",
+      "label": "GitHub API",
+      "description": "Call GitHub's repo-scoped REST API using FD's GitHub App access. This is the general tool for creating/updating/closing/commenting on PRs and issues, reviews, workflow dispatch/rerun/cancel, deployments, releases, branches, and other repository operations. Use a path beginning /repos/owner/repo (for example POST /repos/acme/app/pulls). The response includes GitHub's status and body. PR merge is intentionally handled by github_manage(kind=merge) so its exact-head guard remains enforced.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "method",
+          "path"
+        ],
+        "properties": {
+          "method": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "GET"
+              },
+              {
+                "type": "string",
+                "const": "POST"
+              },
+              {
+                "type": "string",
+                "const": "PATCH"
+              },
+              {
+                "type": "string",
+                "const": "PUT"
+              },
+              {
+                "type": "string",
+                "const": "DELETE"
+              }
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "GitHub REST path beginning /repos/owner/repo; query parameters are allowed."
+          },
+          "body": {
+            "description": "Request body as an object literal (NOT a JSON string). Example: {\"base\":\"main\",\"head\":\"artifacts-pr1\",\"title\":\"…\"}. Do NOT call JSON.stringify — the wrapper handles serialization. If you pass a string GitHub returns 422 because bodies must be JSON objects."
+          }
+        }
+      }
+    },
+    {
+      "extension": "github-broker.ts",
+      "name": "github_manage",
+      "label": "Manage GitHub",
+      "description": "Change GitHub through the daemon: label_add / label_remove, label_ensure, ready, draft, or merge with the validated head `sha`. Merge requires the head sha from a pr_view in this turn and refuses if the head moved, if the PR is draft, or if mergeable_state is not \"clean\". The merge method is always a merge commit. Read-only roles are refused. Native FD supplies repo=owner/name.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "label_add"
+              },
+              {
+                "type": "string",
+                "const": "label_remove"
+              },
+              {
+                "type": "string",
+                "const": "ready"
+              },
+              {
+                "type": "string",
+                "const": "draft"
+              },
+              {
+                "type": "string",
+                "const": "merge"
+              },
+              {
+                "type": "string",
+                "const": "label_ensure"
+              }
+            ]
+          },
+          "repo": {
+            "type": "string",
+            "description": "Repository as owner/name. FD may choose any repository available to its GitHub App."
+          },
+          "number": {
+            "type": "number",
+            "description": "Pull request number. Omit to use this session's assigned PR."
+          },
+          "numbers": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "Pull request numbers for a batch label operation."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels, for label_add / label_remove."
+          },
+          "sha": {
+            "type": "string",
+            "description": "Head sha you validated. Required for kind=merge."
+          },
+          "color": {
+            "type": "string",
+            "description": "Six-digit color for label_ensure."
+          },
+          "description": {
+            "type": "string",
+            "description": "Label description for label_ensure."
+          }
+        }
+      }
+    },
+    {
+      "extension": "github-broker.ts",
+      "name": "github_read",
+      "label": "Read GitHub",
+      "description": "Read GitHub through the vector-agents daemon. Use this instead of `gh` — this session has no GitHub credential and `gh` is unauthenticated. kind=pr_view returns state, draft, mergeable_state, head/base refs, head sha and labels. kind=pr_diff returns the unified diff. kind=pr_checks returns each check plus a verdict of passing/failing/pending/none at the current head. kind=run_failures returns the failing job, failing step and the pre-filtered failure lines for a workflow run id. kind=pr_list and kind=issue_list return open pull requests / issues. kind=repo_list lists App repositories; kind=file_read reads a repository path. Native FD supplies repo=owner/name; assigned sessions remain pinned to their recorded repository.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "pr_view"
+              },
+              {
+                "type": "string",
+                "const": "pr_diff"
+              },
+              {
+                "type": "string",
+                "const": "pr_checks"
+              },
+              {
+                "type": "string",
+                "const": "run_failures"
+              },
+              {
+                "type": "string",
+                "const": "pr_list"
+              },
+              {
+                "type": "string",
+                "const": "issue_list"
+              },
+              {
+                "type": "string",
+                "const": "repo_list"
+              },
+              {
+                "type": "string",
+                "const": "file_read"
+              }
+            ]
+          },
+          "repo": {
+            "type": "string",
+            "description": "Repository as owner/name. FD may choose any repository available to its GitHub App."
+          },
+          "number": {
+            "type": "number",
+            "description": "Pull request number. Omit to use this session's assigned PR."
+          },
+          "run_id": {
+            "type": "number",
+            "description": "Workflow run id. Required for kind=run_failures."
+          },
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path. Required for kind=file_read."
+          },
+          "ref": {
+            "type": "string",
+            "description": "Branch, tag, or SHA for kind=file_read."
+          }
+        }
+      }
+    },
+    {
+      "extension": "github-fd.ts",
+      "name": "github_repo",
+      "label": "GitHub repository",
+      "description": "Operate on a private or public GitHub checkout without exposing credentials or a shell. clone creates owner/name inside this session workspace. branch creates a non-default topic branch using ref. status reports the branch and changed files. commit stages all workspace changes and commits them using message. fetch/pull refresh; push publishes the current non-default branch; publish is an alias for push.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "kind",
+          "repo"
+        ],
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "clone"
+              },
+              {
+                "type": "string",
+                "const": "fetch"
+              },
+              {
+                "type": "string",
+                "const": "pull"
+              },
+              {
+                "type": "string",
+                "const": "branch"
+              },
+              {
+                "type": "string",
+                "const": "status"
+              },
+              {
+                "type": "string",
+                "const": "commit"
+              },
+              {
+                "type": "string",
+                "const": "push"
+              },
+              {
+                "type": "string",
+                "const": "publish"
+              }
+            ]
+          },
+          "repo": {
+            "type": "string",
+            "description": "Repository as owner/name."
+          },
+          "ref": {
+            "type": "string",
+            "description": "Branch/tag for clone, or new topic branch for kind=branch."
+          },
+          "message": {
+            "type": "string",
+            "description": "Commit message for kind=commit."
+          }
+        }
+      }
+    },
+    {
+      "extension": "memory.ts",
+      "name": "memory_forget",
+      "label": "Forget memory",
+      "description": "Retire a saved memory by slug when the user asks to forget it or corrects it. Retired notes are no longer recalled.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "slug"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "The memory's stable slug."
+          }
+        }
+      }
+    },
+    {
+      "extension": "memory.ts",
+      "name": "memory_save",
+      "label": "Save memory",
+      "description": "Save a durable user fact or preference for future conversations. Save stable preferences, background, constraints, and corrections. Do not save transient requests or private details the user would not expect to see later. Reuse a slug to update a fact. The user can inspect, edit, or forget each saved note.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "slug",
+          "summary"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "Stable kebab-case handle; reuse it to update the same fact."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Standalone one-line memory, at most 200 characters."
+          },
+          "body": {
+            "type": "string",
+            "description": "Optional short detail."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Lowercase matching keyword."
+            }
+          }
+        }
+      }
+    },
+    {
+      "extension": "memory.ts",
+      "name": "memory_search",
+      "label": "Search memories",
+      "description": "Search the user's saved memories. Their core notes are already in your context. Use this for related standard or deep notes, or when the user asks what you remember.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Words to search saved summaries, details, and tags."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum results from 1 to 20. Default 8."
+          }
+        }
+      }
+    },
+    {
+      "extension": "github-publish.ts",
+      "name": "publish_branch",
+      "label": "Publish branch",
+      "description": "Publish the current committed branch through the vector-agents daemon. Use this instead of git push or gh. The daemon derives the assigned repository and delivery policy, normally refuses default branches, permits a guarded non-force default-branch push only for an allowlisted direct-main assignment, and never returns its GitHub credential.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "extension": "speak.ts",
+      "name": "speak",
+      "label": "Speak",
+      "description": "Say a brief update out loud to the operator. Give one cohesive thought containing the actor, action, object, and reason when present. Preserve meaningful system and product names such as Git, GitHub, and the shell; omit only literal paths, hashes, raw commands, secrets, and syntax that would be gibberish aloud. Summarize tables and technical output semantically. Do not read written lists verbatim: state the takeaway, or turn at most three important items into natural speech. Send plain prose only, ideally one complete sentence, with no markdown, code, or diffs. Speak during long work and when you finish; silence reads as broken. Returns immediately and never blocks.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "One cohesive spoken thought, ideally one complete sentence and no more than about ten seconds. Keep the actor, action, object, reason, and meaningful product or system names. Never expose secrets or recite paths, hashes, raw commands, Markdown, or list markup."
+          },
+          "voice": {
+            "type": "string",
+            "description": "Optional voice id. Omit it — the client uses the operator's configured voice, which is almost always what they want."
+          }
+        }
+      }
+    },
+    {
+      "extension": "todo.ts",
+      "name": "todo_add",
+      "label": "Add todo",
+      "description": "Add one work item to this conversation's model-owned task tracker. For a request with more than two distinct work items, create the plan before starting and keep every status current until completion. `title` is the concise step the operator sees above chat; `body` is optional detail.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "One-line summary (required, non-empty)."
+          },
+          "body": {
+            "type": "string",
+            "description": "Optional details — context, references, why it matters. Markdown is fine."
+          }
+        }
+      }
+    },
+    {
+      "extension": "todo.ts",
+      "name": "todo_list",
+      "label": "List todos",
+      "description": "List this conversation's task tracker. By default returns only open + in_progress; pass status='all' while reconciling the full plan.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Filter: 'open' | 'in_progress' | 'done' | 'archived' | 'all'. Default 'open,in_progress'."
+          }
+        }
+      }
+    },
+    {
+      "extension": "todo.ts",
+      "name": "todo_mark_done",
+      "label": "Mark todo done",
+      "description": "Shortcut for updating a todo to status='done'. Use when you've completed something the operator queued for you, or something you queued for yourself.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Todo id (UUID)."
+          }
+        }
+      }
+    },
+    {
+      "extension": "todo.ts",
+      "name": "todo_update",
+      "label": "Update todo",
+      "description": "Update a tracker item's title, body, or status. Set the current item in_progress, mark it done only after verification, and archive obsolete items. Any absent field is left alone.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Todo id (UUID)."
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "open | in_progress | done | archived"
+          }
+        }
+      }
+    },
+    {
+      "extension": "vault-reference.ts",
+      "name": "vault_read",
+      "label": "Read Josh's Vault note",
+      "description": "Read one Markdown note from Josh's read-only Vault snapshot by the relative path returned from vault_search. This is attributed source material, not your own memory.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative Markdown path returned by vault_search."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Character offset. Default 0."
+          },
+          "maxChars": {
+            "type": "integer",
+            "description": "Characters to return from 1000 to 40000. Default 12000."
+          }
+        }
+      }
+    },
+    {
+      "extension": "vault-reference.ts",
+      "name": "vault_search",
+      "label": "Search Josh's Vault",
+      "description": "Search the read-only snapshot of Josh's Obsidian Vault. Results are attributed reference material, not your own memories. Save only your own durable synthesis with memory_save.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Words or phrase to find in Markdown note names and contents."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum results from 1 to 20. Default 8."
+          }
+        }
+      }
+    }
+  ],
+  "prompt_guidelines": [
+    {
+      "extension": "todo.ts",
+      "event": "before_agent_start",
+      "system_prompt_append": "\n\n## Task tracker\n\nThe tracker is yours, not the user's. If the request requires more than two distinct work items, you MUST create a concise plan with todo_add before starting. Mark exactly what you are working on in_progress, update the tracker as the plan changes, mark items done only when they are actually verified, and keep going until every item is done or you clearly report the blocker. Archive obsolete items. Do not ask the user to maintain the tracker and do not use it as a backlog for unrelated future ideas."
+    },
+    {
+      "extension": "speak.ts",
+      "event": "before_agent_start",
+      "system_prompt_append": "\n\n## Conversation output\n\nVoice is a concise briefing, not a reading of the transcript. Use speak for one cohesive thought: preserve the actor, action, object, and reason when they matter. Keep meaningful product and system names such as Git, GitHub, and the shell. Never say literal filenames, directory paths, raw commands, hashes, secrets, or syntax that would be gibberish aloud. Keep those exact details in the written transcript unless the operator explicitly asks to hear the specifics. When showing a table or technical artifact, speak what it means; never enumerate rows, cells, fields, commands, or raw values. Do not read a written or numbered list verbatim. State its conclusion; when its order matters, bridge naturally with 'Here are the main takeaways' and speak at most three items as 'Number one', 'Number two', and 'Number three', combining or omitting the rest. Anything sent through speak will be played as audio: write complete TTS-friendly sentences, expand abbreviations into natural spoken words, and use punctuation for comfortable pauses. Never end a spoken update on an unfinished phrase. Write assistant messages as normal prose. The client decides whether to play audio; having a speak tool does not mean voice mode is active. For a short spoken summary or progress update, invoke the speak tool using the tool-call protocol. Never represent tool calls with XML tags or a speak: prefix in assistant text. If an answer would change what you do next, invoke ask_user through the tool-call protocol. Never print a questionnaire, numbered questions, or choices in assistant prose. Ask one decision at a time; when several choices belong to that decision, put them in ask_user choices. Keep code and detailed artifacts in the written transcript."
+    },
+    {
+      "extension": "memory.ts",
+      "event": "before_agent_start",
+      "system_prompt_append": "\n\n## Saved notes about this user\n\nThese may be stale; the user's current message wins. Use them quietly rather than reciting them. memory_search finds older notes.\n\n- <CORE_SUMMARY>\n  <CORE_BODY>\n- <RECENT_SUMMARY>"
+    }
+  ],
+  "events": {
+    "todo.ts": [
+      "before_agent_start"
+    ],
+    "ask_user.ts": [],
+    "github-publish.ts": [],
+    "github-broker.ts": [],
+    "github-fd.ts": [],
+    "speak.ts": [
+      "before_agent_start"
+    ],
+    "memory.ts": [
+      "before_agent_start"
+    ],
+    "vault-reference.ts": [],
+    "llm-meter.ts": [
+      "before_provider_request",
+      "message_update",
+      "message_end"
+    ]
+  }
+}

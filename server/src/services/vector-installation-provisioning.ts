@@ -195,8 +195,8 @@ const engineeringCallbackExtension = {
   ...chatCallbackExtension,
   tools: [
     "ask_user", "github_api", "github_manage", "github_read", "github_repo",
-    "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list",
-    "todo_mark_done", "todo_update",
+    "memory_forget", "memory_save", "memory_search", "publish_branch", "todo_add",
+    "todo_list", "todo_mark_done", "todo_update",
   ],
 };
 

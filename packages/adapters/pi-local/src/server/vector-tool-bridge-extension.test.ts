@@ -82,12 +82,13 @@ describe("Vector tool bridge extension", () => {
       "github_api",
       "github_repo",
     ]);
-    expect(registered[0].parameters.properties.kind.enum).toEqual([
+    const literals = (schema: { anyOf: Array<{ const: string }> }) => schema.anyOf.map((entry) => entry.const);
+    expect(literals(registered[0].parameters.properties.kind)).toEqual([
       "pr_view", "pr_diff", "pr_checks", "run_failures", "pr_list", "issue_list", "repo_list", "file_read",
     ]);
-    expect(registered[1].parameters.properties.kind.enum).toContain("merge");
-    expect(registered[2].parameters.properties.method.enum).toEqual(["GET", "POST", "PATCH", "PUT", "DELETE"]);
-    expect(registered[3].parameters.properties.kind.enum).toContain("publish");
+    expect(literals(registered[1].parameters.properties.kind)).toContain("merge");
+    expect(literals(registered[2].parameters.properties.method)).toEqual(["GET", "POST", "PATCH", "PUT", "DELETE"]);
+    expect(literals(registered[3].parameters.properties.kind)).toContain("publish");
     expect(registered[2].description).toContain("exact-head guard");
 
     const args = { kind: "pr_view", repo: "renegadesw/vector-os", number: 168 };

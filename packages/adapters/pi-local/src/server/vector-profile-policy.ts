@@ -33,7 +33,8 @@ export type FunkyDevCapability = {
 };
 
 /**
- * Audited against vector-os/agents' pinative source on 2026-09-25.
+ * Audited against vector-os/agents' pinative source on 2026-09-26; the
+ * model-facing definitions are pinned by funkydev-legacy-tool-parity.test.ts.
  *
  * Keep blocked entries visible.  A matching tool name is not parity when its
  * run-scoped identity, callback, or frontend consumer still belongs to the
@@ -64,9 +65,9 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
   },
   {
     capability: "github-broker",
-    tools: ["github_read", "github_manage", "github_api", "github_repo"],
-    status: "blocked",
-    dependency: "The current tools call legacy GitHub broker endpoints and require a run-scoped repository/actor capability.",
+    tools: ["github_read", "github_manage", "github_api", "github_repo", "publish_branch"],
+    status: "ported",
+    dependency: "Uses the run-scoped Vector callback authority bound to the session's server-resolved role and repository; the parent holds the GitHub App credential.",
   },
   {
     capability: "personal-memory",
