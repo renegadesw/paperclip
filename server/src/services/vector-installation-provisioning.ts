@@ -9,6 +9,7 @@ import { companyService } from "./companies.js";
 
 const UUID = z.string().uuid();
 const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
+const vectorProfileSchema = z.enum(["engineering", "standard", "staging"]);
 
 const companyMutableField = z.enum(["name", "description", "budgetMonthlyCents"]);
 const agentMutableField = z.enum([
@@ -24,14 +25,21 @@ const agentMutableField = z.enum([
 ]);
 
 const toolPolicySchema = z.object({
-  profile: z.literal("engineering"),
+  profile: vectorProfileSchema,
   builtinTools: z.array(z.enum(["bash", "edit", "find", "grep", "ls", "read", "write"])),
   extensions: z.array(z.object({
     name: z.string().min(1),
     tools: z.array(z.string().min(1)),
     permissions: z.object({ filesystem: z.boolean(), shell: z.boolean() }).strict(),
   }).strict()),
-}).strict();
+}).strict().superRefine((policy, ctx) => {
+  if (policy.profile !== "engineering" && (policy.builtinTools.length > 0 || policy.extensions.length > 0)) {
+    ctx.addIssue({
+      code: "custom",
+      message: `${policy.profile} Vector profiles must not provision ambient Pi tools or extensions`,
+    });
+  }
+});
 
 const heartbeatRuntimeConfigSchema = z.object({
   heartbeat: z.object({
@@ -62,19 +70,222 @@ function assertNoEmbeddedAuthority(value: unknown, location = "manifest"): void 
   }
   if (!value || typeof value !== "object") return;
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    const normalizedKey = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_");
-    if (forbiddenManifestKey.test(normalizedKey)) {
+    const normalizedKey = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
+    const boundedTokenBudget = normalizedKey === "token_budget" || normalizedKey === "default_token_budget";
+    if (!boundedTokenBudget && forbiddenManifestKey.test(normalizedKey)) {
       throw new Error(`Vector provisioning manifest must not contain secret-bearing key ${location}.${key}`);
     }
     assertNoEmbeddedAuthority(entry, `${location}.${key}`);
   }
 }
 
+const vectorAgentManifestSchema = z.object({
+  id: UUID,
+  name: z.string().min(1),
+  role: z.string().min(1),
+  title: z.string().nullable(),
+  capabilities: z.string().nullable(),
+  adapterType: z.literal("pi_local"),
+  adapterConfig: z.object({
+    model: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
+    thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
+    executionMode: z.literal("rpc"),
+    cwd: z.string().refine(path.isAbsolute, "cwd must be absolute"),
+  }).strict(),
+  instructions: z.object({
+    path: z.string().min(1),
+    sha256: SHA256,
+  }).strict(),
+  runtimeConfig: heartbeatRuntimeConfigSchema,
+  budgetMonthlyCents: z.number().int().nonnegative(),
+  permissions: agentPermissionsSchema,
+  mutableFields: z.array(agentMutableField),
+}).strict();
+
+const vectorScheduleContractSchema = z.object({
+  owner: z.literal("vector_jobs"),
+  scheduleKey: z.string().min(1),
+  targetSchema: z.string().min(1),
+  targetFunction: z.string().min(1),
+  targetParameters: z.record(z.string(), z.unknown()),
+  cronExpression: z.string().min(1),
+  timezone: z.string().min(1),
+  enabled: z.literal(false),
+}).strict();
+
+const vectorWorkloadPolicySchema = z.object({
+  leaseSeconds: z.number().int().positive(),
+  maxAttempts: z.number().int().positive(),
+  tokenBudget: z.number().int().positive(),
+  mayDetach: z.boolean(),
+  mayWrite: z.literal(false),
+  requiresEvidence: z.literal(true),
+  modelPolicy: z.string().min(1).nullable(),
+  gatingFlag: z.string().min(1),
+  payloadFunction: z.string().min(1),
+  promptFunction: z.string().min(1),
+  settlementFunction: z.string().min(1).nullable(),
+  escalationRole: z.string().min(1).nullable(),
+  lineage: z.object({
+    maxSpawnDepth: z.number().int().nonnegative(),
+    allowInTurnChildren: z.boolean(),
+    allowedChildTypes: z.array(z.string().min(1)),
+    maxParallelChildren: z.number().int().positive(),
+  }).strict(),
+}).strict();
+
+const vectorWorkloadContractSchema = z.object({
+  key: z.string().regex(/^[a-z][a-z0-9_.-]{1,95}$/),
+  title: z.string().min(1),
+  kind: z.enum(["interactive", "research_task", "generic_task"]),
+  agentId: UUID,
+  executionShape: z.enum(["interactive", "single_shot", "session"]),
+  promptSource: z.enum(["paperclip_issue", "vector_role_turn", "vector_claim_envelope"]),
+  toolSurface: z.array(z.string().min(1)),
+  policy: vectorWorkloadPolicySchema,
+  runtimeAuthority: z.enum(["paperclip", "vector_lease_triple"]),
+  schedule: vectorScheduleContractSchema.nullable(),
+  dependencies: z.array(z.object({
+    kind: z.enum(["workload", "schedule"]),
+    key: z.string().min(1),
+    description: z.string().min(1),
+    schedule: vectorScheduleContractSchema.nullable(),
+  }).strict()).default([]),
+  recoverySchedule: vectorScheduleContractSchema.nullable().default(null),
+  bridge: z.object({
+    required: z.literal(true),
+    defaultEnabled: z.literal(false),
+    claimPath: z.string().startsWith("/"),
+    heartbeatPath: z.string().startsWith("/"),
+    completePath: z.string().startsWith("/"),
+    failPath: z.string().startsWith("/"),
+    detachPath: z.string().startsWith("/").nullable(),
+  }).strict().nullable(),
+}).strict().superRefine((workload, ctx) => {
+  if (workload.runtimeAuthority === "vector_lease_triple") {
+    if (!workload.bridge) {
+      ctx.addIssue({ code: "custom", path: ["bridge"], message: "Vector lease workloads require a default-off bridge" });
+    }
+  } else if (workload.bridge) {
+    ctx.addIssue({ code: "custom", path: ["bridge"], message: "Paperclip-owned workloads must not declare the Vector lease bridge" });
+  }
+  if (workload.kind === "interactive" && workload.executionShape !== "interactive") {
+    ctx.addIssue({ code: "custom", path: ["executionShape"], message: "interactive workloads require the interactive execution shape" });
+  }
+});
+
+const engineeringToolPolicy = {
+  builtinTools: ["bash", "edit", "find", "grep", "ls", "read", "write"],
+  extensions: [{
+    name: "funkydev.vault-reference",
+    tools: ["vault_read", "vault_search"],
+    permissions: { filesystem: true, shell: false },
+  }],
+};
+
+const researchPolicy = {
+  leaseSeconds: 300,
+  maxAttempts: 3,
+  tokenBudget: 12000,
+  mayDetach: true,
+  mayWrite: false,
+  requiresEvidence: true,
+  modelPolicy: null,
+  gatingFlag: "product.os.research",
+  payloadFunction: "os.research_task_payload",
+  promptFunction: "os.research_task_prompt",
+  settlementFunction: null,
+  escalationRole: null,
+  lineage: { maxSpawnDepth: 0, allowInTurnChildren: false, allowedChildTypes: [], maxParallelChildren: 1 },
+};
+
+const stagingWorkloadSpecs = {
+  current_scout: { kind: "research_task", executionShape: "single_shot", role: "funky-scout", tools: [], policy: researchPolicy },
+  macro_scout: { kind: "research_task", executionShape: "single_shot", role: "funky-scout", tools: [], policy: researchPolicy },
+  demand_scout: { kind: "research_task", executionShape: "single_shot", role: "funky-scout", tools: [], policy: researchPolicy },
+  synthesis: { kind: "research_task", executionShape: "single_shot", role: "funky-scout", tools: [], policy: researchPolicy },
+  curation: { kind: "research_task", executionShape: "single_shot", role: "funky-scout", tools: [], policy: researchPolicy },
+  dmv_review: {
+    kind: "generic_task",
+    executionShape: "single_shot",
+    role: "funky-scout",
+    tools: [],
+    policy: {
+      leaseSeconds: 900, maxAttempts: 2, tokenBudget: 8000,
+      mayDetach: false, mayWrite: false, requiresEvidence: true,
+      modelPolicy: null,
+      gatingFlag: "product.dmv.review",
+      payloadFunction: "dmv.review_payload",
+      promptFunction: "dmv.review_prompt",
+      settlementFunction: "dmv.review_settle",
+      escalationRole: "compliance-advisor",
+      lineage: { maxSpawnDepth: 0, allowInTurnChildren: false, allowedChildTypes: [], maxParallelChildren: 1 },
+    },
+  },
+  dmv_audit_back_triage: {
+    kind: "generic_task",
+    executionShape: "session",
+    role: "funky-advisor",
+    tools: ["dmv.get_pipeline_health", "dmv.list_audit_back", "dmv.list_recent_pipeline_failures"],
+    policy: {
+      leaseSeconds: 1200, maxAttempts: 2, tokenBudget: 24000,
+      mayDetach: true, mayWrite: false, requiresEvidence: true,
+      modelPolicy: null,
+      gatingFlag: "product.dmv.triage",
+      payloadFunction: "dmv.triage_payload",
+      promptFunction: "dmv.triage_prompt",
+      settlementFunction: "dmv.review_settle",
+      escalationRole: "compliance-advisor",
+      lineage: {
+        maxSpawnDepth: 1,
+        allowInTurnChildren: true,
+        allowedChildTypes: ["dmv-client-reader", "reader"],
+        maxParallelChildren: 2,
+      },
+    },
+  },
+} as const;
+
+const stagingScheduleSpecs = {
+  research: {
+    owner: "vector_jobs", scheduleKey: "fa_research_daily",
+    targetSchema: "os", targetFunction: "enqueue_research_cycle", targetParameters: { cadence: "daily" },
+    cronExpression: "20 8 * * *", timezone: "America/New_York", enabled: false,
+  },
+  researchRecovery: {
+    owner: "vector_jobs", scheduleKey: "fa_research_lease_sweep",
+    targetSchema: "os", targetFunction: "recover_research_leases", targetParameters: {},
+    cronExpression: "*/5 * * * *", timezone: "America/New_York", enabled: false,
+  },
+  taskRecovery: {
+    owner: "vector_jobs", scheduleKey: "fa_task_lease_sweep",
+    targetSchema: "os", targetFunction: "recover_task_leases", targetParameters: {},
+    cronExpression: "*/5 * * * *", timezone: "America/New_York", enabled: false,
+  },
+  dmvReview: {
+    owner: "vector_jobs", scheduleKey: "fa_dmv_review_daily",
+    targetSchema: "os", targetFunction: "enqueue_task",
+    targetParameters: { task_type: "dmv_review", run: { trigger: "cadence", cadence: "daily", token_budget: 16000, deadline_minutes: 180 } },
+    cronExpression: "30 7 * * *", timezone: "America/New_York", enabled: false,
+  },
+  dmvTriage: {
+    owner: "vector_jobs", scheduleKey: "fa_dmv_audit_back_triage_daily",
+    targetSchema: "os", targetFunction: "enqueue_task",
+    targetParameters: { task_type: "dmv_audit_back_triage", run: { trigger: "cadence", cadence: "daily", token_budget: 48000, deadline_minutes: 240 } },
+    cronExpression: "0 8 * * *", timezone: "America/New_York", enabled: false,
+  },
+  queryThemes: {
+    owner: "vector_jobs", scheduleKey: "fa_rollup_query_themes",
+    targetSchema: "os", targetFunction: "rollup_query_themes", targetParameters: {},
+    cronExpression: "40 2 * * *", timezone: "America/New_York", enabled: false,
+  },
+} as const;
+
 export const vectorInstallationManifestSchema = z.object({
   schemaVersion: z.literal(1),
   manifestRevision: z.number().int().positive(),
   installationId: z.string().regex(/^[a-z][a-z0-9-]{1,63}$/),
-  profile: z.literal("engineering"),
+  profile: vectorProfileSchema,
   company: z.object({
     id: UUID,
     name: z.string().min(1),
@@ -82,28 +293,9 @@ export const vectorInstallationManifestSchema = z.object({
     budgetMonthlyCents: z.number().int().nonnegative(),
     mutableFields: z.array(companyMutableField),
   }).strict(),
-  agent: z.object({
-    id: UUID,
-    name: z.string().min(1),
-    role: z.string().min(1),
-    title: z.string().nullable(),
-    capabilities: z.string().nullable(),
-    adapterType: z.literal("pi_local"),
-    adapterConfig: z.object({
-      model: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
-      thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
-      executionMode: z.literal("rpc"),
-      cwd: z.string().refine(path.isAbsolute, "cwd must be absolute"),
-    }).strict(),
-    instructions: z.object({
-      path: z.string().min(1),
-      sha256: SHA256,
-    }).strict(),
-    runtimeConfig: heartbeatRuntimeConfigSchema,
-    budgetMonthlyCents: z.number().int().nonnegative(),
-    permissions: agentPermissionsSchema,
-    mutableFields: z.array(agentMutableField),
-  }).strict(),
+  agent: vectorAgentManifestSchema,
+  additionalAgents: z.array(vectorAgentManifestSchema).default([]),
+  workloads: z.array(vectorWorkloadContractSchema).default([]),
   toolPolicy: toolPolicySchema,
 }).strict().superRefine((manifest, ctx) => {
   for (const [label, values] of [
@@ -129,6 +321,140 @@ export const vectorInstallationManifestSchema = z.object({
       path: ["agent", "instructions", "path"],
       message: "instructions path must be release-relative",
     });
+  }
+  const allAgents = [manifest.agent, ...manifest.additionalAgents];
+  const agentIds = new Set<string>();
+  const agentNames = new Set<string>();
+  for (const [index, agent] of allAgents.entries()) {
+    const prefix = index === 0 ? ["agent"] : ["additionalAgents", index - 1];
+    if (agentIds.has(agent.id)) {
+      ctx.addIssue({ code: "custom", path: [...prefix, "id"], message: "agent ids must be unique" });
+    }
+    if (agentNames.has(agent.name)) {
+      ctx.addIssue({ code: "custom", path: [...prefix, "name"], message: "agent names must be unique" });
+    }
+    agentIds.add(agent.id);
+    agentNames.add(agent.name);
+    if (new Set(agent.mutableFields).size !== agent.mutableFields.length) {
+      ctx.addIssue({ code: "custom", path: [...prefix, "mutableFields"], message: "agent.mutableFields must be unique" });
+    }
+    if (path.posix.isAbsolute(agent.instructions.path)
+        || agent.instructions.path !== path.posix.normalize(agent.instructions.path)
+        || agent.instructions.path.startsWith("../")) {
+      ctx.addIssue({ code: "custom", path: [...prefix, "instructions", "path"], message: "instructions path must be release-relative" });
+    }
+  }
+  const workloadKeys = new Set<string>();
+  for (const [index, workload] of manifest.workloads.entries()) {
+    if (workloadKeys.has(workload.key)) {
+      ctx.addIssue({ code: "custom", path: ["workloads", index, "key"], message: "workload keys must be unique" });
+    }
+    workloadKeys.add(workload.key);
+    if (!agentIds.has(workload.agentId)) {
+      ctx.addIssue({ code: "custom", path: ["workloads", index, "agentId"], message: "workload agentId must name a provisioned agent" });
+    }
+  }
+  const roles = allAgents.map((agent) => agent.role).sort();
+  if (manifest.profile === "engineering") {
+    if (allAgents.length !== 1 || manifest.agent.name !== "FunkyDev" || manifest.agent.role !== "engineer") {
+      ctx.addIssue({ code: "custom", path: ["agent"], message: "engineering installs provision exactly the FunkyDev engineer" });
+    }
+    if (manifest.workloads.length !== 0) {
+      ctx.addIssue({ code: "custom", path: ["workloads"], message: "engineering installs do not own Funky workload schedules" });
+    }
+    if (stableJson(manifest.toolPolicy.builtinTools) !== stableJson(engineeringToolPolicy.builtinTools)
+        || stableJson(manifest.toolPolicy.extensions) !== stableJson(engineeringToolPolicy.extensions)) {
+      ctx.addIssue({ code: "custom", path: ["toolPolicy"], message: "engineering installs require the exact FunkyDev tool policy" });
+    }
+  }
+  if (manifest.profile === "standard") {
+    if (allAgents.length !== 1 || manifest.agent.name !== "Standard Chat" || manifest.agent.role !== "standard-chat") {
+      ctx.addIssue({ code: "custom", path: ["agent"], message: "standard installs provision exactly the Standard Chat agent" });
+    }
+    if (manifest.workloads.length !== 0) {
+      ctx.addIssue({ code: "custom", path: ["workloads"], message: "standard installs do not own Funky workload schedules" });
+    }
+  }
+  if (manifest.profile === "staging") {
+    const expectedRoles = ["funky-advisor", "funky-analyst", "funky-scout"];
+    if (stableJson(roles) !== stableJson(expectedRoles)) {
+      ctx.addIssue({ code: "custom", path: ["additionalAgents"], message: "staging installs require exactly Funky analyst, Scout, and Advisor agents" });
+    }
+    const expectedWorkloads = [
+      "curation", "current_scout", "demand_scout", "dmv_audit_back_triage",
+      "dmv_review", "macro_scout", "synthesis",
+    ];
+    if (stableJson([...workloadKeys].sort()) !== stableJson(expectedWorkloads)) {
+      ctx.addIssue({ code: "custom", path: ["workloads"], message: "staging installs require the complete Vector workload catalog" });
+    }
+    const roleByAgentId = new Map(allAgents.map((agent) => [agent.id, agent.role]));
+    for (const [index, workload] of manifest.workloads.entries()) {
+      const expected = stagingWorkloadSpecs[workload.key as keyof typeof stagingWorkloadSpecs];
+      if (!expected) continue;
+      const actual = {
+        kind: workload.kind,
+        executionShape: workload.executionShape,
+        role: roleByAgentId.get(workload.agentId),
+        tools: [...workload.toolSurface].sort(),
+        policy: {
+          ...workload.policy,
+          lineage: {
+            ...workload.policy.lineage,
+            allowedChildTypes: [...workload.policy.lineage.allowedChildTypes].sort(),
+          },
+        },
+        schedule: workload.schedule,
+        recoverySchedule: workload.recoverySchedule,
+        promptSource: workload.promptSource,
+        runtimeAuthority: workload.runtimeAuthority,
+      };
+      const schedule = workload.kind === "research_task"
+        ? stagingScheduleSpecs.research
+        : workload.key === "dmv_review"
+          ? stagingScheduleSpecs.dmvReview
+          : stagingScheduleSpecs.dmvTriage;
+      const recoverySchedule = workload.kind === "research_task"
+        ? stagingScheduleSpecs.researchRecovery
+        : stagingScheduleSpecs.taskRecovery;
+      const required = {
+        kind: expected.kind,
+        executionShape: expected.executionShape,
+        role: expected.role,
+        tools: [...expected.tools].sort(),
+        policy: expected.policy,
+        schedule,
+        recoverySchedule,
+        promptSource: "vector_claim_envelope",
+        runtimeAuthority: "vector_lease_triple",
+      };
+      if (stableJson(actual) !== stableJson(required)) {
+        ctx.addIssue({ code: "custom", path: ["workloads", index], message: `staging workload ${workload.key} does not match the Vector contract` });
+      }
+    }
+    const dependenciesByWorkload = new Map(manifest.workloads.map((workload) => [
+      workload.key,
+      workload.dependencies.map((dependency) => `${dependency.kind}:${dependency.key}`).sort(),
+    ]));
+    const expectedDependencies = new Map<string, string[]>([
+      ["current_scout", []],
+      ["macro_scout", []],
+      ["demand_scout", ["schedule:fa_rollup_query_themes"]],
+      ["synthesis", ["workload:current_scout", "workload:demand_scout", "workload:macro_scout"]],
+      ["curation", ["workload:synthesis"]],
+      ["dmv_review", []],
+      ["dmv_audit_back_triage", []],
+    ]);
+    for (const [workloadKey, expected] of expectedDependencies) {
+      if (stableJson(dependenciesByWorkload.get(workloadKey)) !== stableJson(expected)) {
+        ctx.addIssue({ code: "custom", path: ["workloads"], message: `staging workload ${workloadKey} dependencies do not match the Vector contract` });
+      }
+    }
+    const demandDependency = manifest.workloads
+      .find((workload) => workload.key === "demand_scout")
+      ?.dependencies.find((dependency) => dependency.key === "fa_rollup_query_themes");
+    if (stableJson(demandDependency?.schedule) !== stableJson(stagingScheduleSpecs.queryThemes)) {
+      ctx.addIssue({ code: "custom", path: ["workloads"], message: "demand_scout must preserve the disabled query-theme dependency schedule" });
+    }
   }
 });
 
@@ -186,11 +512,15 @@ export interface VectorProvisioningInput {
 export interface VectorProvisioningReceipt {
   schemaVersion: 1;
   installationId: string;
-  profile: "engineering";
+  profile: z.infer<typeof vectorProfileSchema>;
   manifestRevision: number;
   companyId: string;
   agentId: string;
+  agentIds: string[];
+  workloadCatalogSha256: string;
+  rosterCatalogSha256: string;
   created: { company: boolean; ownership: boolean; agent: boolean };
+  agentsCreated: number;
 }
 
 function stableJson(value: unknown): string {
@@ -241,23 +571,31 @@ async function resolveManifest(input: VectorProvisioningInput) {
   const effectiveToolPolicy = toolPolicySchema.parse(input.effectiveToolPolicy);
   assertEqual("toolPolicy", effectiveToolPolicy, manifest.toolPolicy);
 
-  const stagedInstructionsPath = containedReleasePath(
-    input.stagedReleaseRoot,
-    manifest.agent.instructions.path,
-  );
-  const stat = await fs.stat(stagedInstructionsPath).catch(() => null);
-  if (!stat?.isFile()) throw new Error("Vector provisioning instructions asset is missing");
-  const digest = createHash("sha256").update(await fs.readFile(stagedInstructionsPath)).digest("hex");
-  if (digest !== manifest.agent.instructions.sha256) {
-    throw new Error("Vector provisioning instructions asset digest mismatch");
+  for (const agent of [manifest.agent, ...manifest.additionalAgents]) {
+    const stagedInstructionsPath = containedReleasePath(input.stagedReleaseRoot, agent.instructions.path);
+    const stat = await fs.stat(stagedInstructionsPath).catch(() => null);
+    if (!stat?.isFile()) throw new Error(`Vector provisioning instructions asset is missing for ${agent.name}`);
+    const digest = createHash("sha256").update(await fs.readFile(stagedInstructionsPath)).digest("hex");
+    if (digest !== agent.instructions.sha256) {
+      throw new Error(`Vector provisioning instructions asset digest mismatch for ${agent.name}`);
+    }
   }
 
+  const rosterAgents = [manifest.agent, ...manifest.additionalAgents].map(({ mutableFields: _mutableFields, ...agent }) => agent);
   return {
     manifest,
-    instructionsFilePath: containedReleasePath(
-      input.activeReleaseRoot,
-      manifest.agent.instructions.path,
-    ),
+    workloadCatalogSha256: createHash("sha256").update(stableJson({
+      installationId: manifest.installationId,
+      profile: manifest.profile,
+      workloads: manifest.workloads,
+    })).digest("hex"),
+    rosterCatalogSha256: createHash("sha256").update(stableJson({
+      installationId: manifest.installationId,
+      profile: manifest.profile,
+      companyId: manifest.company.id,
+      agents: rosterAgents,
+      toolPolicy: manifest.toolPolicy,
+    })).digest("hex"),
   };
 }
 
@@ -265,35 +603,12 @@ export async function reconcileVectorInstallation(
   port: VectorProvisioningPort,
   input: VectorProvisioningInput,
 ): Promise<VectorProvisioningReceipt> {
-  const { manifest, instructionsFilePath } = await resolveManifest(input);
+  const { manifest, workloadCatalogSha256, rosterCatalogSha256 } = await resolveManifest(input);
   const companyExpected = {
     id: manifest.company.id,
     name: manifest.company.name,
     description: manifest.company.description,
     budgetMonthlyCents: manifest.company.budgetMonthlyCents,
-  };
-  const agentExpected = {
-    id: manifest.agent.id,
-    name: manifest.agent.name,
-    role: manifest.agent.role,
-    title: manifest.agent.title,
-    capabilities: manifest.agent.capabilities,
-    adapterType: manifest.agent.adapterType,
-    adapterConfig: {
-      ...manifest.agent.adapterConfig,
-      instructionsFilePath,
-    },
-    runtimeConfig: manifest.agent.runtimeConfig,
-    budgetMonthlyCents: manifest.agent.budgetMonthlyCents,
-    permissions: manifest.agent.permissions,
-    metadata: {
-      vectorProvisioning: {
-        schemaVersion: 1,
-        installationId: manifest.installationId,
-        profile: manifest.profile,
-        manifestRevision: manifest.manifestRevision,
-      },
-    },
   };
 
   let company = await port.getCompany(manifest.company.id);
@@ -329,17 +644,65 @@ export async function reconcileVectorInstallation(
     ownershipCreated = true;
   }
 
-  let agent = await port.getAgent(manifest.agent.id);
-  let agentCreated = false;
-  if (agent) {
-    if (agent.companyId !== company.id) throw new Error("Vector provisioning agent belongs to another company");
-    assertImmutableFields("agent", agent, agentExpected, manifest.agent.mutableFields);
-  } else {
-    const collision = (await port.listAgents(company.id)).find((candidate) => candidate.name === manifest.agent.name);
-    if (collision) throw new Error("Vector provisioning agent identity collision");
-    agent = await port.createAgent(company.id, agentExpected);
-    assertImmutableFields("agent", agent, { ...agentExpected, companyId: company.id }, []);
-    agentCreated = true;
+  const existingAgents = await port.listAgents(company.id);
+  const resolvedAgentIds: string[] = [];
+  let agentsCreated = 0;
+  for (const desired of [manifest.agent, ...manifest.additionalAgents]) {
+    const workloadKeys = manifest.workloads.filter((workload) => workload.agentId === desired.id).map((workload) => workload.key).sort();
+    const agentExpected = {
+      id: desired.id,
+      name: desired.name,
+      role: desired.role,
+      title: desired.title,
+      capabilities: desired.capabilities,
+      adapterType: desired.adapterType,
+      adapterConfig: {
+        ...desired.adapterConfig,
+        instructionsFilePath: containedReleasePath(input.activeReleaseRoot, desired.instructions.path),
+      },
+      runtimeConfig: desired.runtimeConfig,
+      budgetMonthlyCents: desired.budgetMonthlyCents,
+      permissions: desired.permissions,
+      metadata: {
+        vectorProvisioning: {
+          schemaVersion: 1,
+          installationId: manifest.installationId,
+          profile: manifest.profile,
+          manifestRevision: manifest.manifestRevision,
+          rosterCatalogSha256,
+        },
+         vectorWorkloads: {
+           schemaVersion: 1,
+           catalogSha256: workloadCatalogSha256,
+           keys: workloadKeys,
+           contracts: manifest.workloads
+             .filter((workload) => workload.agentId === desired.id)
+             .map((workload) => ({
+               key: workload.key,
+               kind: workload.kind,
+               executionShape: workload.executionShape,
+               role: desired.role,
+               toolSurface: [...workload.toolSurface].sort(),
+               modelPolicy: workload.policy.modelPolicy,
+               runtimeAuthority: workload.runtimeAuthority,
+             }))
+             .sort((left, right) => left.key.localeCompare(right.key)),
+         },
+      },
+    };
+    let agent = await port.getAgent(desired.id);
+    if (agent) {
+      if (agent.companyId !== company.id) throw new Error("Vector provisioning agent belongs to another company");
+      assertImmutableFields("agent", agent, agentExpected, desired.mutableFields);
+    } else {
+      const collision = existingAgents.find((candidate) => candidate.name === desired.name);
+      if (collision) throw new Error("Vector provisioning agent identity collision");
+      agent = await port.createAgent(company.id, agentExpected);
+      assertImmutableFields("agent", agent, { ...agentExpected, companyId: company.id }, []);
+      existingAgents.push(agent);
+      agentsCreated++;
+    }
+    resolvedAgentIds.push(agent.id);
   }
 
   return {
@@ -348,8 +711,12 @@ export async function reconcileVectorInstallation(
     profile: manifest.profile,
     manifestRevision: manifest.manifestRevision,
     companyId: company.id,
-    agentId: agent.id,
-    created: { company: companyCreated, ownership: ownershipCreated, agent: agentCreated },
+    agentId: resolvedAgentIds[0],
+    agentIds: resolvedAgentIds,
+    workloadCatalogSha256,
+    rosterCatalogSha256,
+    created: { company: companyCreated, ownership: ownershipCreated, agent: agentsCreated > 0 },
+    agentsCreated,
   };
 }
 

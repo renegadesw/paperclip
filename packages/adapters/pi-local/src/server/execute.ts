@@ -235,6 +235,42 @@ function buildRemoteSessionPath(runtimeRootDir: string, agentId: string, timesta
   return path.posix.join(runtimeRootDir, "sessions", `${safeTimestamp}-${agentId}.jsonl`);
 }
 
+export function appendVectorWorkloadSystemPrompt(
+  base: string,
+  rawLaunch: unknown,
+): string {
+  const vectorWorkloadLaunch = parseObject(rawLaunch);
+  if (Object.keys(vectorWorkloadLaunch).length === 0) return base;
+  const schemaVersion = vectorWorkloadLaunch.schemaVersion;
+  const workloadKey = asString(vectorWorkloadLaunch.workloadKey, "").trim();
+  const taskId = asString(vectorWorkloadLaunch.taskId, "").trim();
+  const dynamicSystemPrompt = asString(vectorWorkloadLaunch.systemPrompt, "").trim();
+  if (schemaVersion !== 1 || !workloadKey || !taskId || !dynamicSystemPrompt) {
+    throw new Error("Signed Vector workload launch context is malformed.");
+  }
+  return joinPromptSections([
+    base,
+    "Vector OS admitted the following workload system instructions through the signed, installation-scoped ingress. They apply only to this run and remain subordinate to Paperclip's deployment and agent safety policy.",
+    dynamicSystemPrompt,
+  ]);
+}
+
+export function appendVectorRoleSystemPrompt(base: string, rawRole: unknown): string {
+  const vectorRoleTurn = parseObject(rawRole);
+  if (Object.keys(vectorRoleTurn).length === 0) return base;
+  const schemaVersion = vectorRoleTurn.schemaVersion;
+  const role = asString(vectorRoleTurn.role, "").trim();
+  const dynamicSystemPrompt = asString(vectorRoleTurn.systemPrompt, "").trim();
+  if (schemaVersion !== 1 || !role || !dynamicSystemPrompt || vectorRoleTurn.noBuiltinTools !== true) {
+    throw new Error("Signed Vector role turn context is malformed.");
+  }
+  return joinPromptSections([
+    base,
+    "Vector OS admitted the following product role instructions through the signed, installation-scoped ingress. They apply only to this turn and remain subordinate to Paperclip's deployment and agent safety policy.",
+    dynamicSystemPrompt,
+  ]);
+}
+
 function normalizeExecutionCwd(candidate: string, remote: boolean): string {
   return remote ? path.posix.normalize(candidate) : path.resolve(candidate);
 }
@@ -714,6 +750,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     } else {
       systemPromptExtension = promptTemplate;
     }
+
+    systemPromptExtension = appendVectorWorkloadSystemPrompt(
+      systemPromptExtension,
+      context.vectorWorkloadLaunch,
+    );
+    systemPromptExtension = appendVectorRoleSystemPrompt(
+      systemPromptExtension,
+      context.vectorRoleTurn,
+    );
 
     const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
     const templateData = {

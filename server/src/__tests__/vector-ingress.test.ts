@@ -307,9 +307,29 @@ const support = await getEmbeddedPostgresTestSupport();
           id: agentId,
           companyId,
           name: "Funky",
-          role: "assistant",
+          role: "funky-scout",
           status: "idle",
           adapterType: "process",
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "stg1-staging",
+              profile: "staging",
+            },
+            vectorWorkloads: {
+              schemaVersion: 1,
+              keys: ["current_scout"],
+              contracts: [{
+                key: "current_scout",
+                kind: "research_task",
+                executionShape: "single_shot",
+                role: "funky-scout",
+                toolSurface: [],
+                modelPolicy: null,
+                runtimeAuthority: "vector_lease_triple",
+              }],
+            },
+          },
         },
         {
           id: otherAgentId,
@@ -490,6 +510,99 @@ const support = await getEmbeddedPostgresTestSupport();
       await expect(
         service.addTurn({ ...input, attachmentIds: [attachment.id] }),
       ).rejects.toMatchObject({ status: 409 });
+    });
+
+    it("admits exact provisioned workload context and binds it to the queued run", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const launchContext = {
+        schemaVersion: 1 as const,
+        workloadKey: "current_scout",
+        queue: "research" as const,
+        taskId: "research-task-1",
+        attempt: 2,
+        leaseTokenSha256: "a".repeat(64),
+        role: "funky-scout",
+        model: "",
+        tools: [] as string[],
+        noBuiltinTools: true,
+        systemPrompt: "Use the current Vector charter and cite every claim.",
+        metadata: { task_id: "research-task-1", attempt: "2", run_kind: "current_scout" },
+      };
+      const input = {
+        companyId,
+        agentId,
+        externalSessionId: "workload-current-1",
+        ownerId: "vector-workload:research-task-1",
+        installationId: "stg1-staging",
+        profileId: "staging",
+        clientRequestId: "research-task-1-attempt-2",
+        body: "Analyze the database-provided evidence envelope.",
+        launchContext,
+      };
+      const turn = await service.addTurn(input);
+      const commentBody = await db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(eq(issueComments.id, turn.commentId))
+        .then((rows) => rows[0]?.body);
+      expect(commentBody).toContain("[VECTOR_WORKLOAD_LAUNCH_V1]");
+      expect(commentBody).toContain(launchContext.systemPrompt);
+      const runContext = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorWorkloadLaunch).toEqual(launchContext);
+
+      await expect(service.addTurn({
+        ...input,
+        externalSessionId: "workload-current-escalated",
+        clientRequestId: "research-task-1-escalated",
+        launchContext: { ...launchContext, tools: ["bash"] },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_workload_contract_mismatch" },
+      });
+    });
+
+    it("admits a trusted staging role turn and rejects role escalation", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const roleContext = {
+        schemaVersion: 1 as const,
+        role: "funky-scout",
+        model: "",
+        noBuiltinTools: true as const,
+        systemPrompt: "Use the current Vector analyst charter.",
+        metadata: { persona_version: "persona-v1", run_kind: "title" },
+      };
+      const input = {
+        companyId,
+        agentId,
+        externalSessionId: "trusted-role-session",
+        ownerId: "vector-user:user-1",
+        installationId: "stg1-staging",
+        profileId: "staging",
+        clientRequestId: "trusted-role-turn-1",
+        body: "Name this conversation.",
+        roleContext,
+      };
+      const turn = await service.addTurn(input);
+      const runContext = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toEqual(roleContext);
+
+      await expect(service.addTurn({
+        ...input,
+        externalSessionId: "trusted-role-escalated",
+        clientRequestId: "trusted-role-turn-escalated",
+        roleContext: { ...roleContext, role: "funky-advisor" },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_role_contract_mismatch" },
+      });
     });
 
     it("binds existing same-issue attachments and rejects foreign issue attachments", async () => {

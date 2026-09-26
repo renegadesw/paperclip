@@ -54,6 +54,32 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   clientRequestId: string;
   body: string;
   attachmentIds?: string[];
+  launchContext?: VectorWorkloadLaunchContext;
+  roleContext?: VectorRoleTurnContext;
+}
+
+export interface VectorWorkloadLaunchContext {
+  schemaVersion: 1;
+  workloadKey: string;
+  queue: "research" | "tasks";
+  taskId: string;
+  attempt: number;
+  leaseTokenSha256: string;
+  role: string;
+  model: string;
+  tools: string[];
+  noBuiltinTools: boolean;
+  systemPrompt: string;
+  metadata: Record<string, string>;
+}
+
+export interface VectorRoleTurnContext {
+  schemaVersion: 1;
+  role: string;
+  model: string;
+  noBuiltinTools: true;
+  systemPrompt: string;
+  metadata: Record<string, string>;
 }
 
 export interface VectorIngressCancelInput extends VectorIngressScope {
@@ -296,7 +322,14 @@ export function vectorIngressService(
 
   async function assertTargetAgent(scope: VectorIngressScope) {
     const agent = await db
-      .select({ id: agents.id, name: agents.name, status: agents.status })
+      .select({
+        id: agents.id,
+        name: agents.name,
+        role: agents.role,
+        status: agents.status,
+        adapterConfig: agents.adapterConfig,
+        metadata: agents.metadata,
+      })
       .from(agents)
       .where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)))
       .then((rows) => rows[0] ?? null);
@@ -307,6 +340,83 @@ export function vectorIngressService(
       });
     }
     return agent;
+  }
+
+  async function assertWorkloadLaunch(input: VectorIngressTurnInput) {
+    if (!input.launchContext) return;
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector workload launch requires complete owner scope", {
+        code: "vector_workload_owner_scope_required",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const workloads = eventPayloadRecord(metadata.vectorWorkloads);
+    if (
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId
+    ) {
+      throw conflict("Vector workload launch does not match provisioned installation", {
+        code: "vector_workload_installation_mismatch",
+      });
+    }
+    const contracts = Array.isArray(workloads.contracts)
+      ? workloads.contracts.map(eventPayloadRecord)
+      : [];
+    const contract = contracts.find((candidate) => candidate.key === input.launchContext?.workloadKey);
+    if (!contract || contract.runtimeAuthority !== "vector_lease_triple") {
+      throw conflict("Vector workload is not assigned to this agent", {
+        code: "vector_workload_agent_mismatch",
+      });
+    }
+    const expectedQueue = contract.kind === "research_task" ? "research" : "tasks";
+    const expectedTools = Array.isArray(contract.toolSurface)
+      ? contract.toolSurface.filter((value): value is string => typeof value === "string").sort()
+      : [];
+    const actualTools = [...new Set(input.launchContext.tools)].sort();
+    const policyModel = typeof contract.modelPolicy === "string" ? contract.modelPolicy : "";
+    if (
+      agent.role !== input.launchContext.role ||
+      contract.role !== input.launchContext.role ||
+      input.launchContext.queue !== expectedQueue ||
+      !sameStrings(expectedTools, actualTools) ||
+      input.launchContext.tools.length !== actualTools.length ||
+      input.launchContext.model !== policyModel ||
+      input.launchContext.metadata.task_id !== input.launchContext.taskId ||
+      input.launchContext.metadata.attempt !== String(input.launchContext.attempt)
+    ) {
+      throw conflict("Vector workload launch differs from the provisioned contract", {
+        code: "vector_workload_contract_mismatch",
+      });
+    }
+  }
+
+  async function assertRoleTurn(input: VectorIngressTurnInput) {
+    if (!input.roleContext) return;
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector role turn requires complete owner scope", {
+        code: "vector_role_owner_scope_required",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const adapterConfig = eventPayloadRecord(agent.adapterConfig);
+    const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
+    if (
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId ||
+      input.profileId !== "staging" ||
+      agent.role !== input.roleContext.role ||
+      (input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
+    ) {
+      throw conflict("Vector role turn differs from the provisioned agent contract", {
+        code: "vector_role_contract_mismatch",
+      });
+    }
   }
 
   async function getConversation(scope: VectorIngressScope) {
@@ -798,11 +908,18 @@ export function vectorIngressService(
   }
 
   async function addTurn(input: VectorIngressTurnInput) {
+    await assertWorkloadLaunch(input);
+    await assertRoleTurn(input);
     const { issue, ownerId } = await resolveConversation(input);
     const mapping = hasCompleteOwnerScope(input)
       ? await bindConversationOwner(input, issue.id)
       : null;
     const requestedAttachmentIds = [...new Set(input.attachmentIds ?? [])];
+    const effectiveBody = input.launchContext
+      ? `[VECTOR_WORKLOAD_LAUNCH_V1]\n${JSON.stringify(input.launchContext)}\n\n${input.body}`
+      : input.roleContext
+        ? `[VECTOR_ROLE_TURN_V1]\n${JSON.stringify(input.roleContext)}\n\n${input.body}`
+      : input.body;
     let replayed = false;
 
     const comment = await db.transaction(async (tx) => {
@@ -844,7 +961,7 @@ export function vectorIngressService(
           )
           .then((rows) => rows.map((row) => row.id));
         if (
-          existing.body !== input.body ||
+          existing.body !== effectiveBody ||
           !sameStrings(existingAttachmentIds, requestedAttachmentIds)
         ) {
           throw conflict(
@@ -868,7 +985,7 @@ export function vectorIngressService(
 
       const inserted = await issuesSvc.addComment(
         issue.id,
-        input.body,
+        effectiveBody,
         { userId: responsibleUserId },
         {
           clientRequestId: input.clientRequestId,
@@ -917,7 +1034,11 @@ export function vectorIngressService(
         deliveredRunId = run.id;
       }
       return run;
-    });
+    }, input.launchContext
+      ? { vectorWorkloadLaunch: input.launchContext }
+      : input.roleContext
+        ? { vectorRoleTurn: input.roleContext }
+        : {});
 
     const receipt = await db
       .select({
