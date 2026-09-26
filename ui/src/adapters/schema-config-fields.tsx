@@ -13,6 +13,7 @@ import {
 } from "../components/agent-config-primitives";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { ChevronDown } from "lucide-react";
+import { paperclipApiPath } from "@/lib/base-path";
 
 // ── Select field (extracted to keep hooks at component top level) ──────
 function SelectField({
@@ -218,7 +219,7 @@ async function fetchConfigSchema(adapterType: string): Promise<AdapterConfigSche
 
   const promise = (async () => {
     try {
-      const res = await fetch(`/api/adapters/${encodeURIComponent(adapterType)}/config-schema`);
+      const res = await fetch(paperclipApiPath(`/adapters/${encodeURIComponent(adapterType)}/config-schema`));
       if (!res.ok) {
         failedSchemaTypes.add(adapterType);
         return null;

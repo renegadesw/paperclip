@@ -11,6 +11,7 @@ import {
 } from "../onboarding/SavedProviderKeySelect";
 import { agentsApi } from "@/api/agents";
 import { queryKeys } from "@/lib/queryKeys";
+import { paperclipPath } from "@/lib/base-path";
 import { AdapterLoginPanel } from "../AgentConfigForm";
 import {
   LocalProviderLoginInstructions,
@@ -224,7 +225,7 @@ export function AgentProviderConnection({
             label: provider,
             icon: (
               <img
-                src={adapterType === "grok_local" ? "/brands/adapters/grok.svg" : `/brands/${adapterType === "claude_local" ? "claude" : "codex"}-color.svg`}
+                src={paperclipPath(adapterType === "grok_local" ? "/brands/adapters/grok.svg" : `/brands/${adapterType === "claude_local" ? "claude" : "codex"}-color.svg`)}
                 className="size-6"
                 alt=""
               />

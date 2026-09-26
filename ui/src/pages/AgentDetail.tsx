@@ -25,6 +25,7 @@ import { useToastActions } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { copyTextToClipboard } from "../lib/clipboard";
+import { paperclipPath } from "@/lib/base-path";
 import { AgentSkillsTab } from "./agent-skills/AgentSkillsTab";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { PillGuy } from "../components/onboarding/PillGuy";
@@ -1254,7 +1255,7 @@ export function AgentDetail() {
             <h1 className="truncate text-2xl font-semibold tracking-tight">{agent.name}</h1>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {agent.adapterType === "claude_local" || agent.adapterType === "codex_local"
-                ? <img src={`/brands/${agent.adapterType === "claude_local" ? "claude" : "codex"}-color.svg`} className="size-4" alt="" />
+                ? <img src={paperclipPath(`/brands/${agent.adapterType === "claude_local" ? "claude" : "codex"}-color.svg`)} className="size-4" alt="" />
                 : null}
               <span>{getAdapterDisplay(agent.adapterType).label}</span><span>·</span>
               <span>{agent.title || roleLabels[agent.role] || agent.role}</span>

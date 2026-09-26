@@ -39,6 +39,7 @@ import { useToastActions, type ToastInput } from "@/context/ToastContext";
 import { useSidebar } from "@/context/SidebarContext";
 import { isGlobalPath, normalizeCompanyPrefix } from "@/lib/company-routes";
 import { normalizeRememberedInstanceSettingsPath } from "@/lib/instance-settings";
+import { paperclipApiPath } from "@/lib/base-path";
 
 // ---------------------------------------------------------------------------
 // Bridge error type (mirrors the SDK's PluginBridgeError)
@@ -621,7 +622,7 @@ export function usePluginStream<T = unknown>(
 
     const params = new URLSearchParams({ companyId: effectiveCompanyId });
     const source = new EventSource(
-      `/api/plugins/${encodeURIComponent(pluginId)}/bridge/stream/${encodeURIComponent(channel)}?${params.toString()}`,
+      `${paperclipApiPath(`/plugins/${encodeURIComponent(pluginId)}/bridge/stream/${encodeURIComponent(channel)}`)}?${params.toString()}`,
       { withCredentials: true },
     );
     sourceRef.current = source;

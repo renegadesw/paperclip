@@ -11,6 +11,7 @@ import {
   type ModelSource,
 } from "./ModelSourceTiles";
 import { OnboardingHeading } from "./OnboardingPrimitives";
+import { paperclipPath } from "@/lib/base-path";
 import { PillGuy } from "./PillGuy";
 import { SleepingZs } from "./SleepingZs";
 import { Stepper } from "./Stepper";
@@ -47,12 +48,12 @@ const MODEL_SOURCES: ModelSource[] = [
   {
     id: "claude_local",
     label: "Claude Code",
-    icon: <img src="/brands/claude-color.svg" alt="" className="size-full" />,
+    icon: <img src={paperclipPath("/brands/claude-color.svg")} alt="" className="size-full" />,
   },
   {
     id: "codex_local",
     label: "Codex",
-    icon: <img src="/brands/codex-color.svg" alt="" className="size-full" />,
+    icon: <img src={paperclipPath("/brands/codex-color.svg")} alt="" className="size-full" />,
   },
 ];
 

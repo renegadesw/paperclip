@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { CompanyPatternIcon } from "@/components/CompanyPatternIcon";
+import { paperclipPath } from "@/lib/base-path";
 import { cn } from "@/lib/utils";
 import {
   ArrowRight,
@@ -199,7 +200,7 @@ function InviteSummaryPanel({
       <div className="flex items-start gap-4">
         <CompanyPatternIcon
           companyName="Acme Robotics"
-          logoUrl="/api/invites/pcp_invite_test/logo"
+          logoUrl={paperclipPath("/api/invites/pcp_invite_test/logo")}
           className="h-16 w-16 rounded-none border border-zinc-800"
         />
         <div className="min-w-0">
@@ -410,7 +411,7 @@ function InviteResultPreview({
       <div className="flex items-center gap-3">
         <CompanyPatternIcon
           companyName="Acme Robotics"
-          logoUrl="/api/invites/pcp_invite_test/logo"
+          logoUrl={paperclipPath("/api/invites/pcp_invite_test/logo")}
           className="h-12 w-12 rounded-none border border-zinc-800"
         />
         <h3 className="text-lg font-semibold">{title}</h3>
@@ -425,7 +426,7 @@ function InviteResultPreview({
           <>
             <div className="border border-zinc-800 p-3">
               <p className="mb-1 text-xs text-zinc-500">Approval page</p>
-              <a className="text-sm text-zinc-200 underline underline-offset-2" href="/company/settings/members">
+              <a className="text-sm text-zinc-200 underline underline-offset-2" href={paperclipPath("/company/settings/members")}>
                 Settings → Members
               </a>
             </div>
@@ -620,7 +621,7 @@ function CompanyInvitesPreview() {
                 Review invite status, role, inviter, and any linked join request.
               </CardDescription>
             </div>
-            <a href="/inbox/requests" className="text-sm underline underline-offset-4">
+            <a href={paperclipPath("/inbox/requests")} className="text-sm underline underline-offset-4">
               Open join request queue
             </a>
           </div>
@@ -654,7 +655,7 @@ function CompanyInvitesPreview() {
                     <td className="px-5 py-3 align-top text-muted-foreground">{invite.createdAt}</td>
                     <td className="px-5 py-3 align-top">
                       {invite.relatedLabel === "Review request" ? (
-                        <a href="/inbox/requests" className="underline underline-offset-4">
+                        <a href={paperclipPath("/inbox/requests")} className="underline underline-offset-4">
                           {invite.relatedLabel}
                         </a>
                       ) : (
@@ -890,7 +891,7 @@ export function InviteUxLab() {
             title="Request to join Acme Robotics"
             description="Board User must approve your request to join."
             claimSecret="pcp_claim_secret_demo"
-            onboardingTextUrl="/api/invites/pcp_invite_test/onboarding.txt"
+            onboardingTextUrl={paperclipPath("/api/invites/pcp_invite_test/onboarding.txt")}
           />
           <InviteResultPreview
             title="You joined the organization"

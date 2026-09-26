@@ -13,6 +13,7 @@ type FetchListener = (event: {
 function loadServiceWorkerFetchListener(overrides: {
   fetch: () => Promise<Response>;
   cachesMatch: (key: unknown) => Promise<Response | undefined>;
+  scope?: string;
 }): FetchListener {
   const listeners = new Map<string, (event: unknown) => void>();
   const swSelf = {
@@ -22,6 +23,7 @@ function loadServiceWorkerFetchListener(overrides: {
     skipWaiting: vi.fn(),
     clients: { claim: vi.fn() },
     location: { origin: "https://app.example.com" },
+    registration: { scope: overrides.scope ?? "https://app.example.com/" },
   };
   const caches = {
     match: overrides.cachesMatch,
@@ -80,12 +82,13 @@ describe("sw.js offline fallback", () => {
     const shell = new Response("<html>app shell</html>", { status: 200 });
     const listener = loadServiceWorkerFetchListener({
       fetch: () => Promise.reject(new TypeError("network down")),
-      cachesMatch: async (key) => (key === "/" ? shell : undefined),
+      cachesMatch: async (key) => (key === "/__paperclip/" ? shell : undefined),
+      scope: "https://app.example.com/__paperclip/",
     });
 
     const response = await respondTo(listener, {
       method: "GET",
-      url: "https://app.example.com/settings/instance",
+      url: "https://app.example.com/__paperclip/settings/instance",
       mode: "navigate",
     });
 
