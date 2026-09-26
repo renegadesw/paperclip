@@ -7,16 +7,22 @@ async function main(): Promise<void> {
   console.log(`Migrating database via ${resolved.source}`);
 
   try {
-    const before = await inspectMigrations(resolved.connectionString);
+    const before = await inspectMigrations(
+      resolved.connectionString,
+      resolved.deploymentProfile,
+    );
     if (before.status === "upToDate") {
       console.log("No pending migrations");
       return;
     }
 
     console.log(`Applying ${before.pendingMigrations.length} pending migration(s)...`);
-    await applyPendingMigrations(resolved.connectionString);
+    await applyPendingMigrations(resolved.connectionString, resolved.deploymentProfile);
 
-    const after = await inspectMigrations(resolved.connectionString);
+    const after = await inspectMigrations(
+      resolved.connectionString,
+      resolved.deploymentProfile,
+    );
     if (after.status !== "upToDate") {
       throw new Error(`Migrations incomplete: ${after.pendingMigrations.join(", ")}`);
     }

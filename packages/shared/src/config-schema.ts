@@ -28,6 +28,7 @@ export const databaseBackupConfigSchema = z.object({
 }).passthrough();
 
 export const databaseConfigSchema = z.object({
+  deploymentProfile: z.enum(["standalone", "vector-embedded"]).optional(),
   mode: z.enum(["embedded-postgres", "postgres"]).default("embedded-postgres"),
   connectionString: z.string().optional(),
   embeddedPostgresDataDir: z.string().default("~/.paperclip/instances/default/db"),

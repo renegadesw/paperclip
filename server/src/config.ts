@@ -54,6 +54,7 @@ maybeRepairLegacyWorktreeConfigAndEnvFiles();
 const TAILSCALE_DETECT_TIMEOUT_MS = 3000;
 
 type DatabaseMode = "embedded-postgres" | "postgres";
+type DatabaseDeploymentProfile = "standalone" | "vector-embedded";
 
 export interface Config {
   deploymentMode: DeploymentMode;
@@ -68,6 +69,7 @@ export interface Config {
   chatWebhookPublicBaseUrl: string | undefined;
   authDisableSignUp: boolean;
   databaseMode: DatabaseMode;
+  databaseDeploymentProfile: DatabaseDeploymentProfile;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
   embeddedPostgresDataDir: string;
@@ -122,6 +124,20 @@ export function loadConfig(): Config {
   const fileConfig = readConfigFile();
   const fileDatabaseMode =
     (fileConfig?.database.mode === "postgres" ? "postgres" : "embedded-postgres") as DatabaseMode;
+  const databaseProfileFromEnv = process.env.PAPERCLIP_DATABASE_PROFILE?.trim();
+  if (
+    databaseProfileFromEnv &&
+    databaseProfileFromEnv !== "standalone" &&
+    databaseProfileFromEnv !== "vector-embedded"
+  ) {
+    throw new Error(
+      `PAPERCLIP_DATABASE_PROFILE must be "standalone" or "vector-embedded", got: ${databaseProfileFromEnv}`,
+    );
+  }
+  const databaseDeploymentProfile: DatabaseDeploymentProfile =
+    (databaseProfileFromEnv as DatabaseDeploymentProfile | undefined) ??
+    fileConfig?.database.deploymentProfile ??
+    "standalone";
 
   const fileDbUrl =
     fileDatabaseMode === "postgres"
@@ -259,9 +275,11 @@ export function loadConfig(): Config {
       ? companyDeletionEnvRaw === "true"
       : deploymentMode === "local_trusted";
   const databaseBackupEnabled =
-    process.env.PAPERCLIP_DB_BACKUP_ENABLED !== undefined
-      ? process.env.PAPERCLIP_DB_BACKUP_ENABLED === "true"
-      : (fileDatabaseBackup?.enabled ?? true);
+    databaseDeploymentProfile === "vector-embedded"
+      ? false
+      : process.env.PAPERCLIP_DB_BACKUP_ENABLED !== undefined
+        ? process.env.PAPERCLIP_DB_BACKUP_ENABLED === "true"
+        : (fileDatabaseBackup?.enabled ?? true);
   const databaseBackupIntervalMinutes = Math.max(
     1,
     Number(process.env.PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES) ||
@@ -329,6 +347,7 @@ export function loadConfig(): Config {
     ),
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
+    databaseDeploymentProfile,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
     embeddedPostgresDataDir: resolveHomeAwarePath(

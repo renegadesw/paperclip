@@ -1162,6 +1162,23 @@ pnpm dev
 
 If you set `DATABASE_URL`, the server will use that instead of embedded PostgreSQL.
 
+For Vector installations that share Vector's existing application database,
+select the fork-only embedded profile and migrate before starting the server:
+
+```sh
+PAPERCLIP_DATABASE_PROFILE=vector-embedded \
+DATABASE_URL=postgres://.../vector \
+pnpm db:migrate
+
+PAPERCLIP_DATABASE_PROFILE=vector-embedded \
+DATABASE_URL=postgres://.../vector \
+pnpm dev:once
+```
+
+This profile owns only `llm` relations, uses `llm.paperclip_migrations`, refuses
+runtime schema drift, requires external PostgreSQL, and disables Paperclip's
+database backup commands and scheduler. See `doc/DATABASE.md` for the contract.
+
 ## Automatic DB Backups
 
 Paperclip can run automatic logical database backups on a timer. These backups cover
