@@ -68,11 +68,27 @@ import {
   sanitizePiOutput,
   sanitizePiOutputLine,
 } from "./vector-images.js";
+import {
+  readVectorLegacyPiContextMarker,
+  verifyVectorLegacyPiContextFile,
+} from "./vector-legacy-context.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 const PAPERCLIP_SESSIONS_DIR = path.join(os.homedir(), ".pi", "paperclips");
 const PI_AGENT_SKILLS_DIR = path.join(os.homedir(), ".pi", "agent", "skills");
+
+export function canResumePiSession(input: {
+  sessionId: string;
+  targetMatches: boolean;
+  sessionParamsCwdMatches: boolean;
+  sessionHeaderCwdMatches: boolean;
+  legacyContextAuthorized: boolean;
+}) {
+  return input.sessionId.length > 0 && input.targetMatches &&
+    (input.legacyContextAuthorized ||
+      (input.sessionParamsCwdMatches && input.sessionHeaderCwdMatches));
+}
 
 const VECTOR_PI_INHERITED_ENV_KEYS = new Set([
   "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
@@ -765,6 +781,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
     const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
     const sessionTargetMatches = adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
+    const rawLegacyContext = runtimeSessionParams.vectorLegacyPiContext;
+    const legacyContext = readVectorLegacyPiContextMarker(runtimeSessionParams);
+    const legacyRunBinding = parseObject(context.vectorLegacyPiContextBinding);
+    if (rawLegacyContext !== undefined && !legacyContext) {
+      throw new Error("Vector legacy Pi context marker is malformed");
+    }
+    let legacyContextAuthorized = false;
+    if (legacyContext) {
+      if (executionTargetIsRemote) {
+        throw new Error("Vector legacy Pi context cannot be resumed on a remote execution target");
+      }
+      const ingressSecret = process.env.PAPERCLIP_VECTOR_INGRESS_SECRET?.trim() ?? "";
+      const installationId = process.env.PAPERCLIP_VECTOR_INSTALLATION_ID?.trim() ?? "";
+      const profileId = process.env.PAPERCLIP_VECTOR_PROFILE?.trim() ?? "";
+      legacyContextAuthorized = await verifyVectorLegacyPiContextFile({
+        marker: legacyContext,
+        ingressSecret,
+        expected: {
+          installationId,
+          profileId,
+          companyId: agent.companyId,
+          agentId: agent.id,
+          ownerSha256: asString(legacyRunBinding.ownerSha256, ""),
+          externalSessionId: asString(legacyRunBinding.externalSessionId, ""),
+        },
+      });
+      if (!legacyContextAuthorized || runtimeSessionId !== legacyContext.sessionPath) {
+        throw new Error("Vector legacy Pi context authority or retained bytes do not match this run");
+      }
+    }
     const sessionParamsCwdMatches =
       runtimeSessionCwd.length === 0 ||
       executionCwdsMatch(runtimeSessionCwd, effectiveExecutionCwd, executionTargetIsRemote);
@@ -784,11 +830,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       runtimeSessionId.length === 0 ||
       (savedSessionCwd !== null &&
         executionCwdsMatch(savedSessionCwd, effectiveExecutionCwd, executionTargetIsRemote));
-    const canResumeSession =
-      runtimeSessionId.length > 0 &&
-      sessionTargetMatches &&
-      sessionParamsCwdMatches &&
-      sessionHeaderCwdMatches;
+    const canResumeSession = canResumePiSession({
+      sessionId: runtimeSessionId,
+      targetMatches: sessionTargetMatches,
+      sessionParamsCwdMatches,
+      sessionHeaderCwdMatches,
+      legacyContextAuthorized,
+    });
     const sessionPath = canResumeSession
       ? runtimeSessionId
       : executionTargetIsRemote && remoteRuntimeRootDir

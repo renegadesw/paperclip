@@ -49,6 +49,7 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import { agentService } from "./agents.js";
 import { normalizeLegacyRunnerProvider } from "@paperclipai/adapter-utils";
+import { readVectorLegacyPiContextMarker } from "@paperclipai/adapter-pi-local/server";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -21064,6 +21065,15 @@ export function heartbeatService(
       const configuredModel =
         readConfiguredModelFromAdapterConfig(runtimeConfig);
       const wakeSessionResetReason = describeSessionResetReason(context);
+      const legacyContextRaw = taskSession?.sessionParamsJson?.vectorLegacyPiContext;
+      const legacyContextMarker = readVectorLegacyPiContextMarker(
+        taskSession?.sessionParamsJson ?? null,
+      );
+      if (legacyContextRaw !== undefined && !legacyContextMarker) {
+        throw conflict("Imported Vector legacy Pi context marker is invalid", {
+          code: "vector_legacy_context_invalid",
+        });
+      }
       const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
         hasTaskSession: taskSession != null,
         configuredModel,
@@ -21072,7 +21082,8 @@ export function heartbeatService(
         configMetadata: sessionConfigMetadata,
         wakeResetReason: wakeSessionResetReason,
         preserveLegacySessionWithoutConfigMetadata:
-          acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
+          (acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision) ||
+          legacyContextMarker !== null,
       });
       const resetTaskSession =
         shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;

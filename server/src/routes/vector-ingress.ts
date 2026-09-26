@@ -165,6 +165,12 @@ const resetSchema = z.object({
   clientRequestId: z.string().trim().min(1).max(255),
 }).superRefine(requireCompleteOwnerScope);
 
+const legacyPiContextSchema = ownerScopeSchema.extend({
+  externalSessionId: boundedOpaqueId("externalSessionId", 512),
+  legacyService: z.enum(["nexuslink-chat", "funky"]),
+  legacyPiSessionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/),
+}).strict();
+
 const cancelSchema = z.object({
   ...scopeShape,
   runId: z.string().uuid().optional(),
@@ -480,6 +486,12 @@ export function vectorIngressRoutes(
     const input = resetSchema.parse(req.body);
     const result = await service.reset(input);
     res.status(result.replayed ? 200 : 202).json(result);
+  });
+
+  router.post("/sessions/import-legacy-pi-context", async (req, res) => {
+    const input = legacyPiContextSchema.parse(req.body);
+    const result = await service.importLegacyPiContext(input);
+    res.status(result.replayed ? 200 : 201).json(result);
   });
 
   router.post("/sessions/cancel", async (req, res) => {

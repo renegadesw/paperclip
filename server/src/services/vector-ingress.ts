@@ -14,6 +14,7 @@ import {
   sql,
 } from "drizzle-orm";
 import {
+  agentTaskSessions,
   agentWakeupRequests,
   agents,
   assets,
@@ -39,6 +40,11 @@ import {
   validateVectorIngressImages,
   type VectorIngressImageInput,
 } from "./vector-ingress-images.js";
+import {
+  VECTOR_LEGACY_PI_CONTEXT_ORIGIN,
+  type VectorLegacyPiContextImporter,
+  type VectorLegacyPiContextImportResult,
+} from "./vector-legacy-pi-context.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
@@ -132,6 +138,12 @@ export interface VectorIngressTranscriptInput extends VectorIngressOwnerScope {
   externalSessionId: string;
   after?: VectorIngressCursorPosition;
   limit?: number;
+}
+
+export interface VectorIngressLegacyPiContextInput extends VectorIngressOwnerScope {
+  externalSessionId: string;
+  legacyService: "nexuslink-chat" | "funky";
+  legacyPiSessionId: string;
 }
 
 export interface VectorIngressHeartbeat {
@@ -369,6 +381,7 @@ export function vectorIngressService(
     responsibleUserId?: string;
     toolAuthority?: VectorIngressToolAuthority;
     providerAuthority?: VectorIngressProviderAuthority;
+    legacyContextImporter?: VectorLegacyPiContextImporter;
     storage?: StorageService;
   } = {},
 ) {
@@ -651,6 +664,29 @@ export function vectorIngressService(
     return { issue, ownerId: existing.ownerId, created: true };
   }
 
+  async function importLegacyPiContext(
+    input: VectorIngressLegacyPiContextInput,
+  ): Promise<VectorLegacyPiContextImportResult> {
+    const expectedService =
+      input.profileId === "engineering" || input.profileId === "standard"
+        ? "nexuslink-chat"
+        : input.profileId === "staging"
+          ? "funky"
+          : null;
+    if (!expectedService || input.legacyService !== expectedService) {
+      throw conflict("Vector legacy context profile is not eligible for import", {
+        code: "vector_legacy_context_profile_mismatch",
+      });
+    }
+    if (!options.legacyContextImporter) {
+      throw conflict("Vector legacy context import is unavailable", {
+        code: "vector_legacy_context_unavailable",
+      });
+    }
+    const { issue } = await resolveConversation(input);
+    return options.legacyContextImporter.importContext({ ...input, issueId: issue.id });
+  }
+
   async function latestConversationRun(
     scope: VectorIngressScope,
     issue: { id: string },
@@ -678,12 +714,20 @@ export function vectorIngressService(
       ? await requireOwnedConversation(input)
       : await requireConversation(input);
     const run = await latestConversationRun(input, issue);
+    const legacyContextImported = issue.originFingerprint === VECTOR_LEGACY_PI_CONTEXT_ORIGIN &&
+      await db.select({ taskKey: agentTaskSessions.taskKey }).from(agentTaskSessions).where(and(
+        eq(agentTaskSessions.companyId, input.companyId),
+        eq(agentTaskSessions.agentId, input.agentId),
+        eq(agentTaskSessions.adapterType, "pi_local"),
+        eq(agentTaskSessions.taskKey, issue.id),
+      )).limit(1).then((rows) => rows.length === 1);
     return {
       companyId: input.companyId,
       agentId: input.agentId,
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       sessionGeneration: issue.conversationSessionGeneration,
+      legacyContextImported,
       run: run
         ? {
             id: run.id,
@@ -1275,6 +1319,14 @@ export function vectorIngressService(
               // Per-turn presentation hint, never stored in user comments or
               // inherited by subsequent turns. It grants no tool authority.
               vectorVoiceActive: input.voiceActive === true,
+              ...(mapping
+                ? {
+                    vectorLegacyPiContextBinding: {
+                      ownerSha256: mapping.ownerSha256,
+                      externalSessionId: mapping.externalSessionId,
+                    },
+                  }
+                : {}),
               ...(vectorImageAttachmentIds.length > 0
                 ? { vectorIngressImageAttachmentIds: vectorImageAttachmentIds }
                 : {}),
@@ -1464,6 +1516,7 @@ export function vectorIngressService(
     events,
     inventory,
     transcript,
+    importLegacyPiContext,
   };
 }
 

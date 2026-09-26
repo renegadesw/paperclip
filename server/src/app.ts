@@ -176,6 +176,7 @@ import { apiCompression } from "./middleware/api-compression.js";
 import { chatWebhookBodyParser } from "./middleware/chat-webhook-body.js";
 import { createChatWebhookDiagnostics } from "./services/chat-webhook-diagnostics.js";
 import { vectorIngressService } from "./services/vector-ingress.js";
+import { vectorLegacyPiContextImporter } from "./services/vector-legacy-pi-context.js";
 import {
   resolveVectorIngressAuthConfig,
   vectorIngressRoutes,
@@ -617,6 +618,17 @@ export async function createApp(
     const vectorProviderAuthority = vectorProviderAuthorityConfig
       ? new VectorProviderAuthorityBridge(db, vectorProviderAuthorityConfig)
       : null;
+    const vectorLegacySessionRoot =
+      process.env.PAPERCLIP_VECTOR_LEGACY_SESSION_ROOT?.trim() || null;
+    if (vectorLegacySessionRoot && !path.isAbsolute(vectorLegacySessionRoot)) {
+      throw new Error("PAPERCLIP_VECTOR_LEGACY_SESSION_ROOT must be absolute");
+    }
+    const vectorLegacyContextImporter = vectorLegacySessionRoot
+      ? vectorLegacyPiContextImporter(db, {
+          sourceRoot: vectorLegacySessionRoot,
+          ingressSecret: vectorIngressAuth.secret,
+        })
+      : null;
     setActiveVectorToolAuthorityBridge(vectorToolAuthority);
     setActiveVectorProviderAuthorityBridge(vectorProviderAuthority);
     // This service-to-service boundary has its own exact-body HMAC and direct
@@ -631,6 +643,7 @@ export async function createApp(
           responsibleUserId: vectorIngressAuth.responsibleUserId,
           toolAuthority: vectorToolAuthority ?? undefined,
           providerAuthority: vectorProviderAuthority ?? undefined,
+          legacyContextImporter: vectorLegacyContextImporter ?? undefined,
           storage: opts.storageService,
         }),
         toolAuthority: vectorToolAuthority ?? undefined,
