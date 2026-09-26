@@ -24,8 +24,10 @@ export interface VectorScheduleRoutineDispatchInput {
 }
 
 export interface VectorScheduleRoutineDispatchResult {
-  fired: boolean;
+  accepted: boolean;
   skipped: boolean;
+  duplicate: boolean;
+  state: string;
   reason: string;
 }
 
@@ -111,11 +113,19 @@ export function createVectorScheduleRoutineDispatcher(
         throw new Error("Vector schedule dispatch returned invalid response");
       }
       const record = parsed as Record<string, unknown>;
-      if (typeof record.fired !== "boolean" || typeof record.skipped !== "boolean" ||
-          typeof record.reason !== "string" || record.fired === record.skipped) {
+      if (typeof record.accepted !== "boolean" || typeof record.skipped !== "boolean" ||
+          typeof record.duplicate !== "boolean" || typeof record.state !== "string" ||
+          record.state.trim() === "" || typeof record.reason !== "string" ||
+          record.reason.trim() === "" || record.accepted === record.skipped) {
         throw new Error("Vector schedule dispatch returned invalid response");
       }
-      return { fired: record.fired, skipped: record.skipped, reason: record.reason };
+      return {
+        accepted: record.accepted,
+        skipped: record.skipped,
+        duplicate: record.duplicate,
+        state: record.state,
+        reason: record.reason,
+      };
     },
   };
 }

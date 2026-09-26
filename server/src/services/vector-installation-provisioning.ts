@@ -552,7 +552,7 @@ export function vectorScheduleRoutineSeeds(manifest: VectorInstallationManifest)
       assigneeAgentId: manifest.agent.id,
       scheduleKey,
       title: `Vector schedule: ${scheduleKey}`,
-      description: `Checks the authoritative jobs.schedules row for ${scheduleKey} and fires its sealed Vector target only when due and owned by Paperclip.`,
+      description: `Checks the authoritative jobs.schedules row for ${scheduleKey} and fires its sealed Vector target only when due and owned by Paperclip. Declared source cadence: ${schedule.cronExpression} (${schedule.timezone}); the live Vector row remains authoritative.`,
       // The minute trigger is only Paperclip's wakeup. Vector's live row stays
       // authoritative for cron, timezone, enablement and next-fire state.
       cronExpression: "* * * * *",

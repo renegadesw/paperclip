@@ -24,7 +24,9 @@ describe("Vector schedule routine dispatch", () => {
       expect(body).not.toContain("cron");
       expect(body).not.toContain("target");
       expect(body).not.toContain("parameter");
-      return new Response(JSON.stringify({ fired: true, skipped: false, reason: "fired" }), { status: 200 });
+      return new Response(JSON.stringify({
+        accepted: true, skipped: false, duplicate: false, state: "accepted", reason: "accepted",
+      }), { status: 202 });
     });
     const dispatcher = createVectorScheduleRoutineDispatcher({
       url: "http://127.0.0.1:8430/internal/paperclip/schedules/dispatch",
@@ -38,7 +40,9 @@ describe("Vector schedule routine dispatch", () => {
     await expect(dispatcher.dispatch({
       routineRunId: randomUUID(), routineId: randomUUID(), triggerId: randomUUID(),
       companyId: "0f6d6b20-b9dd-43fc-8d48-5f8f65c6e047", scheduleKey: "fa_research_daily",
-    })).resolves.toEqual({ fired: true, skipped: false, reason: "fired" });
+    })).resolves.toEqual({
+      accepted: true, skipped: false, duplicate: false, state: "accepted", reason: "accepted",
+    });
   });
 
   it("rejects non-loopback URLs, non-staging scope and partial configuration", () => {

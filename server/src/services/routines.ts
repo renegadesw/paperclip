@@ -1834,6 +1834,10 @@ export function routineService(
               companyId: input.routine.companyId,
               scheduleKey: scheduleKey!,
             });
+        // A Vector control run completes when the trusted parent accepts (or
+        // intentionally skips) the dispatch. Long-running workload/schedule
+        // completion remains authoritative in Vector's durable ledger and
+        // domain rows; this routine run must not hold an HTTP request open.
         const completed = await finalizeRun(run.id, {
           status: "completed",
           completedAt: new Date(),

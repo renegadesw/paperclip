@@ -353,6 +353,7 @@ describe("Vector installation provisioning", () => {
         timezone: "UTC",
         sourceCronExpression: "20 8 * * *",
         sourceTimezone: "America/New_York",
+        description: expect.stringContaining("20 8 * * * (America/New_York)"),
       }),
     ]));
     expect(new Set(scheduleSeeds.flatMap((seed) => [seed.routineId, seed.triggerId])).size).toBe(12);

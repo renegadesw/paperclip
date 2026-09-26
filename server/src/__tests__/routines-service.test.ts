@@ -314,7 +314,9 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   });
 
   it("runs a sealed Vector schedule without creating an issue", async () => {
-    const dispatch = vi.fn(async () => ({ fired: false, skipped: true, reason: "not_due" }));
+    const dispatch = vi.fn(async () => ({
+      accepted: false, skipped: true, duplicate: false, state: "skipped", reason: "not_due",
+    }));
     const { companyId, routine, svc } = await seedFixture({
       vectorScheduleDispatcher: { dispatch },
     });
