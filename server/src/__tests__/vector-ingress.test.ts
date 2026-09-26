@@ -14,10 +14,13 @@ import {
   issueAttachments,
   issueComments,
   issues,
+  vectorIngressConversations,
+  vectorIngressTurns,
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
 import { isSecretSensitiveHttpRequest } from "../middleware/http-log-policy.js";
 import {
+  createVectorIngressCursorCodec,
   isLoopbackRemoteAddress,
   resolveVectorIngressAuthConfig,
   signVectorIngressRequest,
@@ -83,6 +86,25 @@ describe("Vector ingress service authentication", () => {
 
   it("accepts an exact-body signature and rejects missing, stale, or changed signatures", async () => {
     const addTurn = vi.fn().mockResolvedValue({ replayed: false, ok: true });
+    const inventory = vi.fn().mockResolvedValue({
+      companyId: randomUUID(),
+      agentId: randomUUID(),
+      sessions: [],
+      hasMore: true,
+      nextPosition: {
+        at: "2026-09-25T18:00:00.000Z",
+        rank: 0,
+        id: "client-session",
+      },
+    });
+    const transcript = vi.fn().mockResolvedValue({
+      companyId: randomUUID(),
+      agentId: randomUUID(),
+      externalSessionId: "client-session",
+      events: [],
+      hasMore: false,
+      nextPosition: null,
+    });
     const app = express();
     app.use(
       express.json({
@@ -105,6 +127,8 @@ describe("Vector ingress service authentication", () => {
           cancel: vi.fn(),
           status: vi.fn(),
           events: vi.fn(),
+          inventory,
+          transcript,
         } as never,
         now: () => 1_700_000_000_000,
       }),
@@ -120,6 +144,11 @@ describe("Vector ingress service authentication", () => {
 
     await signedPost(app, path, body).expect(201);
     expect(addTurn).toHaveBeenCalledExactlyOnceWith(body);
+    await signedPost(app, path, { ...body, externalSessionId: " padded" }).expect(
+      400,
+    );
+    await signedPost(app, path, { ...body, ownerId: "owner-only" }).expect(400);
+    expect(addTurn).toHaveBeenCalledTimes(1);
     await request(app).post(path).send(body).expect(401);
     await signedPost(app, path, body, "1699999000").expect(401);
     await request(app)
@@ -128,6 +157,84 @@ describe("Vector ingress service authentication", () => {
       .set("x-vector-signature", "v1=00")
       .send(body)
       .expect(401);
+
+    const inventoryPath = "/api/internal/vector/v1/sessions/list";
+    const inventoryBody = {
+      companyId: randomUUID(),
+      agentId: randomUUID(),
+      ownerId: "authenticated-owner",
+      installationId: "vector-installation",
+      profileId: "standard",
+      limit: 25,
+    };
+    const inventoryResponse = await signedPost(
+      app,
+      inventoryPath,
+      inventoryBody,
+    ).expect(200);
+    expect(inventory).toHaveBeenCalledExactlyOnceWith(inventoryBody);
+    expect(inventoryResponse.body.nextCursor).toEqual(expect.any(String));
+    expect(inventoryResponse.body).not.toHaveProperty("nextPosition");
+    await request(app).post(inventoryPath).send(inventoryBody).expect(401);
+
+    const transcriptPath = "/api/internal/vector/v1/sessions/transcript";
+    const transcriptBody = {
+      ...inventoryBody,
+      externalSessionId: "client-session",
+    };
+    await signedPost(app, transcriptPath, transcriptBody).expect(200);
+    expect(transcript).toHaveBeenCalledExactlyOnceWith(transcriptBody);
+  });
+
+  it("keeps opaque cursors restart-stable and rejects tampering or cross-scope reuse", () => {
+    const scope = `${randomUUID()}\0${randomUUID()}\0owner-a`;
+    const position = {
+      at: "2026-09-25T18:00:00.000Z",
+      rank: 1 as const,
+      id: "42",
+    };
+    const firstProcess = createVectorIngressCursorCodec(secret);
+    const cursor = firstProcess.seal("transcript", scope, position);
+    const restartedProcess = createVectorIngressCursorCodec(secret);
+
+    expect(restartedProcess.open("transcript", scope, cursor)).toEqual(position);
+    expect(() => restartedProcess.open("inventory", scope, cursor)).toThrow(
+      /cursor is invalid/,
+    );
+    expect(() =>
+      restartedProcess.open("transcript", `${scope}\0other-session`, cursor),
+    ).toThrow(/cursor is invalid/);
+    expect(() =>
+      createVectorIngressCursorCodec(`${secret}-rotated`).open(
+        "transcript",
+        scope,
+        cursor,
+      ),
+    ).toThrow(/cursor is invalid/);
+    expect(() =>
+      restartedProcess.open(
+        "transcript",
+        scope,
+        cursor.replace(/^v1\./, "v0."),
+      ),
+    ).toThrow(/cursor is invalid/);
+
+    const issuedAt = 1_700_000_000_000;
+    const expired = createVectorIngressCursorCodec(secret, {
+      now: () => issuedAt,
+      maxAgeSeconds: 60,
+    }).seal("inventory", scope, position);
+    expect(() =>
+      createVectorIngressCursorCodec(secret, {
+        now: () => issuedAt + 61_000,
+        maxAgeSeconds: 60,
+      }).open("inventory", scope, expired),
+    ).toThrow(/cursor is invalid/);
+    const tamperedParts = cursor.split(".");
+    tamperedParts[2] = `${tamperedParts[2]!.startsWith("a") ? "b" : "a"}${tamperedParts[2]!.slice(1)}`;
+    expect(() =>
+      restartedProcess.open("transcript", scope, tamperedParts.join(".")),
+    ).toThrow(/cursor is invalid/);
   });
 });
 
@@ -602,6 +709,317 @@ const support = await getEmbeddedPostgresTestSupport();
       await expect(
         service.status({ ...scope, agentId: otherAgentId }),
       ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it("inventories only one owner and paginates without exposing internal IDs", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const ownerA = "authenticated-owner-a";
+      const ownerB = "authenticated-owner-b";
+      const ownerScope = {
+        installationId: "vector-installation",
+        profileId: "standard",
+      };
+      const baseTime = new Date("2026-09-25T19:00:00.000Z");
+      const ownerASessions = [];
+      for (const [index, externalSessionId] of [
+        "client-a",
+        "client-b",
+        "client-c",
+      ].entries()) {
+        const turn = await service.addTurn({
+          companyId,
+          agentId,
+          ownerId: ownerA,
+          ...ownerScope,
+          externalSessionId,
+          clientRequestId: `inventory-a-${index}`,
+          body: `Owner A ${index}`,
+        });
+        await db
+          .update(vectorIngressConversations)
+          .set({ createdAt: new Date(baseTime.getTime() + index * 1_000) })
+          .where(eq(vectorIngressConversations.issueId, turn.issueId));
+        ownerASessions.push(turn);
+      }
+      const ownerBTurn = await service.addTurn({
+        companyId,
+        agentId,
+        ownerId: ownerB,
+        ...ownerScope,
+        externalSessionId: "client-a",
+        clientRequestId: "inventory-b-0",
+        body: "Owner B",
+      });
+      expect(ownerBTurn.issueId).not.toBe(ownerASessions[0]?.issueId);
+
+      const firstPage = await service.inventory({
+        companyId,
+        agentId,
+        ownerId: ownerA,
+        ...ownerScope,
+        limit: 2,
+      });
+      expect(
+        firstPage.sessions.map((session) => session.externalSessionId),
+      ).toEqual(["client-a", "client-b"]);
+      expect(firstPage.hasMore).toBe(true);
+      expect(firstPage.nextPosition).not.toBeNull();
+      expect(JSON.stringify(firstPage)).not.toContain(ownerASessions[0]!.issueId);
+      expect(JSON.stringify(firstPage)).not.toContain(ownerBTurn.issueId);
+
+      const secondPage = await service.inventory({
+        companyId,
+        agentId,
+        ownerId: ownerA,
+        ...ownerScope,
+        limit: 2,
+        after: firstPage.nextPosition!,
+      });
+      expect(
+        secondPage.sessions.map((session) => session.externalSessionId),
+      ).toEqual(["client-c"]);
+      expect(secondPage.hasMore).toBe(false);
+      expect(
+        (
+          await service.inventory({
+            companyId,
+            agentId,
+            ownerId: ownerB,
+            ...ownerScope,
+          })
+        ).sessions.map(
+          (session) => session.externalSessionId,
+        ),
+      ).toEqual(["client-a"]);
+      expect(
+        (
+          await service.inventory({
+            companyId,
+            agentId,
+            ownerId: ownerA,
+            installationId: "vector-installation",
+            profileId: "funkydev",
+          })
+        ).sessions,
+      ).toEqual([]);
+
+      await db
+        .update(issues)
+        .set({ hiddenAt: new Date() })
+        .where(eq(issues.id, ownerASessions[2]!.issueId));
+      expect(
+        (
+          await service.inventory({
+            companyId,
+            agentId,
+            ownerId: ownerA,
+            ...ownerScope,
+          })
+        ).sessions.map(
+          (session) => session.externalSessionId,
+        ),
+      ).toEqual(["client-a", "client-b"]);
+    });
+
+    it("replays ordered multi-turn and multi-run history without leaking internal events", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const scope = {
+        companyId,
+        agentId,
+        ownerId: "transcript-owner",
+        installationId: "vector-installation",
+        profileId: "standard",
+        externalSessionId: "transcript-thread",
+      };
+      const first = await service.addTurn({
+        ...scope,
+        clientRequestId: "transcript-1",
+        body: "First question",
+      });
+      const second = await service.addTurn({
+        ...scope,
+        clientRequestId: "transcript-2",
+        body: "Second question",
+      });
+      const times = {
+        firstTurn: new Date("2026-09-25T20:00:00.000Z"),
+        firstText: new Date("2026-09-25T20:00:01.000Z"),
+        firstTool: new Date("2026-09-25T20:00:02.000Z"),
+        firstResult: new Date("2026-09-25T20:00:03.000Z"),
+        firstDone: new Date("2026-09-25T20:00:04.000Z"),
+        secondTurn: new Date("2026-09-25T20:00:05.000Z"),
+        secondText: new Date("2026-09-25T20:00:06.000Z"),
+        secondFailed: new Date("2026-09-25T20:00:07.000Z"),
+      };
+      await db
+        .update(issueComments)
+        .set({ createdAt: times.firstTurn })
+        .where(eq(issueComments.id, first.commentId));
+      await db
+        .update(vectorIngressTurns)
+        .set({ createdAt: times.firstTurn })
+        .where(eq(vectorIngressTurns.commentId, first.commentId));
+      await db
+        .update(issueComments)
+        .set({ createdAt: times.secondTurn })
+        .where(eq(issueComments.id, second.commentId));
+      await db
+        .update(vectorIngressTurns)
+        .set({ createdAt: times.secondTurn })
+        .where(eq(vectorIngressTurns.commentId, second.commentId));
+      await db.insert(issueComments).values({
+        companyId,
+        issueId: first.issueId,
+        authorType: "user",
+        authorUserId: "local-board",
+        body: "Operator note that is not a NexusLink user turn",
+        createdAt: new Date("2026-09-25T20:00:00.500Z"),
+      });
+      await db.insert(heartbeatRunEvents).values([
+        {
+          companyId,
+          agentId,
+          runId: first.runId!,
+          seq: 1,
+          eventType: "assistant_delta",
+          message: "First answer",
+          payload: { delta: "First answer", providerInternal: "do-not-leak" },
+          createdAt: times.firstText,
+        },
+        {
+          companyId,
+          agentId,
+          runId: first.runId!,
+          seq: 2,
+          eventType: "tool_call",
+          message: "Read a todo",
+          payload: {
+            toolCallId: "tool-1",
+            toolName: "todo_get",
+            args: { id: "todo-1" },
+            internalTrace: "do-not-leak",
+          },
+          createdAt: times.firstTool,
+        },
+        {
+          companyId,
+          agentId,
+          runId: first.runId!,
+          seq: 3,
+          eventType: "tool_result",
+          message: "Todo read",
+          payload: {
+            toolCallId: "tool-1",
+            toolName: "todo_get",
+            result: { title: "Ship" },
+            internalTrace: "do-not-leak",
+          },
+          createdAt: times.firstResult,
+        },
+        {
+          companyId,
+          agentId,
+          runId: first.runId!,
+          seq: 4,
+          eventType: "lifecycle",
+          message: "secret lifecycle",
+          payload: { secret: "do-not-leak" },
+          createdAt: times.firstResult,
+        },
+        {
+          companyId,
+          agentId,
+          runId: second.runId!,
+          seq: 1,
+          eventType: "assistant_delta",
+          message: "Partial second answer",
+          payload: { delta: "Partial second answer" },
+          createdAt: times.secondText,
+        },
+      ]);
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "succeeded",
+          finishedAt: times.firstDone,
+          error: "must not appear",
+          nextEventSeq: 5,
+        })
+        .where(eq(heartbeatRuns.id, first.runId!));
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "failed",
+          finishedAt: times.secondFailed,
+          error: "private provider failure",
+          nextEventSeq: 2,
+        })
+        .where(eq(heartbeatRuns.id, second.runId!));
+
+      const replayed: Awaited<
+        ReturnType<typeof service.transcript>
+      >["events"] = [];
+      let after: Awaited<
+        ReturnType<typeof service.transcript>
+      >["nextPosition"] = null;
+      do {
+        const page = await service.transcript({
+          ...scope,
+          limit: 2,
+          after: after ?? undefined,
+        });
+        replayed.push(...page.events);
+        after = page.hasMore ? page.nextPosition : null;
+      } while (after);
+
+      expect(replayed.map((event) => event.eventType)).toEqual([
+        "user_turn",
+        "assistant_delta",
+        "tool_call",
+        "tool_result",
+        "run_terminal",
+        "user_turn",
+        "assistant_delta",
+        "run_terminal",
+      ]);
+      expect(replayed[2]?.payload).toEqual({
+        toolCallId: "tool-1",
+        toolName: "todo_get",
+        args: { id: "todo-1" },
+      });
+      expect(replayed.at(-1)?.payload).toEqual({ status: "failed", failed: true });
+      const wire = JSON.stringify(replayed);
+      expect(wire).not.toContain("secret lifecycle");
+      expect(wire).not.toContain("Operator note");
+      expect(wire).not.toContain("do-not-leak");
+      expect(wire).not.toContain("private provider failure");
+      expect(wire).not.toContain(first.issueId);
+      expect(wire).not.toContain(first.runId!);
+      expect(wire).not.toContain(second.runId!);
+
+      await expect(
+        service.transcript({ ...scope, ownerId: "different-owner" }),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it("does not synthesize a terminal event for an incomplete run", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const scope = {
+        companyId,
+        agentId,
+        ownerId: "incomplete-owner",
+        installationId: "vector-installation",
+        profileId: "standard",
+        externalSessionId: "incomplete-thread",
+      };
+      await service.addTurn({
+        ...scope,
+        clientRequestId: "incomplete-1",
+        body: "Still running",
+      });
+      const result = await service.transcript(scope);
+      expect(result.events.map((event) => event.eventType)).toEqual(["user_turn"]);
+      expect(result.hasMore).toBe(false);
     });
   },
 );
