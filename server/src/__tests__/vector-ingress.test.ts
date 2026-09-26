@@ -695,6 +695,46 @@ const support = await getEmbeddedPostgresTestSupport();
       });
     });
 
+    it("admits a trusted staging role turn and rejects role escalation", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const roleContext = {
+        schemaVersion: 1 as const,
+        role: "funky-scout",
+        model: "",
+        noBuiltinTools: true as const,
+        systemPrompt: "Use the current Vector analyst charter.",
+        metadata: { persona_version: "persona-v1", run_kind: "title" },
+      };
+      const input = {
+        companyId,
+        agentId,
+        externalSessionId: "trusted-role-session",
+        ownerId: "vector-user:user-1",
+        installationId: "stg1-staging",
+        profileId: "staging",
+        clientRequestId: "trusted-role-turn-1",
+        body: "Name this conversation.",
+        roleContext,
+      };
+      const turn = await service.addTurn(input);
+      const runContext = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toEqual(roleContext);
+
+      await expect(service.addTurn({
+        ...input,
+        externalSessionId: "trusted-role-escalated",
+        clientRequestId: "trusted-role-turn-escalated",
+        roleContext: { ...roleContext, role: "funky-advisor" },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_role_contract_mismatch" },
+      });
+    });
+
     it("binds existing same-issue attachments and rejects foreign issue attachments", async () => {
       const service = vectorIngressService(db, { heartbeat });
       const seed = await service.addTurn({
