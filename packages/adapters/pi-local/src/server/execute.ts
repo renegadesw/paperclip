@@ -386,6 +386,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ...buildRuntimeToolsEnv(ctx.runtimeTools),
   };
   env.PAPERCLIP_RUN_ID = runId;
+  const applyVectorToolAuthorityEnv = () => {
+    if (!ctx.vectorToolAuthority) return;
+    env.PAPERCLIP_VECTOR_TOOL_CALLBACK_URL = ctx.vectorToolAuthority.callbackUrl;
+    env.PAPERCLIP_VECTOR_TOOL_CALLBACK_TOKEN = ctx.vectorToolAuthority.bearerToken;
+    env.PAPERCLIP_VECTOR_TOOL_NAMES = ctx.vectorToolAuthority.tools.join(",");
+  };
 
   const wakeTaskId =
     (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
@@ -437,6 +443,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
+  // Apply the server-owned capability after mutable agent env is resolved so
+  // even the engineering profile cannot replace or widen this run binding.
+  applyVectorToolAuthorityEnv();
   // Materialize custom Pi providers (PAPERCLIP_PI_PROVIDERS) into a managed
   // PI_CODING_AGENT_DIR before runtimeEnv is computed, so both local validation
   // and the spawned Pi process resolve models against the managed models.json.
@@ -571,6 +580,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           executionTargetIsRemote,
           executionCwd: effectiveExecutionCwd,
         });
+        applyVectorToolAuthorityEnv();
         if (adapterExecutionTargetUsesManagedHome(executionTarget) && preparedRemoteRuntime.runtimeRootDir) {
           env.HOME = preparedRemoteRuntime.runtimeRootDir;
         }

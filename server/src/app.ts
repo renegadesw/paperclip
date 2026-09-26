@@ -181,6 +181,11 @@ import {
   vectorIngressRoutes,
 } from "./routes/vector-ingress.js";
 import type { VectorRuntimeScope } from "./services/vector-runtime-scope.js";
+import {
+  resolveVectorToolAuthorityConfig,
+  setActiveVectorToolAuthorityBridge,
+  VectorToolAuthorityBridge,
+} from "./services/vector-tool-authority.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -588,7 +593,16 @@ export async function createApp(
     process.env,
     opts.vectorRuntimeScope ?? null,
   );
+  const vectorToolAuthorityConfig = resolveVectorToolAuthorityConfig(process.env);
+  setActiveVectorToolAuthorityBridge(null);
+  if (vectorToolAuthorityConfig && !vectorIngressAuth) {
+    throw new Error("Vector tool authority requires signed Vector ingress");
+  }
   if (vectorIngressAuth) {
+    const vectorToolAuthority = vectorToolAuthorityConfig
+      ? new VectorToolAuthorityBridge(db, vectorToolAuthorityConfig)
+      : null;
+    setActiveVectorToolAuthorityBridge(vectorToolAuthority);
     // This service-to-service boundary has its own exact-body HMAC and direct
     // loopback-peer check. Keep it outside the board mutation router: Vector OS
     // is neither a board session nor an agent API-key principal.
@@ -599,7 +613,9 @@ export async function createApp(
         service: vectorIngressService(db, {
           heartbeat: connectionIntentHeartbeat,
           responsibleUserId: vectorIngressAuth.responsibleUserId,
+          toolAuthority: vectorToolAuthority ?? undefined,
         }),
+        toolAuthority: vectorToolAuthority ?? undefined,
       }),
     );
   }

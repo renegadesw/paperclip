@@ -71,3 +71,44 @@ Transcript projection is an intentionally reduced surface. Error commands and
 provider error text are not returned. Tool arguments, partial results, and
 results are recursively redacted for secret-bearing fields and bearer/private
 authority patterns, with bounded depth, entry count, strings, and total budget.
+
+## Run-scoped Vector tools (disabled by default)
+
+A turn may also carry an opaque, non-secret `authorityHandle`. Paperclip accepts
+that field only when the complete tool bridge configuration is present:
+
+- `PAPERCLIP_VECTOR_TOOL_BRIDGE_URL` is the exact literal-loopback Vector OS
+  endpoint `http://127.x.x.x:<port>/internal/paperclip/v1/tools/call`.
+- `PAPERCLIP_VECTOR_TOOL_CALLBACK_URL` is the exact literal-loopback Paperclip
+  callback `http://127.x.x.x:<port>/api/internal/vector/v1/tools/callback`.
+- `PAPERCLIP_VECTOR_INSTALLATION_ID` and `PAPERCLIP_VECTOR_PROFILE` identify the
+  installed release profile.
+- `PAPERCLIP_VECTOR_TOOL_BRIDGE_SECRET` is an independent secret of at least 32
+  characters. It is not the Vector ingress secret or a user bearer.
+- `PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS` is the existing deployment-owned,
+  hash-pinned extension manifest. Its strict `tools` lists are the maximum tool
+  set. Agent configuration cannot add a tool.
+
+Paperclip binds a SHA-256 digest of the authority handle plus the installation profile
+and external-session scope to the exact company, agent, conversation, and active
+run. It then mints a random callback bearer for that run and injects only the
+callback URL, bearer, and approved tool names into the Pi process. The callback
+does not accept caller-selected scope. Paperclip reconstructs the bound scope,
+signs the exact body with the bridge secret, and sends it to Vector OS over
+literal loopback with redirects disabled.
+
+Callback grants and replay state are memory-only. A Paperclip restart invalidates
+all callback bearers; the persisted run binding hash remains as a fail-closed
+scope fence. The current foundation does not reconnect a surviving Pi process.
+The run must be recovered or recreated by later lifecycle wiring.
+
+Tool request IDs are intentionally at-most-once. Paperclip consumes the request
+ID before the Vector OS fetch, and Vector OS also rejects a repeated ID. An
+ambiguous transport failure is not retried with the same ID because a mutating
+tool may already have executed. Higher-level recovery must inspect state before
+issuing a new request ID.
+
+This commit establishes the secure callback contract and Pi injection. It does
+not install a FunkyDev filesystem extension, mount the Vector OS handler, resolve
+real authority handles, or connect a product tool executor. Therefore it does
+not make the path end-to-end functional by itself.
