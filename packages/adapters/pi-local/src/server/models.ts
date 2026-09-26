@@ -104,16 +104,18 @@ export async function discoverPiModels(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  extraArgs?: unknown;
 } = {}): Promise<AdapterModel[]> {
   const command = resolvePiCommand(input.command);
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
+  const extraArgs = normalizeArgs(input.extraArgs);
   const runtimeEnv = normalizeEnv({ ...process.env, ...env });
 
   const result = await runChildProcess(
     `pi-models-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     command,
-    ["--list-models"],
+    ["--list-models", ...extraArgs],
     {
       cwd,
       env: runtimeEnv,
@@ -147,21 +149,29 @@ function normalizeEnv(input: unknown): Record<string, string> {
   return env;
 }
 
+function normalizeArgs(input: unknown): string[] {
+  return Array.isArray(input)
+    ? input.filter((value): value is string => typeof value === "string")
+    : [];
+}
+
 export async function discoverPiModelsCached(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  extraArgs?: unknown;
 } = {}): Promise<AdapterModel[]> {
   const command = resolvePiCommand(input.command);
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
-  const key = discoveryCacheKey(command, cwd, env);
+  const extraArgs = normalizeArgs(input.extraArgs);
+  const key = `${discoveryCacheKey(command, cwd, env)}\n${JSON.stringify(extraArgs)}`;
   const now = Date.now();
   pruneExpiredDiscoveryCache(now);
   const cached = discoveryCache.get(key);
   if (cached && cached.expiresAt > now) return cached.models;
 
-  const models = await discoverPiModels({ command, cwd, env });
+  const models = await discoverPiModels({ command, cwd, env, extraArgs });
   discoveryCache.set(key, { expiresAt: now + MODELS_CACHE_TTL_MS, models });
   return models;
 }
@@ -171,6 +181,7 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  extraArgs?: unknown;
 }): Promise<AdapterModel[]> {
   const model = asString(input.model, "").trim();
   if (!model) {
@@ -181,6 +192,7 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
     command: input.command,
     cwd: input.cwd,
     env: input.env,
+    extraArgs: input.extraArgs,
   });
 
   if (models.length === 0) {

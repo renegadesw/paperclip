@@ -40,8 +40,8 @@ Notes:
 - Paperclip requires an explicit \`model\` value for \`pi_local\` agents.
 - Sessions are stored in ~/.pi/paperclips/ and resumed with --session.
 - All built-in tools (read, bash, edit, write, grep, find, ls) are enabled by default. Set \`builtinTools: []\` to pass Pi's explicit \`--no-builtin-tools\` switch.
-- When \`PAPERCLIP_VECTOR_PROFILE\` is \`standard\`, \`staging\`, \`production\`, or \`demo\`, the deployment ceiling forces zero built-ins and rejects agent config or extra arguments that try to re-enable them. The \`engineering\` profile may use the configured selection; any other non-empty profile value fails closed to zero built-ins.
-- This ceiling governs Pi built-ins only. Extension/custom tool and MCP policy is enforced separately by the deployment and is not implied by \`builtinTools\`.
+- When \`PAPERCLIP_VECTOR_PROFILE\` is \`standard\`, \`staging\`, \`production\`, or \`demo\`, the deployment ceiling disables all tools and ambient extension, skill, prompt-template, theme, context-file, and settings discovery. The \`engineering\` profile may use its configured coding surface; any other non-empty profile value fails closed to the restricted policy.
+- Restricted profiles reject mutable runtime-loading config, env, command wrappers, and extra arguments. They run with a sterile managed Pi agent directory and explicitly mount only Paperclip's bundled operational skill. A deployment-owned, exact-path/SHA-256 extension allowlist exists for future packaged read-only bridges and is empty by default.
 - Agent instructions are appended to Pi's system prompt via --append-system-prompt. In json mode the user task is sent via -p; in rpc mode it is sent as a prompt command and stdin remains open until agent_settled.
 - PAPERCLIP_PI_EXECUTION_MODE may set the deployment-wide default when an agent does not specify executionMode.
 `;

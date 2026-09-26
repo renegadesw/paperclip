@@ -106,13 +106,15 @@ function parseProviderConfig(
 // and repoints PI_CODING_AGENT_DIR at the in-sandbox copy.
 export async function preparePiRuntimeConfig(input: {
   env: Record<string, string>;
+  /** Isolate Pi from host/user settings even when no custom provider is configured. */
+  forceManagedAgentDir?: boolean;
 }): Promise<PreparedPiRuntimeConfig> {
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
   const { providers, warning } = parseProviderConfig(
     input.env.PAPERCLIP_PI_PROVIDERS ?? process.env.PAPERCLIP_PI_PROVIDERS,
     resolveEnv,
   );
-  if (!providers) {
+  if (!providers && !input.forceManagedAgentDir) {
     return {
       env: input.env,
       notes: warning ? [warning] : [],
@@ -123,11 +125,13 @@ export async function preparePiRuntimeConfig(input: {
 
   const agentConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-agent-config-"));
   try {
-    await fs.writeFile(
-      path.join(agentConfigDir, "models.json"),
-      `${JSON.stringify({ providers }, null, 2)}\n`,
-      "utf8",
-    );
+    if (providers) {
+      await fs.writeFile(
+        path.join(agentConfigDir, "models.json"),
+        `${JSON.stringify({ providers }, null, 2)}\n`,
+        "utf8",
+      );
+    }
   } catch (err) {
     // Never leak the temp dir when the write fails (e.g. disk-full): the
     // caller only receives the cleanup handle on success.
@@ -142,7 +146,9 @@ export async function preparePiRuntimeConfig(input: {
     },
     notes: [
       ...(warning ? [warning] : []),
-      `Injected ${Object.keys(providers).length} custom Pi provider(s) from PAPERCLIP_PI_PROVIDERS into a managed models.json: ${Object.keys(providers).join(", ")}.`,
+      ...(providers
+        ? [`Injected ${Object.keys(providers).length} custom Pi provider(s) from PAPERCLIP_PI_PROVIDERS into a managed models.json: ${Object.keys(providers).join(", ")}.`]
+        : ["Isolated Pi from host/user settings with a managed empty agent config directory."]),
     ],
     agentConfigDir,
     cleanup: async () => {

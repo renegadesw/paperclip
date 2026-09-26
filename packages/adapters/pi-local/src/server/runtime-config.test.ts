@@ -31,6 +31,24 @@ describe("preparePiRuntimeConfig", () => {
     await prepared.cleanup();
   });
 
+  it("creates an empty managed agent directory when isolation is required", async () => {
+    const prepared = await preparePiRuntimeConfig({
+      env: { FOO: "bar" },
+      forceManagedAgentDir: true,
+    });
+    const agentConfigDir = prepared.env.PI_CODING_AGENT_DIR;
+    expect(agentConfigDir).toBeTruthy();
+    cleanupPaths.add(agentConfigDir);
+    expect(await fs.readdir(agentConfigDir)).toEqual([]);
+    expect(prepared.notes).toContain(
+      "Isolated Pi from host/user settings with a managed empty agent config directory.",
+    );
+
+    await prepared.cleanup();
+    cleanupPaths.delete(agentConfigDir);
+    await expect(fs.access(agentConfigDir)).rejects.toThrow();
+  });
+
   it("writes the providers JSON verbatim to a managed models.json and points PI_CODING_AGENT_DIR at it", async () => {
     const providers = {
       tensorix: {
