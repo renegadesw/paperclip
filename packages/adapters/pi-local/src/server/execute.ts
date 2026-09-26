@@ -339,13 +339,28 @@ export function appendVectorWorkloadSystemPrompt(
   ]);
 }
 
-export function appendVectorRoleSystemPrompt(base: string, rawRole: unknown): string {
+export const ENGINEERING_TODO_WORKER_PROMPT = `You are executing one authenticated NexusLink todo brief as FunkyDev's implementation-worker alias.
+
+Keep the standing FunkyDev instructions and the exact engineering tools provisioned by the installation. Work only on this brief. The todo tool authority is bound to this launched todo: do not update or complete any other todo. If ask_user is available, use it only for a genuine fork that cannot be resolved from the brief, source, or a sensible default. If ask_user is absent, decide and proceed.`;
+
+export function appendVectorRoleSystemPrompt(base: string, rawRole: unknown, profile?: string): string {
   const vectorRoleTurn = parseObject(rawRole);
   if (Object.keys(vectorRoleTurn).length === 0) return base;
   const schemaVersion = vectorRoleTurn.schemaVersion;
   const role = asString(vectorRoleTurn.role, "").trim();
   const dynamicSystemPrompt = asString(vectorRoleTurn.systemPrompt, "").trim();
-  if (schemaVersion !== 1 || !role || !dynamicSystemPrompt || vectorRoleTurn.noBuiltinTools !== true) {
+  const metadata = parseObject(vectorRoleTurn.metadata);
+  const engineeringAlias = profile === "engineering" && role === "implementation-worker" &&
+    vectorRoleTurn.noBuiltinTools === false && dynamicSystemPrompt === ENGINEERING_TODO_WORKER_PROMPT &&
+    /^router\/[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(asString(vectorRoleTurn.model, "")) &&
+    Object.keys(metadata).sort().join(",") === "launch_digest,launch_mode,todo_id" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(asString(metadata.todo_id, "")) &&
+    /^[0-9a-f]{32}$/.test(asString(metadata.launch_digest, "")) &&
+    (metadata.launch_mode === "scoped" || metadata.launch_mode === "just_go");
+  if (
+    schemaVersion !== 1 || !role || !dynamicSystemPrompt ||
+    (vectorRoleTurn.noBuiltinTools !== true && !engineeringAlias)
+  ) {
     throw new Error("Signed Vector role turn context is malformed.");
   }
   return joinPromptSections([
@@ -935,6 +950,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     systemPromptExtension = appendVectorRoleSystemPrompt(
       systemPromptExtension,
       context.vectorRoleTurn,
+      vectorProfilePolicy.profile,
     );
     systemPromptExtension = appendVectorPersonaSystemPrompt(
       systemPromptExtension,

@@ -96,7 +96,7 @@ const vectorRoleTurnSchema = z.object({
   schemaVersion: z.literal(1),
   role: boundedOpaqueId("role", 128),
   model: z.string().trim().max(256),
-  noBuiltinTools: z.literal(true),
+  noBuiltinTools: z.boolean(),
   systemPrompt: z.string().min(1).max(750_000),
   metadata: z.record(
     z.string().trim().min(1).max(128),

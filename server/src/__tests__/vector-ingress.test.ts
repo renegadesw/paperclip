@@ -39,6 +39,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { VectorToolAuthorityBridge } from "../services/vector-tool-authority.js";
 import type { StorageService } from "../storage/index.js";
 import { hydrateVectorIngressImages } from "../services/vector-ingress-image-hydration.js";
+import { ENGINEERING_TODO_WORKER_PROMPT } from "@paperclipai/adapter-pi-local/server";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -297,6 +298,7 @@ const support = await getEmbeddedPostgresTestSupport();
     let otherAgentId: string;
     let standardAgentId: string;
     let standardWorkerAgentId: string;
+    let engineeringAgentId: string;
     let heartbeat: VectorIngressHeartbeat;
 
     beforeAll(async () => {
@@ -310,6 +312,7 @@ const support = await getEmbeddedPostgresTestSupport();
       otherAgentId = randomUUID();
       standardAgentId = randomUUID();
       standardWorkerAgentId = randomUUID();
+      engineeringAgentId = randomUUID();
       await db.insert(companies).values([
         {
           id: companyId,
@@ -390,6 +393,22 @@ const support = await getEmbeddedPostgresTestSupport();
               schemaVersion: 1,
               installationId: "stecke1-standard",
               profile: "standard",
+            },
+          },
+        },
+        {
+          id: engineeringAgentId,
+          companyId,
+          name: "FunkyDev",
+          role: "engineer",
+          status: "idle",
+          adapterType: "pi_local",
+          adapterConfig: { model: "router/Qwen3.8-Flash" },
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "t480-engineering",
+              profile: "engineering",
             },
           },
         },
@@ -867,6 +886,15 @@ const support = await getEmbeddedPostgresTestSupport();
         status: 409,
         details: { code: "vector_role_contract_mismatch" },
       });
+      await expect(service.addTurn({
+        ...input,
+        externalSessionId: "trusted-role-tool-widening",
+        clientRequestId: "trusted-role-turn-tool-widening",
+        roleContext: { ...roleContext, noBuiltinTools: false },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_role_contract_mismatch" },
+      });
     });
 
     it("persists an admitted standard persona without copying its prompt into comments", async () => {
@@ -1055,6 +1083,81 @@ Complete the brief as fully as the explicitly granted conversation tools allow. 
         externalSessionId: "todo-session-mismatch",
         clientRequestId: "todo-session-mismatch",
       })).rejects.toMatchObject({ status: 409, details: { code: "vector_role_contract_mismatch" } });
+    });
+
+    it("admits builtin tools only for the exact engineering todo alias", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      await expect(service.addTurn({
+        companyId,
+        agentId: engineeringAgentId,
+        externalSessionId: "engineering-browser-chat",
+        ownerId: "vector-user:engineer-1",
+        installationId: "t480-engineering",
+        profileId: "engineering",
+        clientRequestId: "engineering-browser-chat-1",
+        body: "Keep the configured FunkyDev runtime.",
+      })).resolves.toMatchObject({ replayed: false });
+      const roleContext = {
+        schemaVersion: 1 as const,
+        role: "implementation-worker",
+        model: "router/Qwen3.8-Flash",
+        noBuiltinTools: false,
+        systemPrompt: ENGINEERING_TODO_WORKER_PROMPT,
+        metadata: {
+          todo_id: "c757f88d-7062-4e72-939e-f6230cfcad7a",
+          launch_mode: "scoped",
+          launch_digest: "9d19e3e8f8b157f7fbc63f7dc789832a",
+        },
+      };
+      const base = {
+        companyId,
+        agentId: engineeringAgentId,
+        externalSessionId: "todo-c757f88d-7062-4e72-939e-f6230cfcad7a-9d19e3e8f8b157f7fbc63f7dc789832a",
+        ownerId: "vector-user:engineer-1",
+        installationId: "t480-engineering",
+        profileId: "engineering",
+        clientRequestId: "engineering-todo-launch",
+        body: "Implement the bounded brief.",
+        roleContext,
+        runtimeSelection: { model: "Qwen3.8-Flash", thinking: "high" as const },
+      };
+      const turn = await service.addTurn(base);
+      const runContext = await db.select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toEqual(roleContext);
+      expect(runContext.vectorRuntimeSelection).toEqual(base.runtimeSelection);
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "todo-c757f88d-7062-4e72-939e-f6230cfcad7a-deadbeefdeadbeefdeadbeefdeadbeef",
+        clientRequestId: "engineering-todo-wrong-prompt",
+        roleContext: { ...roleContext, systemPrompt: "changed" },
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_role_contract_mismatch" } });
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "todo-c757f88d-7062-4e72-939e-f6230cfcad7a-9d19e3e8f8b157f7fbc63f7dc789832a-missing-runtime",
+        clientRequestId: "engineering-todo-missing-runtime",
+        runtimeSelection: undefined,
+      })).rejects.toMatchObject({ status: 409 });
+      await expect(service.addTurn({
+        ...base,
+        agentId: standardWorkerAgentId,
+        installationId: "stecke1-standard",
+        profileId: "standard",
+        externalSessionId: "todo-c757f88d-7062-4e72-939e-f6230cfcad7a-9d19e3e8f8b157f7fbc63f7dc789832a",
+        clientRequestId: "standard-tool-widening",
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_role_contract_mismatch" } });
+
+      await expect(service.configureRuntime({
+        companyId,
+        agentId: engineeringAgentId,
+        externalSessionId: base.externalSessionId,
+        ownerId: base.ownerId,
+        installationId: base.installationId,
+        profileId: base.profileId,
+        model: "Other-Model",
+        thinking: "medium",
+      })).resolves.toMatchObject({ model: "Other-Model", thinking: "medium" });
     });
 
     it("fails standard persona turns closed on omission and provider widening", async () => {

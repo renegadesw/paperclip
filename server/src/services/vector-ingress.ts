@@ -35,6 +35,7 @@ import { logActivity } from "./activity-log.js";
 import type { VectorToolPendingDescriptor } from "./vector-tool-authority.js";
 import type { VectorProviderPendingDescriptor } from "./vector-provider-authority.js";
 import type { StorageService } from "../storage/index.js";
+import { ENGINEERING_TODO_WORKER_PROMPT } from "@paperclipai/adapter-pi-local/server";
 import {
   isVectorIngressImageAsset,
   validateVectorIngressImages,
@@ -109,7 +110,7 @@ export interface VectorRoleTurnContext {
   schemaVersion: 1;
   role: string;
   model: string;
-  noBuiltinTools: true;
+  noBuiltinTools: boolean;
   systemPrompt: string;
   metadata: Record<string, string>;
 }
@@ -487,7 +488,7 @@ export function vectorIngressService(
     const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
     const adapterConfig = eventPayloadRecord(agent.adapterConfig);
     const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
-    const stagingRole = input.profileId === "staging";
+    const stagingRole = input.profileId === "staging" && input.roleContext.noBuiltinTools === true;
     const workerMetadata = input.roleContext.metadata;
     const standardTodoWorker = input.profileId === "standard" && agent.role === "implementation-worker" &&
       input.roleContext.role === "implementation-worker" && input.roleContext.noBuiltinTools === true &&
@@ -497,13 +498,21 @@ export function vectorIngressService(
       /^[0-9a-f]{32}$/.test(workerMetadata.launch_digest ?? "") &&
       (workerMetadata.launch_mode === "scoped" || workerMetadata.launch_mode === "just_go") &&
       input.externalSessionId === `${workerMetadata.launch_mode === "just_go" ? "todo-jg-" : "todo-"}${workerMetadata.todo_id}-${workerMetadata.launch_digest}`;
+    const engineeringTodoWorker = input.profileId === "engineering" && agent.role === "engineer" &&
+      input.roleContext.role === "implementation-worker" && input.roleContext.noBuiltinTools === false &&
+      input.roleContext.systemPrompt === ENGINEERING_TODO_WORKER_PROMPT &&
+      Object.keys(workerMetadata).sort().join(",") === "launch_digest,launch_mode,todo_id" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(workerMetadata.todo_id ?? "") &&
+      /^[0-9a-f]{32}$/.test(workerMetadata.launch_digest ?? "") &&
+      (workerMetadata.launch_mode === "scoped" || workerMetadata.launch_mode === "just_go") &&
+      input.externalSessionId === `${workerMetadata.launch_mode === "just_go" ? "todo-jg-" : "todo-"}${workerMetadata.todo_id}-${workerMetadata.launch_digest}`;
     if (
       provisioning.schemaVersion !== 1 ||
       provisioning.installationId !== input.installationId ||
       provisioning.profile !== input.profileId ||
-      (!stagingRole && !standardTodoWorker) ||
-      agent.role !== input.roleContext.role ||
-      (standardTodoWorker
+      (!stagingRole && !standardTodoWorker && !engineeringTodoWorker) ||
+      (!engineeringTodoWorker && agent.role !== input.roleContext.role) ||
+      (standardTodoWorker || engineeringTodoWorker
         ? !input.runtimeSelection || input.roleContext.model !== `router/${input.runtimeSelection.model}`
         : input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
     ) {
@@ -547,15 +556,17 @@ export function vectorIngressService(
     input: VectorIngressScope,
     selection: VectorRuntimeSelection,
   ) {
-    if (!hasCompleteOwnerScope(input) || input.profileId !== "standard") {
-      throw conflict("Vector runtime selection requires standard owner scope", {
+    if (!hasCompleteOwnerScope(input) || (input.profileId !== "standard" && input.profileId !== "engineering")) {
+      throw conflict("Vector runtime selection requires an admitted owner scope", {
         code: "vector_runtime_selection_scope_mismatch",
       });
     }
     const agent = await assertTargetAgent(input);
     const configured = eventPayloadRecord(agent.adapterConfig);
     if (
-      (agent.role !== "standard-chat" && agent.role !== "implementation-worker") ||
+      (input.profileId === "standard"
+        ? agent.role !== "standard-chat" && agent.role !== "implementation-worker"
+        : agent.role !== "engineer") ||
       typeof configured.model !== "string" ||
       !configured.model.startsWith("router/") ||
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(selection.model)
@@ -1256,19 +1267,19 @@ export function vectorIngressService(
       : input.profileId === "standard" && personaContext
         ? { model: personaContext.model.replace(/^router\//, ""), thinking: "medium" as const }
         : null);
-    if (runtimeSelection && input.profileId !== "standard") {
-      throw conflict("Vector runtime selection requires standard owner scope", {
+    if (runtimeSelection && input.profileId !== "standard" && input.profileId !== "engineering") {
+      throw conflict("Vector runtime selection requires an admitted owner scope", {
         code: "vector_runtime_selection_scope_mismatch",
       });
     }
-    if (input.profileId === "standard") {
-      if (!runtimeSelection) {
+    if (input.profileId === "standard" || runtimeSelection) {
+      if (input.profileId === "standard" && !runtimeSelection) {
         throw conflict("Vector standard-chat requires a runtime selection", {
           code: "vector_runtime_selection_required",
         });
       }
-      await assertRuntimeSelection(input, runtimeSelection);
-      if (
+      if (runtimeSelection) await assertRuntimeSelection(input, runtimeSelection);
+      if (input.profileId === "standard" && runtimeSelection &&
         input.personaContext &&
         input.personaContext.model !== `router/${runtimeSelection.model}`
       ) {
@@ -1276,7 +1287,7 @@ export function vectorIngressService(
           code: "vector_runtime_selection_contract_mismatch",
         });
       }
-      if (mapping && (!mapping.model || !mapping.thinking)) {
+      if (runtimeSelection && mapping && (!mapping.model || !mapping.thinking)) {
         await db.update(vectorIngressConversations).set(runtimeSelection).where(eq(vectorIngressConversations.id, mapping.id));
       }
     }

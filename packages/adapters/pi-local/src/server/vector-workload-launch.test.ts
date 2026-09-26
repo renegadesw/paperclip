@@ -3,6 +3,7 @@ import {
   appendVectorPersonaSystemPrompt,
   appendVectorRoleSystemPrompt,
   appendVectorWorkloadSystemPrompt,
+  ENGINEERING_TODO_WORKER_PROMPT,
   resolveVectorRuntimeSelection,
 } from "./execute.js";
 
@@ -64,6 +65,26 @@ describe("Vector role turn system prompt", () => {
       systemPrompt: "Dynamic",
       noBuiltinTools: false,
     })).toThrow("malformed");
+  });
+
+  it("admits builtin tools only for the exact engineering implementation-worker alias", () => {
+    const alias = {
+      schemaVersion: 1,
+      role: "implementation-worker",
+      model: "router/Qwen3.8-Flash",
+      noBuiltinTools: false,
+      systemPrompt: ENGINEERING_TODO_WORKER_PROMPT,
+      metadata: {
+        todo_id: "00000000-0000-4000-8000-000000000023",
+        launch_digest: "a".repeat(32),
+        launch_mode: "scoped",
+      },
+    };
+    expect(appendVectorRoleSystemPrompt("Static", alias, "engineering"))
+      .toContain(ENGINEERING_TODO_WORKER_PROMPT);
+    expect(() => appendVectorRoleSystemPrompt("Static", alias, "standard")).toThrow("malformed");
+    expect(() => appendVectorRoleSystemPrompt("Static", { ...alias, role: "engineer" }, "engineering")).toThrow("malformed");
+    expect(() => appendVectorRoleSystemPrompt("Static", { ...alias, systemPrompt: "changed" }, "engineering")).toThrow("malformed");
   });
 });
 
