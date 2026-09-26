@@ -175,6 +175,11 @@ import { COMPANY_IMPORT_API_PATH } from "./routes/company-import-paths.js";
 import { apiCompression } from "./middleware/api-compression.js";
 import { chatWebhookBodyParser } from "./middleware/chat-webhook-body.js";
 import { createChatWebhookDiagnostics } from "./services/chat-webhook-diagnostics.js";
+import { vectorIngressService } from "./services/vector-ingress.js";
+import {
+  resolveVectorIngressAuthConfig,
+  vectorIngressRoutes,
+} from "./routes/vector-ingress.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -577,6 +582,22 @@ export async function createApp(
   const connectionIntentHeartbeat = heartbeatService(db, {
     pluginWorkerManager: workerManager,
   });
+  const vectorIngressAuth = resolveVectorIngressAuthConfig(process.env);
+  if (vectorIngressAuth) {
+    // This service-to-service boundary has its own exact-body HMAC and direct
+    // loopback-peer check. Keep it outside the board mutation router: Vector OS
+    // is neither a board session nor an agent API-key principal.
+    app.use(
+      "/api/internal/vector/v1",
+      vectorIngressRoutes(db, {
+        auth: vectorIngressAuth,
+        service: vectorIngressService(db, {
+          heartbeat: connectionIntentHeartbeat,
+          responsibleUserId: vectorIngressAuth.responsibleUserId,
+        }),
+      }),
+    );
+  }
   const chatChannels = chatChannelService(db, {
     deferWebhookProcessing: true,
     heartbeat: connectionIntentHeartbeat,
