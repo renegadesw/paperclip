@@ -52,6 +52,15 @@ export async function dbBackupCommand(opts: DbBackupOptions): Promise<void> {
 
   const configPath = resolveConfigPath(opts.config);
   const config = readConfig(opts.config);
+  const deploymentProfile =
+    process.env.PAPERCLIP_DATABASE_PROFILE?.trim() ||
+    config?.database.deploymentProfile ||
+    "standalone";
+  if (deploymentProfile === "vector-embedded") {
+    throw new Error(
+      "Paperclip database backups are disabled for the vector-embedded profile; use Vector's application-database backup system.",
+    );
+  }
   const connection = resolveConnectionString(opts.config);
   const defaultDir = resolveDefaultBackupDir(resolvePaperclipInstanceId());
   const configuredDir = opts.dir?.trim() || config?.database.backup.dir || defaultDir;

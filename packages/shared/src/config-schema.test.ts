@@ -29,6 +29,29 @@ describe("paperclip config schema", () => {
     expect(parsed.secrets.localEncrypted.keyFilePath).toBe("~/.paperclip/instances/default/secrets/master.key");
   });
 
+  it("accepts the explicit Vector embedded database profile without changing standalone defaults", () => {
+    const base = {
+      $meta: {
+        version: 1 as const,
+        updatedAt: "2026-09-25T00:00:00.000Z",
+        source: "configure" as const,
+      },
+      logging: { mode: "file" as const },
+      server: {},
+    };
+    const standalone = paperclipConfigSchema.parse({
+      ...base,
+      database: { mode: "embedded-postgres" },
+    });
+    const vector = paperclipConfigSchema.parse({
+      ...base,
+      database: { mode: "postgres", deploymentProfile: "vector-embedded" },
+    });
+
+    expect(standalone.database.deploymentProfile).toBeUndefined();
+    expect(vector.database.deploymentProfile).toBe("vector-embedded");
+  });
+
   it("retains extension keys at the top level and every nested config boundary", () => {
     const parsed = paperclipConfigSchema.parse({
       $meta: {

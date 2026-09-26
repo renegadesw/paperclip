@@ -5,6 +5,7 @@ import { ensurePostgresDatabase, getPostgresDataDirectory } from "./client.js";
 import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError } from "./embedded-postgres-error.js";
 import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 import { resolveDatabaseTarget } from "./runtime-config.js";
+import type { DatabaseDeploymentProfile } from "./client.js";
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -26,6 +27,7 @@ type EmbeddedPostgresCtor = new (opts: {
 export type MigrationConnection = {
   connectionString: string;
   source: string;
+  deploymentProfile: DatabaseDeploymentProfile;
   stop: () => Promise<void>;
 };
 
@@ -91,7 +93,7 @@ async function loadEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
 async function ensureEmbeddedPostgresConnection(
   dataDir: string,
   preferredPort: number,
-): Promise<MigrationConnection> {
+): Promise<Omit<MigrationConnection, "deploymentProfile">> {
   const EmbeddedPostgres = await loadEmbeddedPostgresCtor();
   await prepareEmbeddedPostgresNativeRuntime();
   const selectedPort = await findAvailablePort(preferredPort);
@@ -188,9 +190,11 @@ export async function resolveMigrationConnection(): Promise<MigrationConnection>
     return {
       connectionString: target.connectionString,
       source: target.source,
+      deploymentProfile: target.deploymentProfile,
       stop: async () => {},
     };
   }
 
-  return ensureEmbeddedPostgresConnection(target.dataDir, target.port);
+  const connection = await ensureEmbeddedPostgresConnection(target.dataDir, target.port);
+  return { ...connection, deploymentProfile: target.deploymentProfile };
 }

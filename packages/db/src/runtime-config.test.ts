@@ -84,6 +84,49 @@ describe("resolveDatabaseTarget", () => {
     });
   });
 
+  it("selects the explicit Vector profile for external PostgreSQL", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-runtime-"));
+    const configPath = path.join(tempDir, "instance", "config.json");
+    process.env.PAPERCLIP_CONFIG = configPath;
+    writeJson(configPath, {
+      database: {
+        deploymentProfile: "vector-embedded",
+        mode: "postgres",
+        connectionString: "postgres://vector@db.example.com:5432/vector",
+      },
+    });
+
+    expect(resolveDatabaseTarget()).toMatchObject({
+      mode: "postgres",
+      deploymentProfile: "vector-embedded",
+      source: "config.database.connectionString",
+    });
+  });
+
+  it("rejects embedded PostgreSQL for the Vector profile", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-runtime-"));
+    process.env.PAPERCLIP_CONFIG = path.join(tempDir, "missing-config.json");
+    process.env.PAPERCLIP_DATABASE_PROFILE = "vector-embedded";
+    delete process.env.DATABASE_URL;
+
+    expect(() => resolveDatabaseTarget()).toThrow(/requires external PostgreSQL/);
+  });
+
+  it("rejects an unknown profile in config instead of silently selecting standalone", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-runtime-"));
+    const configPath = path.join(tempDir, "instance", "config.json");
+    process.env.PAPERCLIP_CONFIG = configPath;
+    writeJson(configPath, {
+      database: {
+        deploymentProfile: "shared-ish",
+        mode: "postgres",
+        connectionString: "postgres://vector@db.example.com:5432/vector",
+      },
+    });
+
+    expect(() => resolveDatabaseTarget()).toThrow(/PAPERCLIP_DATABASE_PROFILE/);
+  });
+
   it("falls back to embedded postgres settings from config", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-runtime-"));
     const configPath = path.join(tempDir, "instance", "config.json");

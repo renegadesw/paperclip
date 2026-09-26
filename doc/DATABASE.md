@@ -144,6 +144,44 @@ DATABASE_URL=postgres://postgres.[PROJECT-REF]:[PASSWORD]@...5432/postgres \
 
 See [Supabase pricing](https://supabase.com/pricing) for current details.
 
+## Vector embedded database profile
+
+The Renegade fork has an explicit `vector-embedded` database deployment profile
+for running Paperclip inside Vector's existing application database. It is
+opt-in; upstream standalone behavior remains the default.
+
+```json
+{
+  "database": {
+    "deploymentProfile": "vector-embedded",
+    "mode": "postgres",
+    "connectionString": "postgres://.../vector"
+  }
+}
+```
+
+The equivalent environment selector is
+`PAPERCLIP_DATABASE_PROFILE=vector-embedded`; `DATABASE_URL` may supply the
+connection string. In this profile:
+
+- Paperclip core relations and its `paperclip_migrations` journal live in the
+  existing `llm` schema.
+- `pnpm db:migrate` is the only path that applies Paperclip migrations.
+- Initial migration is allowed in a non-empty `llm` schema so existing Vector
+  relations are preserved; normal PostgreSQL name conflicts still fail the
+  migration instead of overwriting an existing relation.
+- Server startup performs a read-only migration check and refuses to boot when
+  the journal is absent or behind. It never repairs or applies migrations.
+- Paperclip automatic and manual whole-database backups are disabled. Vector's
+  application-database backup and restore system remains authoritative.
+- External PostgreSQL is mandatory; the embedded PostgreSQL fallback is
+  rejected.
+
+The migration runner rewrites upstream migration references that explicitly
+name `public` and scopes legacy catalog probes to `llm`. Runtime connections put
+`llm` first in `search_path`; `public` remains a final fallback only for shared
+PostgreSQL extension functions such as `fuzzystrmatch`.
+
 ## Switching between modes
 
 The database mode is controlled by `DATABASE_URL`:

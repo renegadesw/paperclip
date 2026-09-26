@@ -93,6 +93,20 @@ describe("databaseClientOptionsFromEnv", () => {
       connection: { application_name: "paperclip-web" },
     });
   });
+
+  it("pins Vector embedded connections to the llm search path", () => {
+    expect(
+      postgresJsOptions({
+        deploymentProfile: "vector-embedded",
+        applicationName: "paperclip-vector",
+      }),
+    ).toEqual({
+      connection: {
+        application_name: "paperclip-vector",
+        search_path: "llm,public",
+      },
+    });
+  });
 });
 
 describe("resolveDatabaseClientOptions", () => {

@@ -29,8 +29,10 @@ import {
   formatEmbeddedPostgresError,
   getPostgresDataDirectory,
   inspectMigrations,
+  assertMigrationsCurrent,
   applyPendingMigrations,
   createEmbeddedPostgresLogBuffer,
+  databaseClientOptionsFromEnv,
   prepareEmbeddedPostgresNativeRuntime,
   reconcilePendingMigrationHistory,
   formatDatabaseBackupResult,
@@ -263,6 +265,10 @@ async function startServerWithDatabaseTeardown(
     label: string,
     opts?: EnsureMigrationsOptions,
   ): Promise<MigrationSummary> {
+    if (config.databaseDeploymentProfile === "vector-embedded") {
+      await assertMigrationsCurrent(connectionString, "vector-embedded");
+      return "already applied";
+    }
     const autoApply = opts?.autoApply === true;
     let state = await inspectMigrations(connectionString);
     if (state.status === "needsMigrations" && state.reason === "pending-migrations") {
@@ -419,12 +425,23 @@ async function startServerWithDatabaseTeardown(
     | { mode: "external-postgres"; connectionString: string }
     | { mode: "embedded-postgres"; dataDir: string; port: number };
   assertCloudDatabaseContract();
+  if (config.databaseDeploymentProfile === "vector-embedded" && !config.databaseUrl) {
+    throw new Error(
+      "The vector-embedded database profile requires external PostgreSQL via DATABASE_URL or config.database.connectionString.",
+    );
+  }
   if (config.databaseUrl) {
     const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
     migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
-  
-    db = createDb(config.databaseUrl);
-    pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
+
+    const databaseClientOptions = {
+      ...databaseClientOptionsFromEnv(),
+      deploymentProfile: config.databaseDeploymentProfile,
+    };
+    db = createDb(config.databaseUrl, databaseClientOptions);
+    pluginMigrationDb = config.databaseMigrationUrl
+      ? createDb(config.databaseMigrationUrl, databaseClientOptions)
+      : db;
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
     activeDatabaseConnectionString = config.databaseUrl;
     startupDbInfo = { mode: "external-postgres", connectionString: config.databaseUrl };
@@ -815,6 +832,11 @@ async function startServerWithDatabaseTeardown(
   const runServerDatabaseBackup = async (
     trigger: InstanceDatabaseBackupTrigger,
   ): Promise<InstanceDatabaseBackupRunResult | null> => {
+    if (config.databaseDeploymentProfile === "vector-embedded") {
+      throw conflict(
+        "Paperclip database backups are disabled for the vector-embedded profile; use Vector's application-database backup system.",
+      );
+    }
     if (databaseBackupInFlight) {
       const message = "Database backup already in progress";
       if (trigger === "scheduled") {

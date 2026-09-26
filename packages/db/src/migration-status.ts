@@ -19,17 +19,22 @@ async function main(): Promise<void> {
   const connection = await resolveMigrationConnection();
 
   try {
-    const state = await inspectMigrations(connection.connectionString);
+    const state = await inspectMigrations(
+      connection.connectionString,
+      connection.deploymentProfile,
+    );
     const payload =
       state.status === "upToDate"
         ? {
             source: connection.source,
+            deploymentProfile: connection.deploymentProfile,
             status: "upToDate" as const,
             tableCount: state.tableCount,
             pendingMigrations: [] as string[],
           }
         : {
             source: connection.source,
+            deploymentProfile: connection.deploymentProfile,
             status: "needsMigrations" as const,
             tableCount: state.tableCount,
             pendingMigrations: state.pendingMigrations,

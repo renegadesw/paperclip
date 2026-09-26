@@ -8,11 +8,41 @@ import * as schema from "./schema/index.js";
 import { withTransientWriteRetry } from "./transient-write-retry.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
-const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
+const DEFAULT_MIGRATIONS_SCHEMA = "drizzle";
+const DEFAULT_MIGRATIONS_TABLE = "__drizzle_migrations";
+const VECTOR_APPLICATION_SCHEMA = "llm";
+const VECTOR_MIGRATIONS_TABLE = "paperclip_migrations";
 const MIGRATIONS_JOURNAL_JSON = fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url));
 
-function createUtilitySql(url: string) {
-  return postgres(url, { max: 1, onnotice: () => {} });
+export type DatabaseDeploymentProfile = "standalone" | "vector-embedded";
+
+type DatabaseLayout = {
+  applicationSchema: string;
+  migrationsSchema: string;
+  migrationsTable: string;
+};
+
+function resolveDatabaseLayout(profile: DatabaseDeploymentProfile = "standalone"): DatabaseLayout {
+  return profile === "vector-embedded"
+    ? {
+        applicationSchema: VECTOR_APPLICATION_SCHEMA,
+        migrationsSchema: VECTOR_APPLICATION_SCHEMA,
+        migrationsTable: VECTOR_MIGRATIONS_TABLE,
+      }
+    : {
+        applicationSchema: "public",
+        migrationsSchema: DEFAULT_MIGRATIONS_SCHEMA,
+        migrationsTable: DEFAULT_MIGRATIONS_TABLE,
+      };
+}
+
+function createUtilitySql(url: string, profile: DatabaseDeploymentProfile = "standalone") {
+  const layout = resolveDatabaseLayout(profile);
+  return postgres(url, {
+    max: 1,
+    onnotice: () => {},
+    connection: profile === "vector-embedded" ? { search_path: layout.applicationSchema } : undefined,
+  });
 }
 
 type RegisteredPostgresClient = ReturnType<typeof postgres>;
@@ -129,6 +159,12 @@ export type MigrationState =
     };
 
 export interface DatabaseClientOptions {
+  /**
+   * Keeps the upstream standalone layout by default. The Vector deployment
+   * profile places all unqualified Paperclip relations in the existing `llm`
+   * schema of Vector's application database.
+   */
+  deploymentProfile?: DatabaseDeploymentProfile;
   /**
    * postgres.js `prepare`. Set false when connecting through a
    * transaction-mode pooler (pgbouncer / Neon `-pooler` endpoints /
@@ -249,8 +285,19 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
   if (options.idleTimeoutSeconds !== undefined) driverOptions.idle_timeout = options.idleTimeoutSeconds;
   if (options.connectTimeoutSeconds !== undefined) driverOptions.connect_timeout = options.connectTimeoutSeconds;
   if (options.maxLifetimeSeconds !== undefined) driverOptions.max_lifetime = options.maxLifetimeSeconds;
+  const connection: Record<string, string> = {};
   if (options.applicationName !== undefined) {
-    driverOptions.connection = { application_name: options.applicationName };
+    connection.application_name = options.applicationName;
+  }
+  if (options.deploymentProfile === "vector-embedded") {
+    // `public` remains last so PostgreSQL extensions installed there (for
+    // example fuzzystrmatch) stay callable. Every Paperclip relation exists in
+    // `llm`, which wins name resolution, and startup refuses schema drift
+    // before this pool is created.
+    connection.search_path = `${VECTOR_APPLICATION_SCHEMA},public`;
+  }
+  if (Object.keys(connection).length > 0) {
+    driverOptions.connection = connection;
   }
   return driverOptions;
 }
@@ -377,20 +424,76 @@ function normalizeFolderMillis(value: number | null | undefined): number {
 
 async function ensureMigrationJournalTable(
   sql: ReturnType<typeof postgres>,
+  layout: DatabaseLayout,
+  profile: DatabaseDeploymentProfile,
 ): Promise<{ migrationTableSchema: string; columnNames: Set<string> }> {
-  let migrationTableSchema = await discoverMigrationTableSchema(sql);
+  let migrationTableSchema = await discoverMigrationTableSchema(sql, layout, profile);
   if (!migrationTableSchema) {
-    const drizzleSchema = quoteIdentifier("drizzle");
-    const migrationTable = quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE);
+    const drizzleSchema = quoteIdentifier(layout.migrationsSchema);
+    const migrationTable = quoteIdentifier(layout.migrationsTable);
+    if (profile === "vector-embedded") {
+      await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(layout.applicationSchema)}`);
+    }
     await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS ${drizzleSchema}`);
     await sql.unsafe(
       `CREATE TABLE IF NOT EXISTS ${drizzleSchema}.${migrationTable} (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)`,
     );
-    migrationTableSchema = (await discoverMigrationTableSchema(sql)) ?? "drizzle";
+    migrationTableSchema =
+      (await discoverMigrationTableSchema(sql, layout, profile)) ?? layout.migrationsSchema;
   }
 
-  const columnNames = await getMigrationTableColumnNames(sql, migrationTableSchema);
+  const columnNames = await getMigrationTableColumnNames(
+    sql,
+    migrationTableSchema,
+    layout.migrationsTable,
+  );
   return { migrationTableSchema, columnNames };
+}
+
+/**
+ * Re-targets the upstream migration corpus only for Vector's explicit embedded
+ * deployment profile. Unqualified SQL is contained by the connection search
+ * path; generated foreign keys and regclass probes that explicitly name
+ * `public` are rewritten to the same `llm` schema.
+ */
+export function transformMigrationSqlForProfile(
+  content: string,
+  profile: DatabaseDeploymentProfile = "standalone",
+): string {
+  if (profile !== "vector-embedded") return content;
+  return content
+    .replaceAll('"public".', `"${VECTOR_APPLICATION_SCHEMA}".`)
+    .replace(/\bpublic\./g, `${VECTOR_APPLICATION_SCHEMA}.`)
+    .replace(/'public'/g, `'${VECTOR_APPLICATION_SCHEMA}'`)
+    // Older migrations probe constraint names without a relation/schema
+    // predicate. Constraint names are only unique per schema, so an existing
+    // Vector relation in another schema must not suppress or trigger a
+    // Paperclip DDL branch.
+    .replace(
+      /FROM\s+("?pg_constraint"?)\s+WHERE/gi,
+      `FROM $1 WHERE connamespace = '${VECTOR_APPLICATION_SCHEMA}'::regnamespace AND`,
+    );
+}
+
+async function qualifyVectorExtensionObjects(
+  sql: ReturnType<typeof postgres>,
+  statement: string,
+): Promise<string> {
+  if (!/\bgin_trgm_ops\b/.test(statement)) return statement;
+  const rows = await sql<{ schemaName: string }[]>`
+    SELECT namespace.nspname AS "schemaName"
+    FROM pg_extension extension
+    JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+    WHERE extension.extname = 'pg_trgm'
+  `;
+  const schemaName = rows[0]?.schemaName;
+  if (!schemaName) {
+    throw new Error("pg_trgm extension is unavailable after CREATE EXTENSION");
+  }
+  return statement.replace(
+    /(?<![A-Za-z0-9_".])gin_trgm_ops\b/g,
+    `${quoteIdentifier(schemaName)}.${quoteIdentifier("gin_trgm_ops")}`,
+  );
 }
 
 async function migrationHistoryEntryExists(
@@ -449,6 +552,7 @@ async function recordMigrationHistoryEntry(
 async function applyPendingMigrationsManually(
   url: string,
   pendingMigrations: string[],
+  profile: DatabaseDeploymentProfile = "standalone",
 ): Promise<void> {
   if (pendingMigrations.length === 0) return;
 
@@ -458,14 +562,20 @@ async function applyPendingMigrationsManually(
     journalEntries.map((entry) => [entry.fileName, normalizeFolderMillis(entry.folderMillis)]),
   );
 
-  const sql = createUtilitySql(url);
+  const layout = resolveDatabaseLayout(profile);
+  const sql = createUtilitySql(url, profile);
   try {
-    const { migrationTableSchema, columnNames } = await ensureMigrationJournalTable(sql);
-    const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+    const { migrationTableSchema, columnNames } = await ensureMigrationJournalTable(
+      sql,
+      layout,
+      profile,
+    );
+    const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(layout.migrationsTable)}`;
 
     for (const migrationFile of orderedPendingMigrations) {
-      const migrationContent = await readMigrationFileContent(migrationFile);
-      const hash = createHash("sha256").update(migrationContent).digest("hex");
+      const sourceMigrationContent = await readMigrationFileContent(migrationFile);
+      const migrationContent = transformMigrationSqlForProfile(sourceMigrationContent, profile);
+      const hash = createHash("sha256").update(sourceMigrationContent).digest("hex");
       const existingEntry = await migrationHistoryEntryExists(
         sql,
         qualifiedTable,
@@ -477,7 +587,11 @@ async function applyPendingMigrationsManually(
 
       await runInTransaction(sql, async () => {
         for (const statement of splitMigrationStatements(migrationContent)) {
-          await sql.unsafe(statement);
+          await sql.unsafe(
+            profile === "vector-embedded"
+              ? await qualifyVectorExtensionObjects(sql, statement)
+              : statement,
+          );
         }
 
         await recordMigrationHistoryEntry(
@@ -512,13 +626,14 @@ async function mapHashesToMigrationFiles(migrationFiles: string[]): Promise<Map<
 async function getMigrationTableColumnNames(
   sql: ReturnType<typeof postgres>,
   migrationTableSchema: string,
+  migrationTableName: string = DEFAULT_MIGRATIONS_TABLE,
 ): Promise<Set<string>> {
   const columns = await sql.unsafe<{ column_name: string }[]>(
     `
       SELECT column_name
       FROM information_schema.columns
       WHERE table_schema = ${quoteLiteral(migrationTableSchema)}
-        AND table_name = ${quoteLiteral(DRIZZLE_MIGRATIONS_TABLE)}
+        AND table_name = ${quoteLiteral(migrationTableName)}
     `,
   );
   return new Set(columns.map((column) => column.column_name));
@@ -527,12 +642,13 @@ async function getMigrationTableColumnNames(
 async function tableExists(
   sql: ReturnType<typeof postgres>,
   tableName: string,
+  schemaName: string = "public",
 ): Promise<boolean> {
   const rows = await sql<{ exists: boolean }[]>`
     SELECT EXISTS (
       SELECT 1
       FROM information_schema.tables
-      WHERE table_schema = 'public'
+      WHERE table_schema = ${schemaName}
         AND table_name = ${tableName}
     ) AS exists
   `;
@@ -543,12 +659,13 @@ async function columnExists(
   sql: ReturnType<typeof postgres>,
   tableName: string,
   columnName: string,
+  schemaName: string = "public",
 ): Promise<boolean> {
   const rows = await sql<{ exists: boolean }[]>`
     SELECT EXISTS (
       SELECT 1
       FROM information_schema.columns
-      WHERE table_schema = 'public'
+      WHERE table_schema = ${schemaName}
         AND table_name = ${tableName}
         AND column_name = ${columnName}
     ) AS exists
@@ -561,11 +678,12 @@ async function columnHasDataType(
   tableName: string,
   columnName: string,
   dataType: string,
+  schemaName: string = "public",
 ): Promise<boolean> {
   const rows = await sql<{ dataType: string; udtName: string }[]>`
     SELECT data_type AS "dataType", udt_name AS "udtName"
     FROM information_schema.columns
-    WHERE table_schema = 'public'
+    WHERE table_schema = ${schemaName}
       AND table_name = ${tableName}
       AND column_name = ${columnName}
   `;
@@ -578,13 +696,14 @@ async function columnHasDataType(
 async function indexExists(
   sql: ReturnType<typeof postgres>,
   indexName: string,
+  schemaName: string = "public",
 ): Promise<boolean> {
   const rows = await sql<{ exists: boolean }[]>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public'
+      WHERE n.nspname = ${schemaName}
         AND c.relkind = 'i'
         AND c.relname = ${indexName}
     ) AS exists
@@ -595,13 +714,14 @@ async function indexExists(
 async function constraintExists(
   sql: ReturnType<typeof postgres>,
   constraintName: string,
+  schemaName: string = "public",
 ): Promise<boolean> {
   const rows = await sql<{ exists: boolean }[]>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_constraint c
       JOIN pg_namespace n ON n.oid = c.connamespace
-      WHERE n.nspname = 'public'
+      WHERE n.nspname = ${schemaName}
         AND c.conname = ${constraintName}
     ) AS exists
   `;
@@ -611,13 +731,14 @@ async function constraintExists(
 async function functionExists(
   sql: ReturnType<typeof postgres>,
   functionName: string,
+  schemaName: string = "public",
 ): Promise<boolean> {
   const rows = await sql<{ exists: boolean }[]>`
     SELECT EXISTS (
       SELECT 1
       FROM pg_proc p
       JOIN pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname = 'public'
+      WHERE n.nspname = ${schemaName}
         AND p.proname = ${functionName}
     ) AS exists
   `;
@@ -627,6 +748,7 @@ async function functionExists(
 async function triggerExists(
   sql: ReturnType<typeof postgres>,
   triggerName: string,
+  schemaName: string = "public",
 ): Promise<boolean> {
   const rows = await sql<{ exists: boolean }[]>`
     SELECT EXISTS (
@@ -634,7 +756,7 @@ async function triggerExists(
       FROM pg_trigger t
       JOIN pg_class c ON c.oid = t.tgrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public'
+      WHERE n.nspname = ${schemaName}
         AND t.tgname = ${triggerName}
         AND NOT t.tgisinternal
     ) AS exists
@@ -676,6 +798,7 @@ async function heartbeatNextEventSequencesAreCurrent(
 async function migrationStatementAlreadyApplied(
   sql: ReturnType<typeof postgres>,
   statement: string,
+  applicationSchema: string = "public",
 ): Promise<boolean> {
   const normalized = statement
     .replace(/^\s*--.*$/gm, "")
@@ -684,14 +807,14 @@ async function migrationStatementAlreadyApplied(
 
   const createTableMatch = normalized.match(/^CREATE TABLE(?: IF NOT EXISTS)? "([^"]+)"/i);
   if (createTableMatch) {
-    return tableExists(sql, createTableMatch[1]);
+    return tableExists(sql, createTableMatch[1], applicationSchema);
   }
 
   const addColumnMatch = normalized.match(
     /^ALTER TABLE "([^"]+)" ADD COLUMN(?: IF NOT EXISTS)? "([^"]+)"/i,
   );
   if (addColumnMatch) {
-    return columnExists(sql, addColumnMatch[1], addColumnMatch[2]);
+    return columnExists(sql, addColumnMatch[1], addColumnMatch[2], applicationSchema);
   }
 
   const alterColumnTypeMatch = normalized.match(
@@ -703,31 +826,32 @@ async function migrationStatementAlreadyApplied(
       alterColumnTypeMatch[1],
       alterColumnTypeMatch[2],
       alterColumnTypeMatch[3],
+      applicationSchema,
     );
   }
 
   const createIndexMatch = normalized.match(/^CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)? "([^"]+)"/i);
   if (createIndexMatch) {
-    return indexExists(sql, createIndexMatch[1]);
+    return indexExists(sql, createIndexMatch[1], applicationSchema);
   }
 
   const addConstraintMatch = normalized.match(/^ALTER TABLE "([^"]+)" ADD CONSTRAINT "([^"]+)"/i);
   if (addConstraintMatch) {
-    return constraintExists(sql, addConstraintMatch[2]);
+    return constraintExists(sql, addConstraintMatch[2], applicationSchema);
   }
 
   const createFunctionMatch = normalized.match(
     /^CREATE OR REPLACE FUNCTION "?([A-Za-z_][A-Za-z0-9_]*)"?\s*\(/i,
   );
   if (createFunctionMatch) {
-    return functionExists(sql, createFunctionMatch[1]);
+    return functionExists(sql, createFunctionMatch[1], applicationSchema);
   }
 
   const createTriggerMatch = normalized.match(
     /^CREATE TRIGGER "?([A-Za-z_][A-Za-z0-9_]*)"?/i,
   );
   if (createTriggerMatch) {
-    return triggerExists(sql, createTriggerMatch[1]);
+    return triggerExists(sql, createTriggerMatch[1], applicationSchema);
   }
 
   // These native-runner repairs have persistent postconditions. Verify them
@@ -753,12 +877,13 @@ async function migrationStatementAlreadyApplied(
 async function migrationContentAlreadyApplied(
   sql: ReturnType<typeof postgres>,
   migrationContent: string,
+  applicationSchema: string = "public",
 ): Promise<boolean> {
   const statements = splitMigrationStatements(migrationContent);
   if (statements.length === 0) return false;
 
   for (const statement of statements) {
-    const applied = await migrationStatementAlreadyApplied(sql, statement);
+    const applied = await migrationStatementAlreadyApplied(sql, statement, applicationSchema);
     if (!applied) return false;
   }
 
@@ -769,10 +894,15 @@ async function loadAppliedMigrations(
   sql: ReturnType<typeof postgres>,
   migrationTableSchema: string,
   availableMigrations: string[],
+  migrationTableName: string = DEFAULT_MIGRATIONS_TABLE,
 ): Promise<string[]> {
   const quotedSchema = quoteIdentifier(migrationTableSchema);
-  const qualifiedTable = `${quotedSchema}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
-  const columnNames = await getMigrationTableColumnNames(sql, migrationTableSchema);
+  const qualifiedTable = `${quotedSchema}.${quoteIdentifier(migrationTableName)}`;
+  const columnNames = await getMigrationTableColumnNames(
+    sql,
+    migrationTableSchema,
+    migrationTableName,
+  );
 
   if (columnNames.has("name")) {
     const rows = await sql.unsafe<{ name: string }[]>(`SELECT name FROM ${qualifiedTable} ORDER BY id`);
@@ -830,32 +960,43 @@ export type MigrationHistoryReconcileResult = {
 
 export async function reconcilePendingMigrationHistory(
   url: string,
+  profile: DatabaseDeploymentProfile = "standalone",
 ): Promise<MigrationHistoryReconcileResult> {
-  const state = await inspectMigrations(url);
+  const layout = resolveDatabaseLayout(profile);
+  const state = await inspectMigrations(url, profile);
   if (state.status !== "needsMigrations" || state.reason !== "pending-migrations") {
     return { repairedMigrations: [], remainingMigrations: [] };
   }
 
-  const sql = createUtilitySql(url);
+  const sql = createUtilitySql(url, profile);
   const repairedMigrations: string[] = [];
 
   try {
     const journalEntries = await listJournalMigrationEntries();
     const folderMillisByFile = new Map(journalEntries.map((entry) => [entry.fileName, entry.folderMillis]));
-    const migrationTableSchema = await discoverMigrationTableSchema(sql);
+    const migrationTableSchema = await discoverMigrationTableSchema(sql, layout, profile);
     if (!migrationTableSchema) {
       return { repairedMigrations, remainingMigrations: state.pendingMigrations };
     }
 
-    const columnNames = await getMigrationTableColumnNames(sql, migrationTableSchema);
-    const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+    const columnNames = await getMigrationTableColumnNames(
+      sql,
+      migrationTableSchema,
+      layout.migrationsTable,
+    );
+    const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(layout.migrationsTable)}`;
 
     for (const migrationFile of state.pendingMigrations) {
-      const migrationContent = await readMigrationFileContent(migrationFile);
-      const alreadyApplied = await migrationContentAlreadyApplied(sql, migrationContent);
+      const sourceMigrationContent = await readMigrationFileContent(migrationFile);
+      const migrationContent = transformMigrationSqlForProfile(sourceMigrationContent, profile);
+      const alreadyApplied = await migrationContentAlreadyApplied(
+        sql,
+        migrationContent,
+        layout.applicationSchema,
+      );
       if (!alreadyApplied) break;
 
-      const hash = createHash("sha256").update(migrationContent).digest("hex");
+      const hash = createHash("sha256").update(sourceMigrationContent).digest("hex");
       const folderMillis = folderMillisByFile.get(migrationFile) ?? Date.now();
       const existingByHash = columnNames.has("hash")
         ? await sql.unsafe<{ created_at: string | number | null }[]>(
@@ -915,7 +1056,7 @@ export async function reconcilePendingMigrationHistory(
     await sql.end();
   }
 
-  const refreshed = await inspectMigrations(url);
+  const refreshed = await inspectMigrations(url, profile);
   return {
     repairedMigrations,
     remainingMigrations:
@@ -923,17 +1064,27 @@ export async function reconcilePendingMigrationHistory(
   };
 }
 
-async function discoverMigrationTableSchema(sql: ReturnType<typeof postgres>): Promise<string | null> {
+async function discoverMigrationTableSchema(
+  sql: ReturnType<typeof postgres>,
+  layout: DatabaseLayout = resolveDatabaseLayout(),
+  profile: DatabaseDeploymentProfile = "standalone",
+): Promise<string | null> {
   const rows = await sql<{ schemaName: string }[]>`
     SELECT n.nspname AS "schemaName"
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relname = ${DRIZZLE_MIGRATIONS_TABLE} AND c.relkind = 'r'
+    WHERE c.relname = ${layout.migrationsTable} AND c.relkind = 'r'
   `;
 
   if (rows.length === 0) return null;
 
-  const drizzleSchema = rows.find(({ schemaName }) => schemaName === "drizzle");
+  if (profile === "vector-embedded") {
+    return rows.some(({ schemaName }) => schemaName === layout.migrationsSchema)
+      ? layout.migrationsSchema
+      : null;
+  }
+
+  const drizzleSchema = rows.find(({ schemaName }) => schemaName === layout.migrationsSchema);
   if (drizzleSchema) return drizzleSchema.schemaName;
 
   const publicSchema = rows.find(({ schemaName }) => schemaName === "public");
@@ -942,20 +1093,24 @@ async function discoverMigrationTableSchema(sql: ReturnType<typeof postgres>): P
   return rows[0]?.schemaName ?? null;
 }
 
-export async function inspectMigrations(url: string): Promise<MigrationState> {
-  const sql = createUtilitySql(url);
+export async function inspectMigrations(
+  url: string,
+  profile: DatabaseDeploymentProfile = "standalone",
+): Promise<MigrationState> {
+  const layout = resolveDatabaseLayout(profile);
+  const sql = createUtilitySql(url, profile);
 
   try {
     const availableMigrations = await listMigrationFiles();
     const tableCountResult = await sql<{ count: number }[]>`
       select count(*)::int as count
       from information_schema.tables
-      where table_schema = 'public'
+      where table_schema = ${layout.applicationSchema}
         and table_type = 'BASE TABLE'
     `;
     const tableCount = tableCountResult[0]?.count ?? 0;
 
-    const migrationTableSchema = await discoverMigrationTableSchema(sql);
+    const migrationTableSchema = await discoverMigrationTableSchema(sql, layout, profile);
     if (!migrationTableSchema) {
       if (tableCount > 0) {
         return {
@@ -980,12 +1135,17 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
       };
     }
 
-    const qualifiedMigrationTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+    const qualifiedMigrationTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(layout.migrationsTable)}`;
     const journalCountRows = await sql.unsafe<{ count: number }[]>(
       `SELECT count(*)::int AS count FROM ${qualifiedMigrationTable}`,
     );
     const journalEntryCount = journalCountRows[0]?.count ?? 0;
-    const appliedMigrations = await loadAppliedMigrations(sql, migrationTableSchema, availableMigrations);
+    const appliedMigrations = await loadAppliedMigrations(
+      sql,
+      migrationTableSchema,
+      availableMigrations,
+      layout.migrationsTable,
+    );
     const pendingMigrations = availableMigrations.filter((name) => !appliedMigrations.includes(name));
     if (pendingMigrations.length === 0) {
       return {
@@ -1011,9 +1171,41 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
   }
 }
 
-export async function applyPendingMigrations(url: string): Promise<void> {
-  const initialState = await inspectMigrations(url);
+/**
+ * Read-only runtime gate for supervisor-owned migration profiles. It never
+ * creates schemas, repairs journal rows, or applies SQL.
+ */
+export async function assertMigrationsCurrent(
+  url: string,
+  profile: DatabaseDeploymentProfile = "standalone",
+): Promise<void> {
+  const state = await inspectMigrations(url, profile);
+  if (state.status === "upToDate") return;
+  throw new Error(
+    `Database schema is not current for profile ${profile}: ${state.pendingMigrations.length} pending migration(s) ` +
+      `(${state.reason}). Run the explicit migration command before starting Paperclip.`,
+  );
+}
+
+export async function applyPendingMigrations(
+  url: string,
+  profile: DatabaseDeploymentProfile = "standalone",
+): Promise<void> {
+  const initialState = await inspectMigrations(url, profile);
   if (initialState.status === "upToDate") return;
+
+  if (
+    profile === "vector-embedded" &&
+    (initialState.reason === "no-migration-journal-empty-db" ||
+      initialState.reason === "no-migration-journal-non-empty-db")
+  ) {
+    await applyPendingMigrationsManually(url, initialState.pendingMigrations, profile);
+    const bootstrappedState = await inspectMigrations(url, profile);
+    if (bootstrappedState.status === "upToDate") return;
+    throw new Error(
+      `Failed to bootstrap Vector migrations: ${bootstrappedState.pendingMigrations.join(", ")}`,
+    );
+  }
 
   if (initialState.reason === "no-migration-journal-empty-db") {
     const sql = createUtilitySql(url);
@@ -1024,16 +1216,16 @@ export async function applyPendingMigrations(url: string): Promise<void> {
       await sql.end();
     }
 
-    let bootstrappedState = await inspectMigrations(url);
+    let bootstrappedState = await inspectMigrations(url, profile);
     if (bootstrappedState.status === "upToDate") return;
     if (bootstrappedState.reason === "pending-migrations") {
-      const repair = await reconcilePendingMigrationHistory(url);
+      const repair = await reconcilePendingMigrationHistory(url, profile);
       if (repair.repairedMigrations.length > 0) {
-        bootstrappedState = await inspectMigrations(url);
+        bootstrappedState = await inspectMigrations(url, profile);
       }
       if (bootstrappedState.status === "needsMigrations" && bootstrappedState.reason === "pending-migrations") {
-        await applyPendingMigrationsManually(url, bootstrappedState.pendingMigrations);
-        bootstrappedState = await inspectMigrations(url);
+        await applyPendingMigrationsManually(url, bootstrappedState.pendingMigrations, profile);
+        bootstrappedState = await inspectMigrations(url, profile);
       }
     }
     if (bootstrappedState.status === "upToDate") return;
@@ -1048,12 +1240,12 @@ export async function applyPendingMigrations(url: string): Promise<void> {
     );
   }
 
-  let state = await inspectMigrations(url);
+  let state = await inspectMigrations(url, profile);
   if (state.status === "upToDate") return;
 
-  const repair = await reconcilePendingMigrationHistory(url);
+  const repair = await reconcilePendingMigrationHistory(url, profile);
   if (repair.repairedMigrations.length > 0) {
-    state = await inspectMigrations(url);
+    state = await inspectMigrations(url, profile);
     if (state.status === "upToDate") return;
   }
 
@@ -1061,9 +1253,9 @@ export async function applyPendingMigrations(url: string): Promise<void> {
     throw new Error("Migrations are still pending after migration-history reconciliation; run inspectMigrations for details.");
   }
 
-  await applyPendingMigrationsManually(url, state.pendingMigrations);
+  await applyPendingMigrationsManually(url, state.pendingMigrations, profile);
 
-  const finalState = await inspectMigrations(url);
+  const finalState = await inspectMigrations(url, profile);
   if (finalState.status !== "upToDate") {
     throw new Error(
       `Failed to apply pending migrations: ${finalState.pendingMigrations.join(", ")}`,

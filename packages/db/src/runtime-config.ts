@@ -11,6 +11,7 @@ const CONFIG_BASENAME = "config.json";
 
 type PartialConfig = {
   database?: {
+    deploymentProfile?: string;
     mode?: "embedded-postgres" | "postgres";
     connectionString?: string;
     embeddedPostgresDataDir?: string;
@@ -23,6 +24,7 @@ type PartialConfig = {
 export type ResolvedDatabaseTarget =
   | {
       mode: "postgres";
+      deploymentProfile: "standalone" | "vector-embedded";
       connectionString: string;
       source: "DATABASE_URL" | "paperclip-env" | "config.database.connectionString";
       configPath: string;
@@ -30,6 +32,7 @@ export type ResolvedDatabaseTarget =
     }
   | {
       mode: "embedded-postgres";
+      deploymentProfile: "standalone";
       dataDir: string;
       port: number;
       source: `embedded-postgres@${number}`;
@@ -167,6 +170,10 @@ function readConfig(configPath: string): PartialConfig | null {
     database: database
       ? {
           mode: database.mode === "postgres" ? "postgres" : "embedded-postgres",
+          deploymentProfile:
+            typeof database.deploymentProfile === "string"
+              ? database.deploymentProfile
+              : undefined,
           connectionString:
             typeof database.connectionString === "string" ? database.connectionString : undefined,
           embeddedPostgresDataDir:
@@ -186,10 +193,24 @@ export function resolveDatabaseTarget(): ResolvedDatabaseTarget {
   const envPath = resolvePaperclipEnvPath(configPath);
   const envEntries = readEnvEntries(envPath);
 
+  const config = readConfig(configPath);
+  const profileRaw =
+    process.env.PAPERCLIP_DATABASE_PROFILE?.trim() ||
+    envEntries.PAPERCLIP_DATABASE_PROFILE?.trim() ||
+    config?.database?.deploymentProfile ||
+    "standalone";
+  if (profileRaw !== "standalone" && profileRaw !== "vector-embedded") {
+    throw new Error(
+      `PAPERCLIP_DATABASE_PROFILE must be "standalone" or "vector-embedded", got: ${profileRaw}`,
+    );
+  }
+  const deploymentProfile = profileRaw;
+
   const envUrl = process.env.DATABASE_URL?.trim();
   if (envUrl) {
     return {
       mode: "postgres",
+      deploymentProfile,
       connectionString: envUrl,
       source: "DATABASE_URL",
       configPath,
@@ -201,6 +222,7 @@ export function resolveDatabaseTarget(): ResolvedDatabaseTarget {
   if (fileEnvUrl) {
     return {
       mode: "postgres",
+      deploymentProfile,
       connectionString: fileEnvUrl,
       source: "paperclip-env",
       configPath,
@@ -208,11 +230,11 @@ export function resolveDatabaseTarget(): ResolvedDatabaseTarget {
     };
   }
 
-  const config = readConfig(configPath);
   const connectionString = config?.database?.connectionString?.trim();
   if (config?.database?.mode === "postgres" && connectionString) {
     return {
       mode: "postgres",
+      deploymentProfile,
       connectionString,
       source: "config.database.connectionString",
       configPath,
@@ -225,8 +247,15 @@ export function resolveDatabaseTarget(): ResolvedDatabaseTarget {
     config?.database?.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
   );
 
+  if (deploymentProfile === "vector-embedded") {
+    throw new Error(
+      "The vector-embedded database profile requires external PostgreSQL via DATABASE_URL or config.database.connectionString.",
+    );
+  }
+
   return {
     mode: "embedded-postgres",
+    deploymentProfile: "standalone",
     dataDir,
     port,
     source: `embedded-postgres@${port}`,

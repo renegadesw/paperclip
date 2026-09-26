@@ -9,6 +9,7 @@ import {
 
 type PartialConfig = {
   database?: {
+    deploymentProfile?: "standalone" | "vector-embedded";
     mode?: "embedded-postgres" | "postgres";
     connectionString?: string;
     embeddedPostgresPort?: number;
@@ -67,6 +68,15 @@ function resolveRetentionDays(config: PartialConfig | null): number {
 async function main() {
   const configPath = resolvePaperclipConfigPathForInstance();
   const config = readConfig(configPath);
+  const deploymentProfile =
+    process.env.PAPERCLIP_DATABASE_PROFILE?.trim() ||
+    config?.database?.deploymentProfile ||
+    "standalone";
+  if (deploymentProfile === "vector-embedded") {
+    throw new Error(
+      "Paperclip database backups are disabled for the vector-embedded profile; use Vector's application-database backup system.",
+    );
+  }
   const connectionString = resolveConnectionString(config);
   const backupDir = resolveBackupDir(config);
   const retentionDays = resolveRetentionDays(config);
