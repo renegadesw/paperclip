@@ -123,7 +123,7 @@ function memoryPort(): VectorProvisioningPort & { companies: any[]; ownerships: 
 }
 
 describe("Vector installation provisioning", () => {
-  it("accepts exactly the speak-only Standard Chat roster and rejects any second agent or wider tools", async () => {
+  it("accepts exactly the Standard Chat roster with the chat bridge and speak, and rejects any second agent or changed tools", async () => {
     const f = await fixture();
     const workerBody = "# Implementation Worker\n";
     const workerPath = "paperclip/profile-assets/standard/implementation-worker/AGENTS.md";
@@ -138,11 +138,19 @@ describe("Vector installation provisioning", () => {
       instructions: { path: workerPath, sha256: createHash("sha256").update(workerBody).digest("hex") },
     };
     const speakOnly = f.toolPolicy.extensions[2];
+    const chatBridge = {
+      ...f.toolPolicy.extensions[1],
+      tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
+    };
+    expect(chatBridge.tools).toEqual([
+      "ask_user", "memory_forget", "memory_save", "memory_search",
+      "todo_add", "todo_list", "todo_mark_done", "todo_update",
+    ]);
     const standard = {
       ...f.manifest, profile: "standard",
       agent: { ...f.manifest.agent, name: "Standard Chat", role: "standard-chat" },
       additionalAgents: [],
-      toolPolicy: { profile: "standard", builtinTools: [], extensions: [speakOnly] },
+      toolPolicy: { profile: "standard", builtinTools: [], extensions: [chatBridge, speakOnly] },
     };
     expect(vectorInstallationManifestSchema.safeParse(standard).success).toBe(true);
     // The retired implementation-worker (or any second agent) is never admitted.
@@ -155,15 +163,12 @@ describe("Vector installation provisioning", () => {
       ...standard,
       agent: { ...standard.agent, role: "implementation-worker" },
     }).success).toBe(false);
-    const chatBridge = {
-      ...f.toolPolicy.extensions[1],
-      tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
-    };
-    for (const extensions of [[], [f.toolPolicy.extensions[0]], [f.toolPolicy.extensions[1]], [chatBridge],
-      [chatBridge, speakOnly], [speakOnly, chatBridge],
-      [{ ...speakOnly, permissions: { filesystem: true, shell: false } }],
-      [{ ...speakOnly, tools: ["speak", "ask_user"] }],
-      [{ ...speakOnly, tools: ["speak", "bash"] }]]) {
+    for (const extensions of [[], [speakOnly], [chatBridge], [f.toolPolicy.extensions[0]],
+      [f.toolPolicy.extensions[1], speakOnly], [speakOnly, chatBridge],
+      [chatBridge, { ...speakOnly, permissions: { filesystem: true, shell: false } }],
+      [{ ...chatBridge, permissions: { filesystem: false, shell: true } }, speakOnly],
+      [{ ...chatBridge, tools: [...chatBridge.tools, "github_read"] }, speakOnly],
+      [chatBridge, { ...speakOnly, tools: ["speak", "bash"] }]]) {
       expect(vectorInstallationManifestSchema.safeParse({ ...standard, toolPolicy: { ...standard.toolPolicy, extensions } }).success).toBe(false);
     }
     expect(vectorInstallationManifestSchema.safeParse({ ...standard, toolPolicy: { ...standard.toolPolicy, builtinTools: ["read"] } }).success).toBe(false);
@@ -666,7 +671,14 @@ describe("Vector installation provisioning", () => {
         await fs.writeFile(path.join(f.stagedReleaseRoot, relative), body);
         return { path: relative, sha256: createHash("sha256").update(body).digest("hex") };
       };
-      const toolPolicy = { profile: "standard", builtinTools: [], extensions: [f.toolPolicy.extensions[2]] };
+      const toolPolicy = {
+        profile: "standard",
+        builtinTools: [],
+        extensions: [{
+          ...f.toolPolicy.extensions[1],
+          tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
+        }, f.toolPolicy.extensions[2]],
+      };
       const manifest = {
         ...f.manifest,
         manifestRevision: revision,

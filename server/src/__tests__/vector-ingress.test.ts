@@ -1031,6 +1031,71 @@ const support = await getEmbeddedPostgresTestSupport();
       });
     });
 
+    it("runs a standard todo launch as an ordinary standard-chat turn bound to that todo", async () => {
+      const todoTools = ["todo_add", "todo_list", "todo_mark_done", "todo_update"];
+      const toolAuthority = new VectorToolAuthorityBridge(db, {
+        endpoint: new URL("http://127.0.0.1:32160/inbound/paperclip/v1/tools/call"),
+        callbackUrl: new URL("http://127.0.0.1:3100/api/internal/vector/v1/tools/callback"),
+        installationId: "stecke1-standard",
+        profile: "standard",
+        secret: "vector-tool-authority-test-secret-32-plus",
+        allowedTools: ["ask_user", "memory_forget", "memory_save", "memory_search", ...todoTools, "speak"],
+        ttlSeconds: 3600,
+      }, vi.fn());
+      const service = vectorIngressService(db, { heartbeat, toolAuthority });
+      const personaContext = {
+        schemaVersion: 1 as const,
+        personaId: "00000000-0000-0000-0000-000000000024",
+        personaName: "Sage",
+        personaVersion: "abcdef012346",
+        model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const,
+        systemPrompt: "Be a calm, precise collaborator.",
+      };
+      const launch = {
+        companyId,
+        agentId: standardAgentId,
+        externalSessionId: "todo-d757f88d-7062-4e72-939e-f6230cfcad7a-7d19e3e8f8b157f7fbc63f7dc789832a",
+        ownerId: "vector-user:user-3",
+        installationId: "stecke1-standard",
+        profileId: "standard",
+        clientRequestId: "todo-launch-d757f88d-7062-4e72-939e-f6230cfcad7a",
+        body: "Todo brief: draft the requested answer.",
+        personaContext,
+        authorityHandle: "opaque-todo-d757f88d-authority",
+        authorityTools: todoTools,
+      };
+      const turn = await service.addTurn(launch);
+      expect(turn.runId).toBeTruthy();
+      const runContext = await db.select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toBeUndefined();
+      expect(runContext.vectorPersonaTurn).toEqual(personaContext);
+      expect(JSON.stringify(runContext)).not.toContain(launch.authorityHandle);
+      const commentBody = await db.select({ body: issueComments.body })
+        .from(issueComments).where(eq(issueComments.id, turn.commentId))
+        .then((rows) => rows[0]?.body);
+      expect(commentBody).toBe(launch.body);
+
+      // Idempotent: the same launch replays; a different todo authority on it is refused.
+      await expect(service.addTurn(launch)).resolves.toMatchObject({
+        issueId: turn.issueId, commentId: turn.commentId, runId: turn.runId, replayed: true,
+      });
+      await expect(service.addTurn({ ...launch, authorityHandle: "opaque-other-todo-authority" }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_tool_authority_scope_conflict" } });
+
+      // Durable binding: the todo session keeps one conversation and its persona.
+      const mappings = await db.select().from(vectorIngressConversations)
+        .where(eq(vectorIngressConversations.externalSessionId, launch.externalSessionId));
+      expect(mappings).toHaveLength(1);
+      expect(mappings[0]).toMatchObject({
+        issueId: turn.issueId, agentId: standardAgentId, profileId: "standard", sessionRole: null,
+      });
+      const { personaContext: _persona, authorityHandle: _handle, authorityTools: _tools, ...scope } = launch;
+      await expect(service.status(scope)).resolves.toMatchObject({ issueId: turn.issueId, sessionRole: null });
+    });
+
     it("rejects every todo role turn on standard and never selects a retired agent", async () => {
       const service = vectorIngressService(db, { heartbeat });
       const retiredRoleContext = {

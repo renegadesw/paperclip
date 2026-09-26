@@ -649,7 +649,10 @@ export function vectorIngressService(
     const ownerSha256 = vectorIngressOwnerSha256(scope);
     const turn = scope as Partial<VectorIngressTurnInput>;
     // FunkyDev has exactly one session alias. A NexusLink todo launch is an
-    // ordinary `pi` turn whose opening message is the todo brief.
+    // ordinary turn on the profile's single agent (`pi` on engineering,
+    // standard-chat on standard) whose opening message is the todo brief. The
+    // todo binding is this durable externalSessionId mapping plus the
+    // run-scoped Vector tool authority minted for that todo.
     const insertedRole = scope.profileId === "engineering" ? "pi" : null;
     const requestedRepository = turn.repositoryContext?.repository ?? null;
     const inserted = await db

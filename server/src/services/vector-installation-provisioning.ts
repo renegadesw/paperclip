@@ -35,7 +35,7 @@ const toolPolicySchema = z.object({
   }).strict()),
 }).strict().superRefine((policy, ctx) => {
   const restrictedExtensions = policy.profile === "standard"
-    ? [speakExtension] : [stagingCallbackExtension];
+    ? [chatCallbackExtension, speakExtension] : [stagingCallbackExtension];
   if (policy.profile !== "engineering" && (policy.builtinTools.length > 0
       || stableJson(policy.extensions) !== stableJson(restrictedExtensions))) {
     ctx.addIssue({
@@ -184,9 +184,14 @@ const speakExtension = {
   permissions: { filesystem: false, shell: false },
 };
 
-const engineeringCallbackExtension = {
+const chatCallbackExtension = {
   name: "vector.tool-bridge",
+  tools: ["ask_user", "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
   permissions: { filesystem: false, shell: false },
+};
+
+const engineeringCallbackExtension = {
+  ...chatCallbackExtension,
   tools: [
     "ask_user", "github_api", "github_manage", "github_read", "github_repo",
     "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list",
