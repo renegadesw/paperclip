@@ -51,6 +51,55 @@ export interface VectorIsolationRelation {
   readOnly: boolean;
 }
 
+/** Catalog columns both the installer and the startup gate compare. */
+interface RelationCatalogRow {
+  relrowsecurity: boolean;
+  owned: boolean;
+  polpermissive: boolean | null;
+  polcmd: string | null;
+  applies: boolean | null;
+  fingerprint: string | null;
+  digest: string | null;
+  tgenabled: string | null;
+  tgtype: number | null;
+  trigger_args: string | null;
+  trigger_function: boolean | null;
+}
+
+function expectsForeignRefGuard(relation: VectorIsolationRelation): relation is VectorIsolationRelation & { foreignKeyCheck: string } {
+  return Boolean(relation.foreignKeyCheck) && !relation.readOnly && relation.mode !== "quarantined";
+}
+
+function gateIsCurrent(relation: VectorIsolationRelation, row: RelationCatalogRow): boolean {
+  return row.relrowsecurity && !row.owned && row.polpermissive === false && row.polcmd === "*" && row.applies === true &&
+    row.fingerprint === `${policyFingerprint(relation)}:${row.digest}`;
+}
+
+function foreignRefGuardIsCurrent(relation: VectorIsolationRelation, row: RelationCatalogRow): boolean {
+  if (!expectsForeignRefGuard(relation)) return true;
+  return row.tgenabled === "O" && row.tgtype === 23 && row.trigger_function === true &&
+    row.trigger_args === Buffer.from(relation.foreignKeyCheck + "\0").toString("hex");
+}
+
+function runtimePrivileges(relation: VectorIsolationRelation): string[] {
+  if (relation.readOnly || relation.mode === "quarantined") return ["SELECT"];
+  if (relation.table === "companies") return ["SELECT", "UPDATE"];
+  return ["DELETE", "INSERT", "SELECT", "UPDATE"];
+}
+
+const GUARD_FUNCTION_BODY = `
+        DECLARE allowed boolean;
+        BEGIN
+          IF current_user <> 'paperclip_runtime' THEN RETURN NEW; END IF;
+          EXECUTE 'SELECT ' || TG_ARGV[0] INTO allowed USING to_jsonb(NEW);
+          IF allowed IS DISTINCT FROM true THEN
+            RAISE EXCEPTION 'Vector runtime foreign reference is outside installation scope' USING ERRCODE = '42501';
+          END IF;
+          RETURN NEW;
+        END `;
+
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+
 /** Every exported relation must be classified; a new unscoped table fails closed. */
 export function vectorIsolationRelations(): VectorIsolationRelation[] {
   const exports: unknown[] = Object.values(schema);
@@ -118,10 +167,15 @@ export function vectorIsolationRelations(): VectorIsolationRelation[] {
  * Runtime isolation is protection against accidental unscoped application
  * queries, not against a trusted host deliberately changing its session GUCs.
  */
-export async function installVectorRuntimeIsolation(connectionString: string): Promise<{
+export async function installVectorRuntimeIsolation(
+  connectionString: string,
+  options: { lockTimeoutMs?: number } = {},
+): Promise<{
   scopedTables: number; quarantinedTables: string[]; parentOwnedTables: string[];
 }> {
   const relations = vectorIsolationRelations();
+  const lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+  if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs < 1) throw new Error("Vector runtime isolation lock timeout is invalid");
   const db = postgres(connectionString, { max: 1, onnotice: () => {} });
   try {
     await db.begin(async (tx) => {
@@ -129,6 +183,9 @@ export async function installVectorRuntimeIsolation(connectionString: string): P
       // installation and startup compute their independent policy fingerprints.
       await tx`SELECT set_config('search_path', 'pg_catalog', true)`;
       await tx`SELECT pg_advisory_xact_lock(1346588754, 1380733745)`;
+      // Live Paperclip servers share this database. A relation that still needs
+      // DDL must fail fast rather than queue behind (or deadlock with) them.
+      await tx`SELECT set_config('lock_timeout', ${`${lockTimeoutMs}ms`}, true)`;
       const roles = await tx`SELECT rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolreplication
         FROM pg_roles WHERE rolname = ${VECTOR_RUNTIME_DATABASE_ROLE}`;
       if (roles.length === 0) {
@@ -157,58 +214,96 @@ export async function installVectorRuntimeIsolation(connectionString: string): P
           AND (n.nspname = 'llm' OR has_schema_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, n.oid, 'USAGE'))
           AND p.prosecdef AND has_function_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, p.oid, 'EXECUTE') LIMIT 1`;
       if (definers.length) throw new Error("paperclip_runtime can execute an application SECURITY DEFINER function; review its grants first");
-      await tx.unsafe(`GRANT USAGE ON SCHEMA llm TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
+      const [schemaUsage] = await tx`SELECT has_schema_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, 'llm', 'USAGE') AS held`;
+      if (!schemaUsage!.held) await tx.unsafe(`GRANT USAGE ON SCHEMA llm TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
       // A SECURITY INVOKER trigger performs the SELECT under the runtime role.
       // Putting FK/self-reference lookups in WITH CHECK causes PostgreSQL's
       // policy rewriter to recurse for agents.reports_to and similar cycles.
-      await tx.unsafe(`CREATE OR REPLACE FUNCTION llm.paperclip_vector_check_foreign_refs()
-        RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog AS $body$
-        DECLARE allowed boolean;
-        BEGIN
-          IF current_user <> 'paperclip_runtime' THEN RETURN NEW; END IF;
-          EXECUTE 'SELECT ' || TG_ARGV[0] INTO allowed USING to_jsonb(NEW);
-          IF allowed IS DISTINCT FROM true THEN
-            RAISE EXCEPTION 'Vector runtime foreign reference is outside installation scope' USING ERRCODE = '42501';
-          END IF;
-          RETURN NEW;
-        END $body$`);
-      await tx.unsafe(`REVOKE ALL ON FUNCTION llm.paperclip_vector_check_foreign_refs() FROM PUBLIC`);
-      const [guard] = await tx`SELECT md5(pg_get_functiondef('llm.paperclip_vector_check_foreign_refs()'::regprocedure)) AS digest`;
-      await tx.unsafe(`COMMENT ON FUNCTION llm.paperclip_vector_check_foreign_refs() IS '${guard!.digest}'`);
+      const [currentGuard] = await tx`SELECT p.prosrc = ${GUARD_FUNCTION_BODY} AND NOT p.prosecdef
+          AND p.proconfig = ARRAY['search_path=pg_catalog']
+          AND p.proacl IS NOT NULL AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) AS acl WHERE acl.grantee = 0)
+          AND obj_description(p.oid, 'pg_proc') = md5(pg_get_functiondef(p.oid)) AS current
+        FROM pg_proc p WHERE p.oid = to_regprocedure('llm.paperclip_vector_check_foreign_refs()')`;
+      if (!currentGuard?.current) {
+        await tx.unsafe(`CREATE OR REPLACE FUNCTION llm.paperclip_vector_check_foreign_refs()
+        RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog AS $body$${GUARD_FUNCTION_BODY}$body$`);
+        await tx.unsafe(`REVOKE ALL ON FUNCTION llm.paperclip_vector_check_foreign_refs() FROM PUBLIC`);
+        const [guard] = await tx`SELECT md5(pg_get_functiondef('llm.paperclip_vector_check_foreign_refs()'::regprocedure)) AS digest`;
+        await tx.unsafe(`COMMENT ON FUNCTION llm.paperclip_vector_check_foreign_refs() IS '${guard!.digest}'`);
+      }
+      // Catalog reads take no relation locks, so a converged install touches
+      // no table that a live server is using.
+      const catalog = await tx`SELECT c.relname, c.relrowsecurity, c.relowner = r.oid AS owned,
+          gate.polpermissive, gate.polcmd, gate.polroles = ARRAY[r.oid] AS applies,
+          obj_description(gate.oid, 'pg_policy') AS fingerprint,
+          md5(pg_get_expr(gate.polqual, gate.polrelid) || '|' || pg_get_expr(gate.polwithcheck, gate.polrelid)) AS digest,
+          base.polpermissive AS base_permissive, base.polcmd AS base_cmd, base.polroles = ARRAY[r.oid] AS base_applies,
+          pg_get_expr(base.polqual, base.polrelid) AS base_using, pg_get_expr(base.polwithcheck, base.polrelid) AS base_check,
+          t.oid IS NOT NULL AS has_trigger, t.tgenabled, t.tgtype, encode(t.tgargs, 'hex') AS trigger_args,
+          t.tgfoid = to_regprocedure('llm.paperclip_vector_check_foreign_refs()') AS trigger_function,
+          ARRAY(SELECT DISTINCT acl.privilege_type FROM aclexplode(c.relacl) AS acl
+            WHERE acl.grantee = r.oid ORDER BY acl.privilege_type) AS privileges
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN pg_roles r
+        LEFT JOIN pg_policy gate ON gate.polrelid = c.oid AND gate.polname = ${POLICY + "_gate"}
+        LEFT JOIN pg_policy base ON base.polrelid = c.oid AND base.polname = ${POLICY}
+        LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'paperclip_vector_foreign_refs'
+        WHERE n.nspname = 'llm' AND c.relkind IN ('r', 'p') AND r.rolname = ${VECTOR_RUNTIME_DATABASE_ROLE}`;
+      const byName = new Map(catalog.map((row) => [row.relname as string, row]));
       for (const relation of relations) {
         if (relation.mode === "vector-parent") continue;
         const target = `llm.${identifier(relation.table)}`;
-        const rows = await tx`SELECT c.relowner = r.oid AS owned FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          CROSS JOIN pg_roles r
-          WHERE n.nspname = 'llm' AND c.relname = ${relation.table}
-            AND r.rolname = ${VECTOR_RUNTIME_DATABASE_ROLE}`;
-        if (rows.length !== 1 || rows[0]!.owned) {
+        const row = byName.get(relation.table);
+        if (!row || row.owned) {
           throw new Error(`Missing relation or unsafe runtime owner: ${relation.table}`);
         }
-        await tx.unsafe(`ALTER TABLE ${target} ENABLE ROW LEVEL SECURITY`);
-        // Restrictive gate cannot be widened by an existing permissive policy.
-        await tx.unsafe(`DROP POLICY IF EXISTS ${POLICY} ON ${target}`);
-        await tx.unsafe(`DROP POLICY IF EXISTS ${POLICY}_gate ON ${target}`);
-        await tx.unsafe(`CREATE POLICY ${POLICY} ON ${target} TO ${VECTOR_RUNTIME_DATABASE_ROLE} USING (true) WITH CHECK (true)`);
-        await tx.unsafe(`CREATE POLICY ${POLICY}_gate ON ${target} AS RESTRICTIVE TO ${VECTOR_RUNTIME_DATABASE_ROLE} USING (${relation.using}) WITH CHECK (${relation.check})`);
-        const [policy] = await tx`SELECT md5(pg_get_expr(polqual, polrelid) || '|' || pg_get_expr(polwithcheck, polrelid)) AS digest
-          FROM pg_policy WHERE polrelid = ${target}::regclass AND polname = ${POLICY + "_gate"}`;
-        await tx.unsafe(`COMMENT ON POLICY ${POLICY}_gate ON ${target} IS '${policyFingerprint(relation)}:${policy!.digest}'`);
-        await tx.unsafe(`DROP TRIGGER IF EXISTS paperclip_vector_foreign_refs ON ${target}`);
-        if (relation.foreignKeyCheck && !relation.readOnly && relation.mode !== "quarantined") {
-          const argument = relation.foreignKeyCheck.replaceAll("'", "''");
-          await tx.unsafe(`CREATE TRIGGER paperclip_vector_foreign_refs BEFORE INSERT OR UPDATE ON ${target}
-            FOR EACH ROW EXECUTE FUNCTION llm.paperclip_vector_check_foreign_refs('${argument}')`);
+        const state = row as unknown as RelationCatalogRow & {
+          base_permissive: boolean | null; base_cmd: string | null; base_applies: boolean | null;
+          base_using: string | null; base_check: string | null; has_trigger: boolean; privileges: string[];
+        };
+        if (
+          gateIsCurrent(relation, state) && foreignRefGuardIsCurrent(relation, state) &&
+          (expectsForeignRefGuard(relation) || !state.has_trigger) &&
+          state.base_permissive === true && state.base_cmd === "*" && state.base_applies === true &&
+          state.base_using === "true" && state.base_check === "true" &&
+          state.privileges.join(",") === runtimePrivileges(relation).join(",")
+        ) continue;
+        try {
+          await tx.unsafe(`ALTER TABLE ${target} ENABLE ROW LEVEL SECURITY`);
+          // Restrictive gate cannot be widened by an existing permissive policy.
+          await tx.unsafe(`DROP POLICY IF EXISTS ${POLICY} ON ${target}`);
+          await tx.unsafe(`DROP POLICY IF EXISTS ${POLICY}_gate ON ${target}`);
+          await tx.unsafe(`CREATE POLICY ${POLICY} ON ${target} TO ${VECTOR_RUNTIME_DATABASE_ROLE} USING (true) WITH CHECK (true)`);
+          await tx.unsafe(`CREATE POLICY ${POLICY}_gate ON ${target} AS RESTRICTIVE TO ${VECTOR_RUNTIME_DATABASE_ROLE} USING (${relation.using}) WITH CHECK (${relation.check})`);
+          const [policy] = await tx`SELECT md5(pg_get_expr(polqual, polrelid) || '|' || pg_get_expr(polwithcheck, polrelid)) AS digest
+            FROM pg_policy WHERE polrelid = ${target}::regclass AND polname = ${POLICY + "_gate"}`;
+          await tx.unsafe(`COMMENT ON POLICY ${POLICY}_gate ON ${target} IS '${policyFingerprint(relation)}:${policy!.digest}'`);
+          await tx.unsafe(`DROP TRIGGER IF EXISTS paperclip_vector_foreign_refs ON ${target}`);
+          if (expectsForeignRefGuard(relation)) {
+            const argument = relation.foreignKeyCheck.replaceAll("'", "''");
+            await tx.unsafe(`CREATE TRIGGER paperclip_vector_foreign_refs BEFORE INSERT OR UPDATE ON ${target}
+              FOR EACH ROW EXECUTE FUNCTION llm.paperclip_vector_check_foreign_refs('${argument}')`);
+          }
+          await tx.unsafe(`REVOKE ALL ON ${target} FROM ${VECTOR_RUNTIME_DATABASE_ROLE}`);
+          await tx.unsafe(`GRANT ${runtimePrivileges(relation).join(", ")} ON ${target} TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
+        } catch (error) {
+          const code = (error as { code?: string }).code;
+          if (code === "55P03" || code === "40P01") {
+            throw new Error(
+              `Vector runtime isolation ${code === "55P03" ? `lock timeout (${lockTimeoutMs}ms)` : "deadlock"} on relation ${target}: ` +
+              "a live Paperclip server holds a conflicting lock; stop the servers using this database and retry",
+              { cause: error },
+            );
+          }
+          throw error;
         }
-        await tx.unsafe(`REVOKE ALL ON ${target} FROM ${VECTOR_RUNTIME_DATABASE_ROLE}`);
-        const privileges = relation.readOnly || relation.mode === "quarantined" ? "SELECT"
-          : relation.table === "companies" ? "SELECT, UPDATE" : "SELECT, INSERT, UPDATE, DELETE";
-        await tx.unsafe(`GRANT ${privileges} ON ${target} TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
       }
-      await tx.unsafe(`GRANT SELECT ON llm.paperclip_migrations TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
+      const [held] = await tx`SELECT
+          has_table_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, 'llm.paperclip_migrations', 'SELECT') AS migrations,
+          has_sequence_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, 'llm.chat_telegram_draft_ids', 'USAGE') AS sequence`;
+      if (!held!.migrations) await tx.unsafe(`GRANT SELECT ON llm.paperclip_migrations TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
       // A monotonic transport identifier, not a scheduler or company-data table.
-      await tx.unsafe(`GRANT USAGE ON SEQUENCE llm.chat_telegram_draft_ids TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
+      if (!held!.sequence) await tx.unsafe(`GRANT USAGE ON SEQUENCE llm.chat_telegram_draft_ids TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
     });
     return {
       scopedTables: relations.filter((row) => !["quarantined", "vector-parent"].includes(row.mode)).length,
@@ -261,16 +356,13 @@ export async function assertVectorRuntimeIsolation(
     for (const relation of relations) {
       if (relation.mode === "vector-parent") continue;
       const row = byName.get(relation.table);
-      if (!row || !row.relrowsecurity || row.owned || row.polpermissive !== false || row.polcmd !== "*" || !row.applies ||
-          row.dangerous_grant || row.fingerprint !== `${policyFingerprint(relation)}:${row.digest}`) {
+      if (!row || row.dangerous_grant || !gateIsCurrent(relation, row as unknown as RelationCatalogRow)) {
         throw new Error(`Vector runtime isolation policy is missing or unsafe: ${relation.table}`);
       }
       if ((relation.readOnly && row.can_write) || (relation.table === "companies" && row.can_create_delete)) {
         throw new Error(`Vector runtime control-plane relation is overprivileged: ${relation.table}`);
       }
-      if (relation.foreignKeyCheck && !relation.readOnly && (
-          row.tgenabled !== "O" || row.tgtype !== 23 || !row.trigger_function ||
-          row.trigger_args !== Buffer.from(relation.foreignKeyCheck + "\0").toString("hex"))) {
+      if (!foreignRefGuardIsCurrent(relation, row as unknown as RelationCatalogRow)) {
         throw new Error(`Vector runtime foreign-reference guard is missing or unsafe: ${relation.table}`);
       }
     }

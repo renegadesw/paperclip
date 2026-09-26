@@ -167,4 +167,61 @@ embedded("shared runtime role on real PostgreSQL", () => {
     await expect(installVectorRuntimeIsolation(database.connectionString)).rejects.toThrow(/outside its managed relations/);
     expect(await admin`SELECT relrowsecurity FROM pg_class WHERE oid = 'llm.agents'::regclass`).toEqual([{ relrowsecurity: false }]);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it("converges without DDL beside live servers and fails fast on a genuine conflicting change", async () => {
+    const database = await startEmbeddedPostgresTestDatabase("paperclip-runtime-isolation-locks-");
+    cleanups.push(database.cleanup);
+    const admin = postgres(database.connectionString, { max: 1, onnotice: () => {} });
+    cleanups.push(() => admin.end({ timeout: 1 }));
+    await admin.unsafe("ALTER SCHEMA llm RENAME TO prior_standalone_llm");
+    await applyPendingMigrations(database.connectionString, "vector-embedded");
+    const receipt = await installVectorRuntimeIsolation(database.connectionString);
+    const managed = [...vectorIsolationRelations().filter((row) => row.mode !== "vector-parent").map((row) => row.table), "paperclip_migrations"];
+
+    // Another session stands in for a live server's open scheduler transaction.
+    const live = postgres(database.connectionString, { max: 1, onnotice: () => {} });
+    cleanups.push(() => live.end({ timeout: 1 }));
+    const holdShareLocks = async (tables: string[]) => {
+      const session = await live.reserve();
+      await session.unsafe("BEGIN");
+      await session.unsafe(`LOCK TABLE ${tables.map((table) => `llm."${table}"`).join(", ")} IN ACCESS SHARE MODE`);
+      return async () => { await session.unsafe("ROLLBACK"); session.release(); };
+    };
+
+    // (a) A converged rerun issues no DDL, so it never waits on the live locks.
+    let release = await holdShareLocks(managed);
+    const started = Date.now();
+    await expect(installVectorRuntimeIsolation(database.connectionString, { lockTimeoutMs: 1_000 })).resolves.toEqual(receipt);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await release();
+
+    // (b) A newly migrated (not yet scoped) table is installed while the rest stay share-locked.
+    await admin.unsafe(`DROP TRIGGER paperclip_vector_foreign_refs ON llm.vector_ingress_branches;
+      DROP POLICY paperclip_vector_runtime_v1_gate ON llm.vector_ingress_branches;
+      DROP POLICY paperclip_vector_runtime_v1 ON llm.vector_ingress_branches;
+      REVOKE ALL ON llm.vector_ingress_branches FROM paperclip_runtime;
+      ALTER TABLE llm.vector_ingress_branches DISABLE ROW LEVEL SECURITY`);
+    release = await holdShareLocks(managed.filter((table) => table !== "vector_ingress_branches"));
+    await expect(installVectorRuntimeIsolation(database.connectionString, { lockTimeoutMs: 1_000 })).resolves.toEqual(receipt);
+    await release();
+    expect(await admin`SELECT c.relrowsecurity,
+        (SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = c.oid AND p.polname LIKE 'paperclip_vector_runtime_v1%') AS policies,
+        (SELECT count(*)::int FROM pg_trigger t WHERE t.tgrelid = c.oid AND t.tgname = 'paperclip_vector_foreign_refs') AS triggers,
+        has_table_privilege('paperclip_runtime', c.oid, 'INSERT') AS writable
+      FROM pg_class c WHERE c.oid = 'llm.vector_ingress_branches'::regclass`).toEqual([
+      { relrowsecurity: true, policies: 2, triggers: 1, writable: true },
+    ]);
+
+    // (c) A drifted policy on a table a live server is reading fails fast with a named lock timeout.
+    await admin.unsafe("ALTER POLICY paperclip_vector_runtime_v1_gate ON llm.agents USING (true)");
+    release = await holdShareLocks(["agents"]);
+    const conflicted = Date.now();
+    await expect(installVectorRuntimeIsolation(database.connectionString, { lockTimeoutMs: 500 }))
+      .rejects.toThrow(/lock timeout \(500ms\) on relation llm\."agents"/);
+    expect(Date.now() - conflicted).toBeLessThan(5_000);
+    await release();
+    await installVectorRuntimeIsolation(database.connectionString, { lockTimeoutMs: 1_000 });
+    expect(await admin`SELECT pg_get_expr(polqual, polrelid) <> 'true' AS repaired FROM pg_policy
+      WHERE polrelid = 'llm.agents'::regclass AND polname = 'paperclip_vector_runtime_v1_gate'`).toEqual([{ repaired: true }]);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 });
