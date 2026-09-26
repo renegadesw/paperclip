@@ -7,6 +7,7 @@ import {
   resolveVectorProviderAuthorityConfig,
   setActiveVectorProviderAuthorityBridge,
   signVectorProviderRedeem,
+  validateVectorProviderRedemption,
   VectorProviderAuthorityBridge,
 } from "../services/vector-provider-authority.js";
 import {
@@ -15,6 +16,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 
 const secret = "vector-provider-authority-test-secret-32-plus";
+const routerToken = "header.payload.signature-with-32-bytes";
 
 describe("Vector provider authority configuration", () => {
   it("is disabled by default and accepts only a complete loopback contract", () => {
@@ -83,6 +85,31 @@ describe("Vector provider authority configuration", () => {
       details: { code: "vector_provider_authority_unavailable" },
     });
   });
+
+  it("allows extended grants only through the exact literal-loopback parent proxy", () => {
+    const now = Date.parse("2026-09-26T04:00:00Z");
+    const expiresAt = new Date(now + 90 * 60_000).toISOString();
+    expect(validateVectorProviderRedemption({
+      version: 1,
+      router_url: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+      router_token: "opaque-parent-proxy-capability-32-bytes",
+      expires_at: expiresAt,
+    }, now)).toMatchObject({
+      baseUrl: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+    });
+    for (const routerUrl of [
+      "https://router.example.invalid",
+      "http://127.0.0.1:8431/internal/paperclip/v1/not-router",
+      "http://localhost:8431/internal/paperclip/v1/router",
+    ]) {
+      expect(() => validateVectorProviderRedemption({
+        version: 1,
+        router_url: routerUrl,
+        router_token: "opaque-parent-proxy-capability-32-bytes",
+        expires_at: expiresAt,
+      }, now)).toThrow(/invalid expiry/);
+    }
+  });
 });
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -150,12 +177,12 @@ const support = await getEmbeddedPostgresTestSupport();
         return new Response(JSON.stringify({
           version: 1,
           router_url: "http://127.0.0.1:1250",
-          router_token: "header.payload.signature",
+          router_token: routerToken,
           expires_at: new Date(now + 5 * 60_000).toISOString(),
         }), { status: 200 });
       }
       expect(String(input)).toBe("http://127.0.0.1:1250/api/router/runtime-catalog");
-      expect(init?.headers).toMatchObject({ authorization: "Bearer header.payload.signature" });
+      expect(init?.headers).toMatchObject({ authorization: `Bearer ${routerToken}` });
       return new Response(JSON.stringify({
         provider: "router",
         api: "anthropic-messages",
@@ -194,7 +221,7 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(access).toMatchObject({
       providerId: "router",
       baseUrl: "http://127.0.0.1:1250",
-      apiKey: "header.payload.signature",
+      apiKey: routerToken,
       models: [{ id: "Qwen3.8-Flash", contextWindow: 131072, maxTokens: 32768 }],
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -203,6 +230,54 @@ const support = await getEmbeddedPostgresTestSupport();
     const persisted = await db.select({ context: heartbeatRuns.contextSnapshot })
       .from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]?.context);
     expect(JSON.stringify(persisted)).not.toContain("opaque-provider-handle");
-    expect(JSON.stringify(persisted)).not.toContain("header.payload.signature");
+    expect(JSON.stringify(persisted)).not.toContain(routerToken);
+  });
+
+  it("accepts a longer parent-proxy capability only on the exact loopback proxy path", async () => {
+    const now = Date.parse("2026-09-26T04:00:00Z");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/internal/paperclip/v1/providers/redeem")) {
+        return new Response(JSON.stringify({
+          version: 1,
+          router_url: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+          router_token: "opaque-parent-proxy-capability-32-bytes",
+          expires_at: new Date(now + 90 * 60_000).toISOString(),
+        }), { status: 200 });
+      }
+      expect(String(input)).toBe(
+        "http://127.0.0.1:8431/internal/paperclip/v1/router/api/router/runtime-catalog",
+      );
+      return new Response(JSON.stringify({
+        provider: "router",
+        api: "anthropic-messages",
+        models: [{ id: "Qwen3.8-Flash", context_window: 131072, max_tokens: 32768 }],
+      }), { status: 200 });
+    });
+    const bridge = new VectorProviderAuthorityBridge(db, {
+      endpoint: new URL("http://127.0.0.1:8431/internal/paperclip/v1/providers/redeem"),
+      installationId: "t480-funkydev",
+      profile: "engineering",
+      secret,
+      ttlSeconds: 7200,
+    }, fetchMock as typeof fetch, () => now);
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId,
+      status: "queued",
+      contextSnapshot: { issueId },
+    }).returning();
+    await bridge.bindRun({
+      companyId,
+      agentId,
+      externalSessionId: "parent-proxy-session",
+      issueId,
+      runId: run.id,
+      authorityHandle: "opaque-parent-proxy-handle",
+    });
+    await expect(bridge.runtimeAccess({ runId: run.id, companyId, agentId, issueId }))
+      .resolves.toMatchObject({
+        baseUrl: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+        apiKey: "opaque-parent-proxy-capability-32-bytes",
+      });
   });
 });

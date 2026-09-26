@@ -158,7 +158,18 @@ function boundedHandle(value: string): string {
   return handle;
 }
 
-function parseRouterUrl(raw: unknown): string {
+function isLiteralLoopbackHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  if (host === "::1") return true;
+  const octets = host.split(".");
+  return octets.length === 4 && octets[0] === "127" && octets.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const value = Number(part);
+    return value >= 0 && value <= 255 && String(value) === part;
+  });
+}
+
+function parseRouterUrl(raw: unknown): { baseUrl: string; parentProxy: boolean } {
   if (typeof raw !== "string") throw new Error("Vector provider redemption returned an invalid router URL");
   let url: URL;
   try {
@@ -176,15 +187,18 @@ function parseRouterUrl(raw: unknown): string {
   ) {
     throw new Error("Vector provider redemption returned an invalid router URL");
   }
-  return url.toString().replace(/\/$/, "");
+  const parentProxy = url.protocol === "http:" &&
+    isLiteralLoopbackHostname(url.hostname) &&
+    url.pathname === "/internal/paperclip/v1/router";
+  return { baseUrl: url.toString().replace(/\/$/, ""), parentProxy };
 }
 
 function parseRouterToken(raw: unknown): string {
   if (
     typeof raw !== "string" ||
-    raw.length > 16_384 ||
+    raw.length < 32 || raw.length > 16_384 ||
     stringsWithWhitespace(raw) ||
-    raw.split(".").length !== 3
+    !/^[\x21-\x7e]+$/.test(raw)
   ) {
     throw new Error("Vector provider redemption returned an invalid router token");
   }
@@ -193,6 +207,23 @@ function parseRouterToken(raw: unknown): string {
 
 function stringsWithWhitespace(value: string): boolean {
   return /\s/.test(value);
+}
+
+export function validateVectorProviderRedemption(
+  redeemed: Record<string, unknown>,
+  now: number,
+): { baseUrl: string; apiKey: string; expiry: number } {
+  if (redeemed.version !== 1) {
+    throw new Error("Vector provider redemption returned an unsupported version");
+  }
+  const { baseUrl, parentProxy } = parseRouterUrl(redeemed.router_url);
+  const apiKey = parseRouterToken(redeemed.router_token);
+  const expiry = typeof redeemed.expires_at === "string" ? Date.parse(redeemed.expires_at) : NaN;
+  const maximumGrantLifetime = parentProxy ? 2 * 60 * 60_000 : 10 * 60_000 + 5_000;
+  if (!Number.isFinite(expiry) || expiry <= now || expiry > now + maximumGrantLifetime) {
+    throw new Error("Vector provider redemption returned an invalid expiry");
+  }
+  return { baseUrl, apiKey, expiry };
 }
 
 async function boundedJson(response: Response, maxBytes: number, label: string): Promise<unknown> {
@@ -371,13 +402,7 @@ export class VectorProviderAuthorityBridge {
     });
     if (!response.ok) throw new Error(`Vector provider redemption failed with status ${response.status}`);
     const redeemed = await boundedJson(response, MAX_REDEEM_BYTES, "Vector provider redemption") as Record<string, unknown>;
-    if (redeemed.version !== 1) throw new Error("Vector provider redemption returned an unsupported version");
-    const baseUrl = parseRouterUrl(redeemed.router_url);
-    const apiKey = parseRouterToken(redeemed.router_token);
-    const expiry = typeof redeemed.expires_at === "string" ? Date.parse(redeemed.expires_at) : NaN;
-    if (!Number.isFinite(expiry) || expiry <= this.now() || expiry > this.now() + 10 * 60_000 + 5_000) {
-      throw new Error("Vector provider redemption returned an invalid expiry");
-    }
+    const { baseUrl, apiKey, expiry } = validateVectorProviderRedemption(redeemed, this.now());
     const catalogResponse = await this.fetchImpl(`${baseUrl}/api/router/runtime-catalog`, {
       method: "GET",
       redirect: "error",

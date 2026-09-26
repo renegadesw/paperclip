@@ -152,6 +152,12 @@ writes one run-private Pi `models.json` in a `0700` managed directory with mode
 router token, and database credentials are not child environment variables or
 invocation metadata. The managed directory is removed after execution.
 
+Direct router grants are bounded to ten minutes plus clock tolerance. A grant
+may last up to two hours only when its URL is the exact literal-loopback parent
+proxy path `/internal/paperclip/v1/router`. That Vector OS proxy owns upstream
+Gleiss exchange/renewal per request, so a turn resumed after a blocking tool
+does not hold or outlive a real router token in the Pi process.
+
 Provider grants are memory-only and fail closed after a Paperclip restart. The
 run cannot fall back to a deployment-wide provider credential when its provider
 authority is missing, expired, mismatched, or unavailable. When the bridge is
