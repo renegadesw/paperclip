@@ -114,6 +114,17 @@ const vectorPersonaTurnSchema = z.object({
   systemPrompt: z.string().min(1).max(750_000),
 }).strict();
 
+const vectorRepositoryContextSchema = z.object({
+  schemaVersion: z.literal(1),
+  repository: z.string().min(3).max(201).refine(
+    (value) => {
+      if (value.trim() !== value || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) return false;
+      return value.split("/").every((part) => part !== "." && part !== "..");
+    },
+    "repository must be an exact owner/name identifier",
+  ),
+}).strict();
+
 const ownerScopeSchema = z.object({
   companyId: z.string().uuid(),
   agentId: z.string().uuid(),
@@ -139,6 +150,7 @@ const turnSchema = z.object({
   launchContext: vectorWorkloadLaunchSchema.optional(),
   roleContext: vectorRoleTurnSchema.optional(),
   personaContext: vectorPersonaTurnSchema.optional(),
+  repositoryContext: vectorRepositoryContextSchema.optional(),
   baseCursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   runtimeSelection: z.object({
     model: boundedOpaqueId("model", 256).refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)),
@@ -204,6 +216,18 @@ const transcriptSchema = ownerScopeSchema.extend({
   cursor: z.string().trim().min(1).max(2048).optional(),
   limit: z.number().int().min(1).max(500).optional(),
 });
+
+const branchScopeSchema = ownerScopeSchema.extend({
+  externalSessionId: boundedOpaqueId("externalSessionId", 512),
+}).strict();
+
+const forkBranchSchema = branchScopeSchema.extend({
+  entryId: boundedOpaqueId("entryId", 256),
+}).strict();
+
+const switchBranchSchema = branchScopeSchema.extend({
+  branchId: z.string().uuid(),
+}).strict();
 
 const cursorPositionSchema = z.object({
   at: z.string().datetime({ offset: true }),
@@ -524,6 +548,18 @@ export function vectorIngressRoutes(
   router.post("/sessions/runtime", async (req, res) => {
     const input = runtimeSelectionSchema.parse(req.body);
     res.json(await service.configureRuntime(input));
+  });
+
+  router.post("/sessions/branches/list", async (req, res) => {
+    res.json(await service.listBranches(branchScopeSchema.parse(req.body)));
+  });
+
+  router.post("/sessions/branches/fork", async (req, res) => {
+    res.status(201).json(await service.forkBranch(forkBranchSchema.parse(req.body)));
+  });
+
+  router.post("/sessions/branches/switch", async (req, res) => {
+    res.json(await service.switchBranch(switchBranchSchema.parse(req.body)));
   });
 
   router.post("/sessions/list", async (req, res) => {

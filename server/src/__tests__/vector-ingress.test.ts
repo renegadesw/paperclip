@@ -127,6 +127,9 @@ describe("Vector ingress service authentication", () => {
       hasMore: false,
       nextPosition: null,
     });
+    const listBranches = vi.fn().mockResolvedValue({ points: [], branches: [] });
+    const forkBranch = vi.fn().mockResolvedValue({ forked: true, text: "prompt" });
+    const switchBranch = vi.fn().mockResolvedValue({ switched: true });
     const app = express();
     app.use(
       express.json({
@@ -152,6 +155,9 @@ describe("Vector ingress service authentication", () => {
           events: vi.fn(),
           inventory,
           transcript,
+          listBranches,
+          forkBranch,
+          switchBranch,
         } as never,
         now: () => 1_700_000_000_000,
       }),
@@ -178,6 +184,11 @@ describe("Vector ingress service authentication", () => {
       ...imageBody,
       clientRequestId: "request-image-invalid",
       images: [{ type: "image", data: "%%%", mimeType: "image/jpeg" }],
+    }).expect(400);
+    await signedPost(app, path, {
+      ...body,
+      clientRequestId: "request-repository-invalid",
+      repositoryContext: { schemaVersion: 1, repository: "../escape" },
     }).expect(400);
     await signedPost(app, path, { ...body, externalSessionId: " padded" }).expect(
       400,
@@ -219,6 +230,32 @@ describe("Vector ingress service authentication", () => {
     };
     await signedPost(app, transcriptPath, transcriptBody).expect(200);
     expect(transcript).toHaveBeenCalledExactlyOnceWith(transcriptBody);
+
+    const branchBody = {
+      companyId: runtimeScope.companyId,
+      agentId: runtimeScope.allowedAgentIds[0],
+      ownerId: "authenticated-owner",
+      installationId: runtimeScope.installationId,
+      profileId: runtimeScope.profile,
+      externalSessionId: "client-session",
+    };
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/list", branchBody).expect(200);
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/fork", {
+      ...branchBody, entryId: "prompt-entry",
+    }).expect(201);
+    const branchId = randomUUID();
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/switch", {
+      ...branchBody, branchId,
+    }).expect(200);
+    expect(listBranches).toHaveBeenCalledExactlyOnceWith(branchBody);
+    expect(forkBranch).toHaveBeenCalledExactlyOnceWith({ ...branchBody, entryId: "prompt-entry" });
+    expect(switchBranch).toHaveBeenCalledExactlyOnceWith({ ...branchBody, branchId });
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/fork", {
+      ...branchBody, entryId: " prompt-entry",
+    }).expect(400);
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/switch", {
+      ...branchBody, branchId: "/managed/pi/source.jsonl",
+    }).expect(400);
 
     await signedPost(app, path, { ...body, companyId: randomUUID() }).expect(401);
     await signedPost(app, path, { ...body, agentId: randomUUID() }).expect(401);
@@ -1087,7 +1124,7 @@ Complete the brief as fully as the explicitly granted conversation tools allow. 
 
     it("admits builtin tools only for the exact engineering todo alias", async () => {
       const service = vectorIngressService(db, { heartbeat });
-      await expect(service.addTurn({
+      const plain = {
         companyId,
         agentId: engineeringAgentId,
         externalSessionId: "engineering-browser-chat",
@@ -1096,7 +1133,9 @@ Complete the brief as fully as the explicitly granted conversation tools allow. 
         profileId: "engineering",
         clientRequestId: "engineering-browser-chat-1",
         body: "Keep the configured FunkyDev runtime.",
-      })).resolves.toMatchObject({ replayed: false });
+      };
+      await expect(service.addTurn(plain)).resolves.toMatchObject({ replayed: false });
+      await expect(service.status(plain)).resolves.toMatchObject({ sessionRole: "pi", repository: null });
       const roleContext = {
         schemaVersion: 1 as const,
         role: "implementation-worker",
@@ -1119,6 +1158,7 @@ Complete the brief as fully as the explicitly granted conversation tools allow. 
         clientRequestId: "engineering-todo-launch",
         body: "Implement the bounded brief.",
         roleContext,
+        repositoryContext: { schemaVersion: 1 as const, repository: "renegadesw/vector" },
         runtimeSelection: { model: "Qwen3.8-Flash", thinking: "high" as const },
       };
       const turn = await service.addTurn(base);
@@ -1127,6 +1167,18 @@ Complete the brief as fully as the explicitly granted conversation tools allow. 
         .then((rows) => rows[0]?.context as Record<string, unknown>);
       expect(runContext.vectorRoleTurn).toEqual(roleContext);
       expect(runContext.vectorRuntimeSelection).toEqual(base.runtimeSelection);
+      await expect(service.status(base)).resolves.toMatchObject({
+        sessionRole: "implementation-worker",
+        repository: "renegadesw/vector",
+      });
+      await expect(service.addTurn({
+        ...base,
+        clientRequestId: "engineering-todo-repository-drift",
+        repositoryContext: { schemaVersion: 1, repository: "renegadesw/other" },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_ingress_session_binding_mismatch" },
+      });
       await expect(service.addTurn({
         ...base,
         externalSessionId: "todo-c757f88d-7062-4e72-939e-f6230cfcad7a-deadbeefdeadbeefdeadbeefdeadbeef",
