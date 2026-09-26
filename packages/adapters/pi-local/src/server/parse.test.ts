@@ -1,5 +1,99 @@
 import { describe, expect, it } from "vitest";
-import { parsePiJsonl, isPiUnknownSessionError } from "./parse.js";
+import { extractPiRuntimeEvents, parsePiJsonl, isPiUnknownSessionError } from "./parse.js";
+
+describe("extractPiRuntimeEvents", () => {
+  it("normalizes text, tool lifecycle, usage, final, and settled events", () => {
+    const toolCallId = "call-preserve-this-exact-id";
+    const lines = [
+      {
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "Working" },
+      },
+      {
+        type: "tool_execution_start",
+        toolCallId,
+        toolName: "read",
+        args: { path: "README.md" },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId,
+        toolName: "read",
+        args: { path: "README.md" },
+        partialResult: { content: "partial" },
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId,
+        toolName: "read",
+        result: { content: "complete" },
+        isError: false,
+      },
+      {
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Finished" }],
+          stopReason: "stop",
+          usage: { input: 12, output: 4, cacheRead: 2, cost: { total: 0.003 } },
+        },
+      },
+      { type: "agent_settled" },
+    ];
+
+    const events = lines.flatMap((line) => extractPiRuntimeEvents(JSON.stringify(line)));
+
+    expect(events.map((event) => event.eventType)).toEqual([
+      "assistant_delta",
+      "tool_call",
+      "tool_update",
+      "tool_result",
+      "assistant_final",
+      "usage",
+      "agent_settled",
+    ]);
+    expect(events.filter((event) => event.eventType.startsWith("tool")).map((event) => event.payload?.toolCallId))
+      .toEqual([toolCallId, toolCallId, toolCallId]);
+    expect(events.find((event) => event.eventType === "usage")?.payload).toEqual({
+      inputTokens: 12,
+      outputTokens: 4,
+      cachedInputTokens: 2,
+      costUsd: 0.003,
+    });
+    expect(events.at(-1)).toMatchObject({
+      eventType: "agent_settled",
+      stream: "system",
+      payload: { settled: true },
+    });
+  });
+
+  it("normalizes direct, RPC, retry, and provider errors", () => {
+    const events = [
+      { type: "error", message: "socket closed" },
+      { type: "response", id: "request-1", command: "prompt", success: false, error: "busy" },
+      { type: "auto_retry_end", success: false, finalError: "quota exhausted" },
+      {
+        type: "turn_end",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider failed" },
+      },
+    ].flatMap((line) => extractPiRuntimeEvents(JSON.stringify(line)));
+
+    expect(events.map((event) => event.message)).toEqual([
+      "socket closed",
+      "prompt: busy",
+      "quota exhausted",
+      "provider failed",
+    ]);
+    expect(events.every((event) => event.eventType === "error" && event.level === "error")).toBe(true);
+    expect(events[1]?.payload).toMatchObject({ source: "rpc", command: "prompt", requestId: "request-1" });
+  });
+
+  it("ignores malformed and non-actionable protocol lines", () => {
+    expect(extractPiRuntimeEvents("not json")).toEqual([]);
+    expect(extractPiRuntimeEvents(JSON.stringify({ type: "response", command: "prompt", success: true }))).toEqual([]);
+    expect(extractPiRuntimeEvents(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "hmm" } }))).toEqual([]);
+  });
+});
 
 describe("parsePiJsonl", () => {
   it("parses agent lifecycle and messages", () => {
