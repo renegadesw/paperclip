@@ -57,6 +57,7 @@ import { extractPiRuntimeEvents, isPiUnknownSessionError, parsePiJsonl } from ".
 import { ensurePiModelConfiguredAndAvailable } from "./models.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { buildPiBuiltinToolArgs } from "./tools.js";
+import { prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -310,7 +311,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE
       : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
-  const command = asString(config.command, "pi");
+  const deploymentPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND?.trim() || undefined;
+  const command = asString(config.command, deploymentPiCommand ?? "pi");
   const model = asString(config.model, "").trim();
   const thinking = asString(config.thinking, "").trim();
   const executionMode = asString(
@@ -322,6 +324,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       `Unsupported Pi executionMode "${executionMode}". Expected "json" or "rpc".`,
     );
   }
+  const extraArgs = (() => {
+    const fromExtraArgs = asStringArray(config.extraArgs);
+    if (fromExtraArgs.length > 0) return fromExtraArgs;
+    return asStringArray(config.args);
+  })();
+  const vectorProfilePolicy = await prepareVectorPiProfilePolicy({
+    profile: process.env.PAPERCLIP_VECTOR_PROFILE,
+    config,
+    extraArgs,
+    packagedExtensionsJson: process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS,
+    command,
+    deploymentCommand: deploymentPiCommand,
+  });
 
   // Parse model into provider and model id
   const provider = parseModelProvider(model);
@@ -350,9 +365,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await ensureSessionsDir();
   }
 
-  const piSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
-  const desiredPiSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, piSkillEntries);
-  if (!executionTargetIsRemote) {
+  // Restricted Vector profiles deliberately ignore runtime skill paths and
+  // selections carried in mutable agent config. The bundled Paperclip
+  // operational skill remains mounted explicitly below, even while Pi's
+  // ambient skill discovery is disabled.
+  const runtimeSkillConfig = vectorProfilePolicy.useBundledPaperclipSkillsOnly ? {} : config;
+  const piSkillEntries = await readPaperclipRuntimeSkillEntries(runtimeSkillConfig, __moduleDir);
+  const desiredPiSkillNames = resolveLegacyPaperclipDesiredSkillNames(
+    runtimeSkillConfig,
+    piSkillEntries,
+  );
+  if (!executionTargetIsRemote && !vectorProfilePolicy.restricted) {
     await ensurePiSkillsInjected(onLog, piSkillEntries, desiredPiSkillNames);
   }
 
@@ -417,7 +440,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // Materialize custom Pi providers (PAPERCLIP_PI_PROVIDERS) into a managed
   // PI_CODING_AGENT_DIR before runtimeEnv is computed, so both local validation
   // and the spawned Pi process resolve models against the managed models.json.
-  const preparedRuntimeConfig = await preparePiRuntimeConfig({ env });
+  const preparedRuntimeConfig = await preparePiRuntimeConfig({
+    env,
+    forceManagedAgentDir: vectorProfilePolicy.restricted,
+  });
   const localAgentConfigDir = preparedRuntimeConfig.agentConfigDir ?? "";
   if (localAgentConfigDir) {
     env.PI_CODING_AGENT_DIR = localAgentConfigDir;
@@ -484,23 +510,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         command,
         cwd,
         env: runtimeEnv,
+        extraArgs: vectorProfilePolicy.discoveryCliArgs,
       });
     }
 
-    const extraArgs = (() => {
-      const fromExtraArgs = asStringArray(config.extraArgs);
-      if (fromExtraArgs.length > 0) return fromExtraArgs;
-      return asStringArray(config.args);
-    })();
     let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
     let remoteRuntimeRootDir: string | null = null;
     let localSkillsDir: string | null = null;
     let remoteSkillsDir: string | null = null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
 
+    if (vectorProfilePolicy.restricted && !executionTargetIsRemote) {
+      localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig);
+    }
+
     if (executionTargetIsRemote) {
       try {
-        localSkillsDir = await buildPiSkillsDir(config);
+        localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig);
         await onLog(
           "stdout",
           `[paperclip] Syncing workspace and Pi runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
@@ -769,8 +795,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         vectorProfile: process.env.PAPERCLIP_VECTOR_PROFILE,
         extraArgs,
       }));
+      args.push(...vectorProfilePolicy.cliArgs);
       args.push("--session", sessionFile);
-      args.push("--skill", remoteSkillsDir ?? PI_AGENT_SKILLS_DIR);
+      args.push("--skill", remoteSkillsDir ?? localSkillsDir ?? PI_AGENT_SKILLS_DIR);
 
       if (extraArgs.length > 0) args.push(...extraArgs);
 

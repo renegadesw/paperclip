@@ -21,6 +21,8 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import { discoverPiModelsCached } from "./models.js";
 import { parsePiJsonl } from "./parse.js";
+import { preparePiRuntimeConfig } from "./runtime-config.js";
+import { prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
@@ -83,7 +85,36 @@ export async function testEnvironment(
 ): Promise<AdapterEnvironmentTestResult> {
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
-  const command = asString(config.command, "pi");
+  const deploymentPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND?.trim() || undefined;
+  const command = asString(config.command, deploymentPiCommand ?? "pi");
+  const extraArgs = (() => {
+    const fromExtraArgs = asStringArray(config.extraArgs);
+    if (fromExtraArgs.length > 0) return fromExtraArgs;
+    return asStringArray(config.args);
+  })();
+  let vectorProfilePolicy;
+  try {
+    vectorProfilePolicy = await prepareVectorPiProfilePolicy({
+      profile: process.env.PAPERCLIP_VECTOR_PROFILE,
+      config,
+      extraArgs,
+      packagedExtensionsJson: process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS,
+      command,
+      deploymentCommand: deploymentPiCommand,
+    });
+  } catch (error) {
+    checks.push({
+      code: "pi_vector_profile_policy_invalid",
+      level: "error",
+      message: error instanceof Error ? error.message : "Invalid Vector Pi profile policy.",
+    });
+    return {
+      adapterType: ctx.adapterType,
+      status: "fail",
+      checks,
+      testedAt: new Date().toISOString(),
+    };
+  }
   const target = ctx.executionTarget ?? null;
   const targetIsRemote = target?.kind === "remote";
   const cwd = resolveAdapterExecutionTargetCwd(target, asString(config.cwd, ""), process.cwd());
@@ -125,6 +156,14 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
+  const preparedRuntimeConfig = await preparePiRuntimeConfig({
+    env,
+    // Environment tests do not stage local assets onto remote targets. The
+    // restricted remote hello probe still receives the discovery/tool ceiling;
+    // full executions use execute.ts's staged managed config directory.
+    forceManagedAgentDir: vectorProfilePolicy.restricted && !targetIsRemote,
+  });
+  Object.assign(env, preparedRuntimeConfig.env);
   const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env }));
 
   const cwdInvalid = checks.some((check) => check.code === "pi_cwd_invalid");
@@ -170,7 +209,12 @@ export async function testEnvironment(
   // model/auth issues directly.
   if (!targetIsRemote && canRunProbe) {
     try {
-      const discovered = await discoverPiModelsCached({ command, cwd, env: runtimeEnv });
+      const discovered = await discoverPiModelsCached({
+        command,
+        cwd,
+        env: runtimeEnv,
+        extraArgs: vectorProfilePolicy.discoveryCliArgs,
+      });
       if (discovered.length > 0) {
         checks.push({
           code: "pi_models_discovered",
@@ -211,7 +255,12 @@ export async function testEnvironment(
   } else if (canRunProbe) {
     // Verify model is in the list
     try {
-      const discovered = await discoverPiModelsCached({ command, cwd, env: runtimeEnv });
+      const discovered = await discoverPiModelsCached({
+        command,
+        cwd,
+        env: runtimeEnv,
+        extraArgs: vectorProfilePolicy.discoveryCliArgs,
+      });
       const modelExists = discovered.some((m: { id: string }) => m.id === configuredModel);
       if (modelExists) {
         checks.push({
@@ -246,17 +295,15 @@ export async function testEnvironment(
       ? configuredModel.slice(configuredModel.indexOf("/") + 1)
       : configuredModel;
     const thinking = asString(config.thinking, "").trim();
-    const extraArgs = (() => {
-      const fromExtraArgs = asStringArray(config.extraArgs);
-      if (fromExtraArgs.length > 0) return fromExtraArgs;
-      return asStringArray(config.args);
-    })();
-
     const args = ["-p", "Respond with hello.", "--mode", "json"];
     if (provider) args.push("--provider", provider);
     if (modelId) args.push("--model", modelId);
     if (thinking) args.push("--thinking", thinking);
-    args.push("--tools", "read");
+    if (vectorProfilePolicy.restricted) {
+      args.push("--no-builtin-tools", ...vectorProfilePolicy.cliArgs);
+    } else {
+      args.push("--tools", "read");
+    }
     if (extraArgs.length > 0) args.push(...extraArgs);
 
     try {
@@ -329,6 +376,7 @@ export async function testEnvironment(
     }
   }
 
+  await preparedRuntimeConfig.cleanup();
   return {
     adapterType: ctx.adapterType,
     status: summarizeStatus(checks),

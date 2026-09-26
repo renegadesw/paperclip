@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -133,13 +134,18 @@ describe("pi_local execute", () => {
     const argsDumpPath = path.join(root, "args.json");
     const promptDumpPath = path.join(root, "prompt.json");
     const stdinClosedPath = path.join(root, "stdin-closed");
+    const attackerSkillDir = path.join(root, "attacker-skill");
     await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(attackerSkillDir, { recursive: true });
+    await fs.writeFile(path.join(attackerSkillDir, "SKILL.md"), "# attacker skill\n", "utf8");
     await writeRpcPiCommand(commandPath, argsDumpPath, promptDumpPath, stdinClosedPath);
 
     const previousHome = process.env.HOME;
     const previousVectorProfile = process.env.PAPERCLIP_VECTOR_PROFILE;
+    const previousVectorPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND;
     process.env.HOME = root;
     process.env.PAPERCLIP_VECTOR_PROFILE = "standard";
+    process.env.PAPERCLIP_VECTOR_PI_COMMAND = commandPath;
 
     try {
       const events: Array<{ eventType: string; payload?: Record<string, unknown> }> = [];
@@ -164,6 +170,10 @@ describe("pi_local execute", () => {
           model: "google/gemini-3-flash-preview",
           executionMode: "rpc",
           promptTemplate: "Work the RPC task.",
+          paperclipRuntimeSkills: [
+            { key: "attacker/skill", runtimeName: "attacker-skill", source: attackerSkillDir },
+          ],
+          paperclipSkillSync: { desiredSkills: ["attacker/skill"] },
         },
         context: {},
         authToken: "run-jwt-token",
@@ -182,6 +192,12 @@ describe("pi_local execute", () => {
       expect(args).not.toContain("-p");
       expect(args).toContain("--no-builtin-tools");
       expect(args).not.toContain("--tools");
+      expect(args).toContain("--no-tools");
+      expect(args).toContain("--no-extensions");
+      expect(args).toContain("--no-skills");
+      expect(args).toContain("--no-context-files");
+      expect(args).toContain("--skill");
+      expect(args).not.toContain(attackerSkillDir);
       expect(args.at(-1)).not.toBe("Work the RPC task.");
 
       const prompt = JSON.parse(await fs.readFile(promptDumpPath, "utf8")) as Record<string, unknown>;
@@ -204,6 +220,85 @@ describe("pi_local execute", () => {
       else process.env.HOME = previousHome;
       if (previousVectorProfile === undefined) delete process.env.PAPERCLIP_VECTOR_PROFILE;
       else process.env.PAPERCLIP_VECTOR_PROFILE = previousVectorProfile;
+      if (previousVectorPiCommand === undefined) delete process.env.PAPERCLIP_VECTOR_PI_COMMAND;
+      else process.env.PAPERCLIP_VECTOR_PI_COMMAND = previousVectorPiCommand;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("launches an approved packaged extension tool while keeping Pi built-ins unavailable", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-extension-rpc-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "pi");
+    const extensionPath = path.join(root, "vector-chat.ts");
+    const argsDumpPath = path.join(root, "args.json");
+    const promptDumpPath = path.join(root, "prompt.json");
+    const stdinClosedPath = path.join(root, "stdin-closed");
+    const extensionContents = "export default function vectorChat() {}\n";
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(extensionPath, extensionContents, "utf8");
+    await writeRpcPiCommand(commandPath, argsDumpPath, promptDumpPath, stdinClosedPath);
+
+    const previousVectorProfile = process.env.PAPERCLIP_VECTOR_PROFILE;
+    const previousVectorPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND;
+    const previousPackagedExtensions = process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS;
+    process.env.PAPERCLIP_VECTOR_PROFILE = "standard";
+    process.env.PAPERCLIP_VECTOR_PI_COMMAND = commandPath;
+    process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS = JSON.stringify([{
+      path: extensionPath,
+      sha256: createHash("sha256").update(extensionContents).digest("hex"),
+      tools: ["vector_chat_read"],
+    }]);
+
+    try {
+      const result = await execute({
+        runId: "run-pi-approved-extension",
+        agent: {
+          id: "agent-approved-extension",
+          companyId: "company-approved-extension",
+          name: "Pi Chat Agent",
+          adapterType: "pi_local",
+          adapterConfig: {},
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "google/gemini-3-flash-preview",
+          executionMode: "rpc",
+          promptTemplate: "Use the approved read-only bridge.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      const args = JSON.parse(await fs.readFile(argsDumpPath, "utf8")) as string[];
+      expect(args).toContain("--no-builtin-tools");
+      expect(args).toContain("--no-extensions");
+      expect(args).not.toContain("--no-tools");
+      expect(args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2)).toEqual([
+        "--tools",
+        "vector_chat_read",
+      ]);
+      expect(args.slice(args.indexOf("--extension"), args.indexOf("--extension") + 2)).toEqual([
+        "--extension",
+        extensionPath,
+      ]);
+      expect(args.join(" ")).not.toMatch(/(?:^|,)read(?:,|$)/);
+      expect(args.join(" ")).not.toMatch(/(?:^|,)bash(?:,|$)/);
+      expect(args.join(" ")).not.toMatch(/(?:^|,)write(?:,|$)/);
+    } finally {
+      if (previousVectorProfile === undefined) delete process.env.PAPERCLIP_VECTOR_PROFILE;
+      else process.env.PAPERCLIP_VECTOR_PROFILE = previousVectorProfile;
+      if (previousVectorPiCommand === undefined) delete process.env.PAPERCLIP_VECTOR_PI_COMMAND;
+      else process.env.PAPERCLIP_VECTOR_PI_COMMAND = previousVectorPiCommand;
+      if (previousPackagedExtensions === undefined) {
+        delete process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS;
+      } else {
+        process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS = previousPackagedExtensions;
+      }
       await fs.rm(root, { recursive: true, force: true });
     }
   });
