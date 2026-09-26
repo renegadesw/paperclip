@@ -568,10 +568,14 @@ const support = await getEmbeddedPostgresTestSupport();
           payload: { text: "secret other thread" },
         },
       ]);
+      await db
+        .update(heartbeatRuns)
+        .set({ nextEventSeq: 6 })
+        .where(eq(heartbeatRuns.id, turn.runId!));
 
       await expect(service.status(scope)).resolves.toMatchObject({
         issueId: turn.issueId,
-        run: { id: turn.runId, status: "queued" },
+        run: { id: turn.runId, status: "queued", eventCursor: 5 },
       });
       const afterFirst = await service.events({ ...scope, afterSeq: 1 });
       expect(afterFirst).toMatchObject({

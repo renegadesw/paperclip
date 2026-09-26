@@ -246,6 +246,7 @@ export function vectorIngressService(
             error: run.error,
             errorCode: run.errorCode,
             usage: run.usageJson,
+            eventCursor: Math.max(0, run.nextEventSeq - 1),
             createdAt: run.createdAt,
             startedAt: run.startedAt,
             finishedAt: run.finishedAt,
