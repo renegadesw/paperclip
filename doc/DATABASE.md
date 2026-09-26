@@ -459,6 +459,34 @@ Migration `0274_agent_chat.sql` adds conversation identity/state and session gen
 
 ## Legacy controller ownership
 
+### Vector shared-role isolation foundation (not a runtime cutover)
+
+`installVectorRuntimeIsolation` in `@paperclipai/db` is an explicit privileged
+installation step for an already migrated `vector-embedded` database. It creates
+one shared `paperclip_runtime` role, initially NOLOGIN without credentials. It
+never runs implicitly at server boot. All relations remain in `llm` in Vector's
+existing application database; the parent-owned todo/question tables and other
+Vector relations are untouched.
+
+The installer classifies every exported Paperclip relation, installs restrictive
+company/installation RLS policies, and adds SECURITY INVOKER foreign-reference
+checks. It refuses elevated roles, role memberships, schema creation authority,
+and accessible grants outside its relation inventory. Runtime pools can carry
+fixed `vectorRuntimeScope` connection options; missing/mismatched ownership
+fails closed. Session GUCs protect against accidentally unfiltered application
+queries, not a malicious trusted host deliberately changing its own scope.
+
+Real PostgreSQL tests cover concurrent unfiltered claims, routine inventory,
+restart/reaper updates, wrong-company writes, foreign-key links, permissive-policy
+composition, and preservation of unrelated Vector data.
+
+This foundation is **not sufficient to start two servers**. Instance-global
+tables, including plugin jobs and environments, are explicitly quarantined under
+this role until their ownership is implemented. Runtime startup is not switched
+to it and the existing global advisory lock is retained. Credential enrollment,
+all-global-service isolation, startup role/policy checks, and the multi-process
+integration gate must precede replacing that lock.
+
 Legacy run claims atomically record `controller_boot_id`, a database-clock
 `controller_lease_expires_at`, and `execution_stage` before workspace provisioning.
 The lease renews independently of output. A different container must not infer

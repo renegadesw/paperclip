@@ -286,7 +286,13 @@ export function flipCurrentAtomic(
     hooks.beforeRename?.();
     fs.renameSync(temporaryLink, paths.currentPath);
   } finally {
-    fs.rmSync(temporaryLink, { force: true });
+    // This path is a symlink, never the payload directory. unlink is portable
+    // for directory symlinks and cannot recursively remove the target.
+    try {
+      fs.unlinkSync(temporaryLink);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 }
 

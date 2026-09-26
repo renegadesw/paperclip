@@ -12,6 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.resolve(__dirname, "../routes");
 
 const apiPrefixes: Record<string, string> = {
+  "vector-ingress.ts": "/api/internal/vector/v1",
   "pipelines.ts": "/api",
   "cases.ts": "/api",
   "smoke-lab.ts": "/api",
@@ -89,6 +90,16 @@ const HTTP_METHODS = new Set([
 const explicitOpenApiCoverageExclusions = new Set<string>();
 
 const explicitOpenApiOperationCoverageExclusions = new Set([
+  // Signed loopback parent/child protocol, not board/agent API operations.
+  // Keep exact operations listed so new private routes still trip coverage.
+  "POST /api/internal/vector/v1/tools/callback",
+  "POST /api/internal/vector/v1/turns",
+  "POST /api/internal/vector/v1/sessions/reset",
+  "POST /api/internal/vector/v1/sessions/cancel",
+  "POST /api/internal/vector/v1/sessions/status",
+  "POST /api/internal/vector/v1/sessions/events",
+  "POST /api/internal/vector/v1/sessions/list",
+  "POST /api/internal/vector/v1/sessions/transcript",
   // This endpoint is authenticated by the provider signature rather than by a
   // Paperclip board/agent credential. It intentionally stays out of the public
   // board API document, while this exact exclusion keeps route coverage honest.

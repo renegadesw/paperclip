@@ -48,5 +48,10 @@ export {
   type VectorRuntimeOwnership,
 } from "./vector-runtime-ownership.js";
 export { issueRelations } from "./schema/issue_relations.js";
+export {
+  installVectorRuntimeIsolation,
+  vectorIsolationRelations,
+  VECTOR_RUNTIME_DATABASE_ROLE,
+} from "./vector-runtime-isolation.js";
 export { issueReferenceMentions } from "./schema/issue_reference_mentions.js";
 export * from "./schema/index.js";
