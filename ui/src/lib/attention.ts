@@ -9,6 +9,7 @@ import type {
   AttentionSourceKind,
   AttentionWorkspaceRef,
 } from "@paperclipai/shared";
+import { paperclipApiPath } from "@/lib/base-path";
 
 export type AttentionListOptions = AttentionFeedQuery;
 
@@ -260,7 +261,7 @@ export function attentionDetailImages(item: AttentionItem): AttentionDetailImage
  */
 export function attentionImageUrl(assetId: string): string {
   if (assetId.startsWith("data:") || assetId.startsWith("http")) return assetId;
-  return `/api/assets/${assetId}/content`;
+  return paperclipApiPath(`/assets/${assetId}/content`);
 }
 
 /**

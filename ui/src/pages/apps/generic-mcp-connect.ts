@@ -1,5 +1,6 @@
 import { checkMcpRemoteHeaderName, checkMcpRemoteHeaderValue, mcpRemoteHeaderRejectionMessage } from "@paperclipai/shared";
 import type { GenericMcpAuthMode } from "@paperclipai/shared";
+import { paperclipApiPath } from "@/lib/base-path";
 
 /**
  * Logic behind the guided "Connect your own MCP server" flow (PAP-17087).
@@ -43,7 +44,7 @@ export function endpointHost(url: string): string | null {
  * HTTP OAuth, so the setup form must advertise that same canonical spelling.
  */
 export function oauthCallbackUrlForBrowser(origin: string = window.location.origin): string {
-  const callbackUrl = new URL("/api/tools/oauth/callback", origin);
+  const callbackUrl = new URL(paperclipApiPath("/tools/oauth/callback"), origin);
   const hostname = callbackUrl.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (
     callbackUrl.protocol === "http:"

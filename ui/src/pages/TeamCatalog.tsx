@@ -22,6 +22,7 @@ import { AGENT_ADAPTER_TYPES } from "@paperclipai/shared";
 import { teamCatalogApi } from "../api/teamCatalog";
 import { agentsApi } from "../api/agents";
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
+import { paperclipPath } from "@/lib/base-path";
 import {
   useAdapterRegistryLoaded,
   useDisabledAdaptersSync,
@@ -2100,10 +2101,10 @@ export function ApplySuccess({
         </div>
       )}
       <ul className="space-y-1 text-sm">
-        <li><a className="text-primary hover:underline" href="/agents/all">View imported agents →</a></li>
-        <li><a className="text-primary hover:underline" href="/projects">View imported projects →</a></li>
-        <li><a className="text-primary hover:underline" href="/routines">View routines →</a></li>
-        <li><a className="text-primary hover:underline" href="/activity">View activity log →</a></li>
+        <li><a className="text-primary hover:underline" href={paperclipPath("/agents/all")}>View imported agents →</a></li>
+        <li><a className="text-primary hover:underline" href={paperclipPath("/projects")}>View imported projects →</a></li>
+        <li><a className="text-primary hover:underline" href={paperclipPath("/routines")}>View routines →</a></li>
+        <li><a className="text-primary hover:underline" href={paperclipPath("/activity")}>View activity log →</a></li>
       </ul>
       <div className="flex justify-end">
         <Button onClick={onClose}>Done</Button>

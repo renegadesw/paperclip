@@ -8,7 +8,20 @@ import { serviceWorkerBuildIdPlugin } from "./src/lib/vite-sw-build-id";
 
 const apiProxy = createApiProxy();
 
+function resolvePublicBasePath(): string {
+  const raw = process.env.PAPERCLIP_UI_BASE_PATH?.trim() || "/";
+  if (!raw.startsWith("/") || raw.includes("?") || raw.includes("#") || raw.includes("\\")) {
+    throw new Error("PAPERCLIP_UI_BASE_PATH must be an absolute URL path");
+  }
+  const parts = raw.split("/").filter(Boolean);
+  if (parts.some((part) => part === "." || part === "..")) {
+    throw new Error("PAPERCLIP_UI_BASE_PATH cannot contain dot segments");
+  }
+  return parts.length === 0 ? "/" : `/${parts.join("/")}/`;
+}
+
 export default defineConfig(({ mode }) => ({
+  base: resolvePublicBasePath(),
   plugins: [react(), tailwindcss(), serviceWorkerBuildIdPlugin()],
   build: {
     minify: "esbuild",
