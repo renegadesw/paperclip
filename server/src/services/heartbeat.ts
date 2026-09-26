@@ -161,6 +161,7 @@ import {
 } from "../instrumentation.js";
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
+import { activeVectorToolRuntimeAccess } from "./vector-tool-authority.js";
 import { logger } from "../middleware/logger.js";
 import {
   createGitRemoteAuthProvider,
@@ -23908,6 +23909,12 @@ export function heartbeatService(
             if (managedMcpConfig) {
               adapterContext.paperclipManagedMcp = managedMcpConfig;
             }
+            const vectorToolAuthority = activeVectorToolRuntimeAccess({
+              runId: run.id,
+              companyId: agent.companyId,
+              agentId: agent.id,
+              issueId: issueRef?.id ?? null,
+            });
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
@@ -23932,6 +23939,7 @@ export function heartbeatService(
                       : undefined,
                     runtimeMcp,
                     runtimeTools,
+                    vectorToolAuthority: vectorToolAuthority ?? undefined,
                     onLog,
                     onMeta: onAdapterMeta,
                     onEvent: onAdapterEvent,

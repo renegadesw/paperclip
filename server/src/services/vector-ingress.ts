@@ -28,6 +28,7 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   clientRequestId: string;
   body: string;
   attachmentIds?: string[];
+  authorityHandle?: string;
 }
 
 export interface VectorIngressCancelInput extends VectorIngressScope {
@@ -37,6 +38,14 @@ export interface VectorIngressCancelInput extends VectorIngressScope {
 export interface VectorIngressHeartbeat {
   wakeup: ReturnType<typeof heartbeatService>["wakeup"];
   cancelRun: ReturnType<typeof heartbeatService>["cancelRun"];
+}
+
+export interface VectorIngressToolAuthority {
+  bindRun(input: VectorIngressScope & {
+    issueId: string;
+    runId: string;
+    authorityHandle: string;
+  }): Promise<void>;
 }
 
 export interface VectorIngressTurnResult {
@@ -84,6 +93,7 @@ export function vectorIngressService(
   options: {
     heartbeat?: VectorIngressHeartbeat;
     responsibleUserId?: string;
+    toolAuthority?: VectorIngressToolAuthority;
   } = {},
 ) {
   const issuesSvc = issueService(db);
@@ -284,13 +294,35 @@ export function vectorIngressService(
       )
       .then((rows) => rows[0] ?? null);
 
+    const runId = deliveredRunId ?? receipt?.runId ?? null;
+    if (input.authorityHandle) {
+      if (!options.toolAuthority) {
+        throw conflict("Vector tool authority is disabled", {
+          code: "vector_tool_authority_disabled",
+        });
+      }
+      if (!runId) {
+        throw conflict("Vector tool authority requires a created run", {
+          code: "vector_tool_authority_run_missing",
+        });
+      }
+      await options.toolAuthority.bindRun({
+        companyId: input.companyId,
+        agentId: input.agentId,
+        externalSessionId: input.externalSessionId,
+        issueId: issue.id,
+        runId,
+        authorityHandle: input.authorityHandle,
+      });
+    }
+
     return {
       companyId: input.companyId,
       agentId: input.agentId,
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       commentId: comment.id,
-      runId: deliveredRunId ?? receipt?.runId ?? null,
+      runId,
       wakeupRequestId: receipt?.id ?? null,
       wakeupStatus: receipt?.status ?? null,
       sessionGeneration: current?.generation ?? issue.conversationSessionGeneration,
