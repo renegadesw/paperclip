@@ -102,12 +102,31 @@ function memoryPort(): VectorProvisioningPort & { companies: any[]; ownerships: 
 describe("Vector installation provisioning", () => {
   it("accepts sealed Standard speak authority but rejects engineering or changed capabilities", async () => {
     const f = await fixture();
+    const workerBody = "# Implementation Worker\n\nWork only from the authenticated todo brief.\n";
+    const workerPath = "paperclip/profile-assets/standard/implementation-worker/AGENTS.md";
+    await fs.mkdir(path.dirname(path.join(f.stagedReleaseRoot, workerPath)), { recursive: true });
+    await fs.writeFile(path.join(f.stagedReleaseRoot, workerPath), workerBody);
+    const worker = {
+      ...f.manifest.agent,
+      id: "6e0d30cf-6f32-5f8c-bb1d-3117ce4b27d5",
+      name: "Implementation Worker",
+      role: "implementation-worker",
+      title: "Restricted todo worker",
+      capabilities: "Executes authenticated todo briefs without filesystem or shell access.",
+      instructions: { path: workerPath, sha256: createHash("sha256").update(workerBody).digest("hex") },
+    };
     const standard = {
       ...f.manifest, profile: "standard",
       agent: { ...f.manifest.agent, name: "Standard Chat", role: "standard-chat" },
+      additionalAgents: [worker],
       toolPolicy: { profile: "standard", builtinTools: [], extensions: [f.toolPolicy.extensions[1], f.toolPolicy.extensions[2]] },
     };
     expect(vectorInstallationManifestSchema.safeParse(standard).success).toBe(true);
+    expect(vectorInstallationManifestSchema.safeParse({ ...standard, additionalAgents: [] }).success).toBe(false);
+    expect(vectorInstallationManifestSchema.safeParse({
+      ...standard,
+      additionalAgents: [{ ...worker, role: "engineer" }],
+    }).success).toBe(false);
     for (const extensions of [[], [f.toolPolicy.extensions[0]], [f.toolPolicy.extensions[1]],
       [{ ...f.toolPolicy.extensions[2], permissions: { filesystem: true, shell: false } }],
       [{ ...f.toolPolicy.extensions[2], tools: ["speak", "bash"] }]]) {

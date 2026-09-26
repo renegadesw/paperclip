@@ -401,8 +401,11 @@ export const vectorInstallationManifestSchema = z.object({
     }
   }
   if (manifest.profile === "standard") {
-    if (allAgents.length !== 1 || manifest.agent.name !== "Standard Chat" || manifest.agent.role !== "standard-chat") {
-      ctx.addIssue({ code: "custom", path: ["agent"], message: "standard installs provision exactly the Standard Chat agent" });
+    if (
+      allAgents.length !== 2 || manifest.agent.name !== "Standard Chat" || manifest.agent.role !== "standard-chat" ||
+      stableJson(roles) !== stableJson(["implementation-worker", "standard-chat"])
+    ) {
+      ctx.addIssue({ code: "custom", path: ["agent"], message: "standard installs provision exactly the Standard Chat and restricted implementation worker agents" });
     }
     if (manifest.workloads.length !== 0) {
       ctx.addIssue({ code: "custom", path: ["workloads"], message: "standard installs do not own Funky workload schedules" });

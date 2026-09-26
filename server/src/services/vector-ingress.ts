@@ -48,6 +48,9 @@ import {
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
+const STANDARD_TODO_WORKER_PROMPT = `You are executing one authenticated NexusLink todo brief.
+
+Complete the brief as fully as the explicitly granted conversation tools allow. You have no filesystem, shell, repository, GitHub, Vault, MCP, or ambient Pi tools. Never claim to have inspected or changed an external system. If the brief requires an unavailable capability, explain the exact boundary and provide the most useful safe result you can.`;
 
 export interface VectorIngressScope {
   companyId: string;
@@ -484,13 +487,25 @@ export function vectorIngressService(
     const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
     const adapterConfig = eventPayloadRecord(agent.adapterConfig);
     const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
+    const stagingRole = input.profileId === "staging";
+    const workerMetadata = input.roleContext.metadata;
+    const standardTodoWorker = input.profileId === "standard" && agent.role === "implementation-worker" &&
+      input.roleContext.role === "implementation-worker" && input.roleContext.noBuiltinTools === true &&
+      input.roleContext.systemPrompt === STANDARD_TODO_WORKER_PROMPT &&
+      Object.keys(workerMetadata).sort().join(",") === "launch_digest,launch_mode,todo_id" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(workerMetadata.todo_id ?? "") &&
+      /^[0-9a-f]{32}$/.test(workerMetadata.launch_digest ?? "") &&
+      (workerMetadata.launch_mode === "scoped" || workerMetadata.launch_mode === "just_go") &&
+      input.externalSessionId === `${workerMetadata.launch_mode === "just_go" ? "todo-jg-" : "todo-"}${workerMetadata.todo_id}-${workerMetadata.launch_digest}`;
     if (
       provisioning.schemaVersion !== 1 ||
       provisioning.installationId !== input.installationId ||
       provisioning.profile !== input.profileId ||
-      input.profileId !== "staging" ||
+      (!stagingRole && !standardTodoWorker) ||
       agent.role !== input.roleContext.role ||
-      (input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
+      (standardTodoWorker
+        ? !input.runtimeSelection || input.roleContext.model !== `router/${input.runtimeSelection.model}`
+        : input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
     ) {
       throw conflict("Vector role turn differs from the provisioned agent contract", {
         code: "vector_role_contract_mismatch",
@@ -540,7 +555,7 @@ export function vectorIngressService(
     const agent = await assertTargetAgent(input);
     const configured = eventPayloadRecord(agent.adapterConfig);
     if (
-      agent.role !== "standard-chat" ||
+      (agent.role !== "standard-chat" && agent.role !== "implementation-worker") ||
       typeof configured.model !== "string" ||
       !configured.model.startsWith("router/") ||
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(selection.model)
@@ -570,6 +585,7 @@ export function vectorIngressService(
   ): Promise<VectorPersonaTurnContext | null> {
     const priorRun = await latestConversationRun(input, issue);
     const prior = persistedPersonaContext(priorRun?.contextSnapshot?.vectorPersonaTurn);
+    const priorRole = eventPayloadRecord(priorRun?.contextSnapshot?.vectorRoleTurn);
     const requested = input.personaContext ?? null;
     if (
       requested && prior &&
@@ -586,7 +602,9 @@ export function vectorIngressService(
       });
     }
     const effective = requested ?? prior;
-    if (!effective && input.profileId === "standard") {
+    const standardTodoWorker = input.profileId === "standard" &&
+      (input.roleContext?.role === "implementation-worker" || priorRole.role === "implementation-worker");
+    if (!effective && input.profileId === "standard" && !standardTodoWorker) {
       throw conflict("Vector standard-chat requires an admitted persona", {
         code: "vector_persona_required",
       });
