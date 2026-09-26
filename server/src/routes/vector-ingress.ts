@@ -139,6 +139,11 @@ const turnSchema = z.object({
   launchContext: vectorWorkloadLaunchSchema.optional(),
   roleContext: vectorRoleTurnSchema.optional(),
   personaContext: vectorPersonaTurnSchema.optional(),
+  baseCursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  runtimeSelection: z.object({
+    model: boundedOpaqueId("model", 256).refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)),
+    thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
+  }).strict().optional(),
 }).superRefine((value, ctx) => {
   requireCompleteOwnerScope(value, ctx);
   if ([value.launchContext, value.roleContext, value.personaContext].filter(Boolean).length > 1) {
@@ -178,8 +183,15 @@ const cancelSchema = z.object({
 
 const eventsSchema = z.object({
   ...scopeShape,
-  afterSeq: z.number().int().min(0).optional(),
+  afterSeq: z.number().int().min(-1).optional(),
   limit: z.number().int().min(1).max(1000).optional(),
+  turnId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).superRefine(requireCompleteOwnerScope);
+
+const runtimeSelectionSchema = z.object({
+  ...scopeShape,
+  model: boundedOpaqueId("model", 256).refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)),
+  thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
 }).superRefine(requireCompleteOwnerScope);
 
 const inventorySchema = ownerScopeSchema.extend({
@@ -507,6 +519,11 @@ export function vectorIngressRoutes(
   router.post("/sessions/events", async (req, res) => {
     const input = eventsSchema.parse(req.body);
     res.json(await service.events(input));
+  });
+
+  router.post("/sessions/runtime", async (req, res) => {
+    const input = runtimeSelectionSchema.parse(req.body);
+    res.json(await service.configureRuntime(input));
   });
 
   router.post("/sessions/list", async (req, res) => {

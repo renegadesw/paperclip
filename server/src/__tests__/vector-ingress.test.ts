@@ -877,12 +877,31 @@ const support = await getEmbeddedPostgresTestSupport();
         voiceActive: true,
         personaContext,
       });
+      expect(first.turnId).toBeGreaterThan(0);
+      expect(first.baseCursor).toBe(0);
+      const replay = await service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-1",
+        body: "Hello there.",
+        voiceActive: true,
+        personaContext,
+        baseCursor: 99,
+      });
+      expect(replay.replayed).toBe(true);
+      expect(replay.turnId).toBe(first.turnId);
+      expect(replay.baseCursor).toBe(first.baseCursor);
+      const targeted = await service.events({ ...base, turnId: first.turnId, afterSeq: first.baseCursor });
+      expect(targeted.turnId).toBe(first.turnId);
+      expect(targeted.run?.id).toBe(first.runId);
+      await expect(service.events({ ...base, ownerId: "vector-user:user-2", turnId: first.turnId }))
+        .rejects.toMatchObject({ status: 404 });
       const firstRun = await db
         .select({ context: heartbeatRuns.contextSnapshot })
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, first.runId!))
         .then((rows) => rows[0]?.context as Record<string, unknown>);
       expect(firstRun.vectorPersonaTurn).toEqual(personaContext);
+      expect(firstRun.vectorRuntimeSelection).toEqual({ model: "Qwen3.8-Flash", thinking: "medium" });
       expect(firstRun.vectorVoiceActive).toBe(true);
       const firstComment = await db
         .select({ body: issueComments.body })
@@ -905,6 +924,18 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(secondRun.vectorPersonaTurn).toEqual(personaContext);
       expect(secondRun.vectorVoiceActive).toBe(false);
 
+      const configured = await service.configureRuntime({
+        ...base, model: "Other-Model", thinking: "high",
+      });
+      expect(configured).toMatchObject({ model: "Other-Model", thinking: "high" });
+      const third = await service.addTurn({
+        ...base, clientRequestId: "standard-persona-turn-runtime", body: "Use it.",
+      });
+      const thirdRun = await db.select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, third.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(thirdRun.vectorRuntimeSelection).toEqual({ model: "Other-Model", thinking: "high" });
+
       await expect(service.addTurn({
         ...base,
         clientRequestId: "standard-persona-turn-3",
@@ -916,7 +947,7 @@ const support = await getEmbeddedPostgresTestSupport();
       });
     });
 
-    it("fails standard persona turns closed on omission and model mismatch", async () => {
+    it("fails standard persona turns closed on omission and provider widening", async () => {
       const service = vectorIngressService(db, { heartbeat });
       const base = {
         companyId,
@@ -943,7 +974,7 @@ const support = await getEmbeddedPostgresTestSupport();
           personaId: "00000000-0000-0000-0000-000000000023",
           personaName: "Sage",
           personaVersion: "abcdef012345",
-          model: "router/unapproved-model",
+          model: "other/unapproved-model",
           noBuiltinTools: true,
           systemPrompt: "Be a calm, precise collaborator.",
         },

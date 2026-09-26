@@ -1,4 +1,5 @@
 import {
+  bigint,
   index,
   pgTable,
   timestamp,
@@ -10,6 +11,7 @@ import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { issueComments } from "./issue_comments.js";
 import { issues } from "./issues.js";
+import { heartbeatRuns } from "./heartbeat_runs.js";
 
 /**
  * Private lookup metadata for Vector's signed loopback ingress.
@@ -35,6 +37,8 @@ export const vectorIngressConversations = pgTable(
     profileId: varchar("profile_id", { length: 256 }).notNull(),
     ownerSha256: varchar("owner_sha256", { length: 64 }).notNull(),
     externalSessionId: varchar("external_session_id", { length: 512 }).notNull(),
+    model: varchar("model", { length: 256 }),
+    thinking: varchar("thinking", { length: 16 }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -83,6 +87,11 @@ export const vectorIngressTurns = pgTable(
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => vectorIngressConversations.id, { onDelete: "cascade" }),
+    turnId: bigint("turn_id", { mode: "number" }).generatedAlwaysAsIdentity().notNull(),
+    runId: uuid("run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
+    baseCursor: bigint("base_cursor", { mode: "number" }).notNull(),
+    model: varchar("model", { length: 256 }),
+    thinking: varchar("thinking", { length: 16 }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -91,5 +100,7 @@ export const vectorIngressTurns = pgTable(
     conversationCreatedIdx: index(
       "vector_ingress_turns_conversation_created_idx",
     ).on(table.conversationId, table.createdAt, table.commentId),
+    turnIdUq: uniqueIndex("vector_ingress_turns_turn_id_uq").on(table.turnId),
+    runIdUq: uniqueIndex("vector_ingress_turns_run_id_uq").on(table.runId),
   }),
 );

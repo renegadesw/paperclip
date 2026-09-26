@@ -3,6 +3,7 @@ import {
   appendVectorPersonaSystemPrompt,
   appendVectorRoleSystemPrompt,
   appendVectorWorkloadSystemPrompt,
+  resolveVectorRuntimeSelection,
 } from "./execute.js";
 
 describe("Vector workload launch system prompt", () => {
@@ -27,6 +28,18 @@ describe("Vector workload launch system prompt", () => {
       workloadKey: "current_scout",
       taskId: "task-1",
     })).toThrow("malformed");
+  });
+});
+
+describe("Vector runtime selection", () => {
+  it("keeps the configured provider while selecting a signed model and thinking level", () => {
+    expect(resolveVectorRuntimeSelection("router/Default", "low", { model: "Other", thinking: "high" }))
+      .toEqual({ model: "router/Other", thinking: "high" });
+  });
+
+  it("rejects provider widening and invalid thinking", () => {
+    expect(() => resolveVectorRuntimeSelection("anthropic/claude", "low", { model: "Other", thinking: "high" })).toThrow("widens");
+    expect(() => resolveVectorRuntimeSelection("router/Default", "low", { model: "Other", thinking: "auto" })).toThrow("malformed");
   });
 });
 

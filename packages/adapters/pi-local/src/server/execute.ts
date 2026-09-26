@@ -375,6 +375,22 @@ export function appendVectorPersonaSystemPrompt(base: string, rawPersona: unknow
   ]);
 }
 
+export function resolveVectorRuntimeSelection(
+  configuredModel: string,
+  configuredThinking: string,
+  rawSelection: unknown,
+): { model: string; thinking: string } {
+  const selection = parseObject(rawSelection);
+  if (Object.keys(selection).length === 0) return { model: configuredModel, thinking: configuredThinking };
+  const model = asString(selection.model, "").trim();
+  const thinking = asString(selection.thinking, "").trim();
+  const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+  if (!configuredModel.startsWith("router/") || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(model) || !levels.has(thinking)) {
+    throw new Error("Signed Vector runtime selection is malformed or widens the configured provider.");
+  }
+  return { model: `router/${model}`, thinking };
+}
+
 function normalizeExecutionCwd(candidate: string, remote: boolean): string {
   return remote ? path.posix.normalize(candidate) : path.resolve(candidate);
 }
@@ -455,8 +471,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const deploymentPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND?.trim() || undefined;
   const command = asString(config.command, deploymentPiCommand ?? "pi");
-  const model = asString(config.model, "").trim();
-  const thinking = asString(config.thinking, "").trim();
+  const configuredModel = asString(config.model, "").trim();
+  const configuredThinking = asString(config.thinking, "").trim();
+  const { model, thinking } = resolveVectorRuntimeSelection(
+    configuredModel, configuredThinking, context.vectorRuntimeSelection,
+  );
   const executionMode = asString(
     config.executionMode,
     process.env.PAPERCLIP_PI_EXECUTION_MODE ?? "json",
