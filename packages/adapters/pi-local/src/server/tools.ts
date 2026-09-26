@@ -5,6 +5,7 @@ const PI_BUILTIN_TOOL_NAME_SET = new Set<string>(PI_BUILTIN_TOOL_NAMES);
 interface PiBuiltinToolOptions {
   vectorProfile?: string;
   extraArgs?: readonly string[];
+  additionalToolNames?: readonly string[];
 }
 
 function normalizedVectorProfile(profile: string | undefined): string {
@@ -28,6 +29,9 @@ export function buildPiBuiltinToolArgs(
   options: PiBuiltinToolOptions = {},
 ): string[] {
   const vectorProfile = normalizedVectorProfile(options.vectorProfile);
+  const additionalToolNames = Array.from(new Set(
+    (options.additionalToolNames ?? []).map((name) => name.trim()).filter(Boolean),
+  ));
   // An unset profile retains upstream behavior. Once a Vector deployment opts
   // into profiles, engineering is the only profile allowed to expose Pi's
   // built-ins; misspellings and future profiles fail closed.
@@ -41,7 +45,7 @@ export function buildPiBuiltinToolArgs(
 
   if (!Object.prototype.hasOwnProperty.call(config, "builtinTools")) {
     if (zeroBuiltinCeiling) return ["--no-builtin-tools"];
-    return ["--tools", PI_BUILTIN_TOOL_NAMES.join(",")];
+    return ["--tools", [...PI_BUILTIN_TOOL_NAMES, ...additionalToolNames].join(",")];
   }
 
   if (!Array.isArray(config.builtinTools)) {
@@ -68,7 +72,10 @@ export function buildPiBuiltinToolArgs(
     );
   }
 
-  return tools.length === 0
-    ? ["--no-builtin-tools"]
-    : ["--tools", tools.join(",")];
+  if (tools.length === 0) {
+    return additionalToolNames.length === 0
+      ? ["--no-builtin-tools"]
+      : ["--no-builtin-tools", "--tools", additionalToolNames.join(",")];
+  }
+  return ["--tools", [...tools, ...additionalToolNames].join(",")];
 }

@@ -49,6 +49,27 @@ describe("buildPiBuiltinToolArgs", () => {
     )).toEqual(["--tools", "read,grep"]);
   });
 
+  it("keeps deployment-packaged engineering tools alongside all built-ins", () => {
+    expect(buildPiBuiltinToolArgs({}, {
+      vectorProfile: "engineering",
+      additionalToolNames: ["vault_search", "vault_read", "vault_search"],
+    })).toEqual([
+      "--tools",
+      "read,bash,edit,write,grep,find,ls,vault_search,vault_read",
+    ]);
+  });
+
+  it("can keep a packaged engineering extension while an agent narrows built-ins to zero", () => {
+    expect(buildPiBuiltinToolArgs({ builtinTools: [] }, {
+      vectorProfile: "engineering",
+      additionalToolNames: ["vault_search", "vault_read"],
+    })).toEqual([
+      "--no-builtin-tools",
+      "--tools",
+      "vault_search,vault_read",
+    ]);
+  });
+
   it("fails closed for an unknown configured Vector profile", () => {
     expect(buildPiBuiltinToolArgs({}, { vectorProfile: "prodution" })).toEqual([
       "--no-builtin-tools",

@@ -45,7 +45,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp -R src/vector-extensions dist/",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit"
   },
