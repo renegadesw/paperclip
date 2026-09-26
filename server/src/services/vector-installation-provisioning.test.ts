@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   reconcileVectorInstallation,
+  vectorScheduleRoutineSeeds,
   vectorWorkloadRoutineSeeds,
   vectorInstallationManifestSchema,
   type VectorProvisioningPort,
@@ -336,7 +337,27 @@ describe("Vector installation provisioning", () => {
       { queue: "tasks", assigneeAgentId: advisorId, cronExpression: "* * * * *", timezone: "UTC" },
     ]);
     expect(new Set(routineSeeds.flatMap((seed) => [seed.routineId, seed.triggerId])).size).toBe(4);
+    const scheduleSeeds = vectorScheduleRoutineSeeds(vectorInstallationManifestSchema.parse(manifest));
+    expect(scheduleSeeds.map((seed) => seed.scheduleKey)).toEqual([
+      "fa_dmv_audit_back_triage_daily",
+      "fa_dmv_review_daily",
+      "fa_research_daily",
+      "fa_research_lease_sweep",
+      "fa_rollup_query_themes",
+      "fa_task_lease_sweep",
+    ]);
+    expect(scheduleSeeds).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        scheduleKey: "fa_research_daily",
+        cronExpression: "* * * * *",
+        timezone: "UTC",
+        sourceCronExpression: "20 8 * * *",
+        sourceTimezone: "America/New_York",
+      }),
+    ]));
+    expect(new Set(scheduleSeeds.flatMap((seed) => [seed.routineId, seed.triggerId])).size).toBe(12);
     expect(vectorWorkloadRoutineSeeds(vectorInstallationManifestSchema.parse(f.manifest))).toEqual([]);
+    expect(vectorScheduleRoutineSeeds(vectorInstallationManifestSchema.parse(f.manifest))).toEqual([]);
     manifest.workloads[0].schedule.cronExpression = "21 8 * * *";
     await expect(reconcileVectorInstallation(port, {
       ...f,

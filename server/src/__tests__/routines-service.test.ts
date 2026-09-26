@@ -36,6 +36,7 @@ import * as providerRegistry from "../secrets/provider-registry.ts";
 import { routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
 import type { VectorWorkloadRoutineDispatcher } from "../services/vector-workload-routine-dispatch.ts";
+import type { VectorScheduleRoutineDispatcher } from "../services/vector-schedule-routine-dispatch.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -111,6 +112,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       },
     ) => Promise<unknown>;
     vectorWorkloadDispatcher?: VectorWorkloadRoutineDispatcher;
+    vectorScheduleDispatcher?: VectorScheduleRoutineDispatcher;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -160,6 +162,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     const svc = routineService(db, {
       runtimeEnv: opts?.runtimeEnv,
       vectorWorkloadDispatcher: opts?.vectorWorkloadDispatcher,
+      vectorScheduleDispatcher: opts?.vectorScheduleDispatcher,
       heartbeat: {
         wakeup: async (wakeupAgentId, wakeupOpts) => {
           wakeups.push({ agentId: wakeupAgentId, opts: wakeupOpts });
@@ -305,9 +308,31 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     const stale = await db.select().from(routineRuns).where(eq(routineRuns.id, staleId)).then((rows) => rows[0]);
     expect(stale).toMatchObject({
       status: "failed",
-      failureReason: "Vector workload callback exceeded its bounded dispatch window",
+      failureReason: "Vector control callback exceeded its bounded dispatch window",
     });
     expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs a sealed Vector schedule without creating an issue", async () => {
+    const dispatch = vi.fn(async () => ({ fired: false, skipped: true, reason: "not_due" }));
+    const { companyId, routine, svc } = await seedFixture({
+      vectorScheduleDispatcher: { dispatch },
+    });
+    await db.update(routines).set({
+      originKind: "vector_schedule_dispatch",
+      originId: "fa_research_daily",
+    }).where(eq(routines.id, routine.id));
+
+    await expect(svc.runRoutine(routine.id, { source: "schedule" })).resolves.toMatchObject({
+      status: "completed",
+      linkedIssueId: null,
+    });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      routineId: routine.id,
+      companyId,
+      scheduleKey: "fa_research_daily",
+    }));
+    expect(await db.select().from(issues).where(eq(issues.companyId, companyId))).toHaveLength(0);
   });
 
   it("clears transient routine run failures when execution issues resume", async () => {

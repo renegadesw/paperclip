@@ -97,6 +97,7 @@ import { createSecretProposalsService } from "./services/secret-proposals.js";
 import { environmentRuntimeService } from "./services/environment-runtime.js";
 import { createDbAdapterAuthSessionStore } from "./services/device-login-service.js";
 import { vectorWorkloadRoutineDispatcherFromEnv } from "./services/vector-workload-routine-dispatch.js";
+import { vectorScheduleRoutineDispatcherFromEnv } from "./services/vector-schedule-routine-dispatch.js";
 import {
   createDeviceLoginReaper,
   createProductionLoginSessionReaperRuntime,
@@ -1380,6 +1381,7 @@ async function startServerWithDatabaseTeardown(
     const routines = routineService(db as any, {
       pluginWorkerManager,
       vectorWorkloadDispatcher: vectorWorkloadRoutineDispatcherFromEnv(process.env),
+      vectorScheduleDispatcher: vectorScheduleRoutineDispatcherFromEnv(process.env),
     });
     const statusCards = statusCardService(db as any);
     const issues = issueService(db as any);

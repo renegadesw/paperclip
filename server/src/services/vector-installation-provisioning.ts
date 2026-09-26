@@ -6,6 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { agentService } from "./agents.js";
 import { companyService } from "./companies.js";
+import { VECTOR_SCHEDULE_KEYS } from "./vector-schedule-routine-dispatch.js";
 
 const UUID = z.string().uuid();
 const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -520,6 +521,48 @@ export function vectorWorkloadRoutineSeeds(manifest: VectorInstallationManifest)
   }));
 }
 
+export function vectorScheduleRoutineSeeds(manifest: VectorInstallationManifest) {
+  if (manifest.profile !== "staging") return [];
+  type Schedule = NonNullable<VectorInstallationManifest["workloads"][number]["schedule"]>;
+  const schedules = new Map<string, Schedule>();
+  const add = (schedule: Schedule | null | undefined) => {
+    if (!schedule) return;
+    const prior = schedules.get(schedule.scheduleKey);
+    if (prior && stableJson(prior) !== stableJson(schedule)) {
+      throw new Error(`Vector schedule ${schedule.scheduleKey} has conflicting sealed declarations`);
+    }
+    schedules.set(schedule.scheduleKey, schedule);
+  };
+  for (const workload of manifest.workloads) {
+    add(workload.schedule);
+    add(workload.recoverySchedule);
+    for (const dependency of workload.dependencies) add(dependency.schedule);
+  }
+  const keys = [...schedules.keys()].sort();
+  const expected = [...VECTOR_SCHEDULE_KEYS].sort();
+  if (stableJson(keys) !== stableJson(expected)) {
+    throw new Error("staging Vector schedule routine catalog does not match the exact migrated schedule set");
+  }
+  return keys.map((scheduleKey) => {
+    const schedule = schedules.get(scheduleKey)!;
+    return {
+      routineId: deterministicUuid(`${manifest.installationId}:paperclip-schedule-routine:${scheduleKey}`),
+      triggerId: deterministicUuid(`${manifest.installationId}:paperclip-schedule-trigger:${scheduleKey}`),
+      companyId: manifest.company.id,
+      assigneeAgentId: manifest.agent.id,
+      scheduleKey,
+      title: `Vector schedule: ${scheduleKey}`,
+      description: `Checks the authoritative jobs.schedules row for ${scheduleKey} and fires its sealed Vector target only when due and owned by Paperclip.`,
+      // The minute trigger is only Paperclip's wakeup. Vector's live row stays
+      // authoritative for cron, timezone, enablement and next-fire state.
+      cronExpression: "* * * * *",
+      timezone: "UTC",
+      sourceCronExpression: schedule.cronExpression,
+      sourceTimezone: schedule.timezone,
+    };
+  });
+}
+
 type CompanyRecord = {
   id: string;
   name: string;
@@ -885,6 +928,76 @@ async function reconcileVectorWorkloadRoutines(db: Db, manifest: VectorInstallat
     // Enablement and scheduler timestamps are operator/runtime state. Every
     // other field is sealed so a reinstall cannot silently retarget a pump.
     assertEqual("workloadRoutineTrigger", {
+      id: trigger.id,
+      companyId: trigger.companyId,
+      routineId: trigger.routineId,
+      kind: trigger.kind,
+      label: trigger.label,
+      cronExpression: trigger.cronExpression,
+      timezone: trigger.timezone,
+    }, triggerExpected);
+  }
+
+  for (const seed of vectorScheduleRoutineSeeds(manifest)) {
+    const routineExpected = {
+      id: seed.routineId,
+      companyId: seed.companyId,
+      title: seed.title,
+      description: seed.description,
+      assigneeAgentId: seed.assigneeAgentId,
+      priority: "medium",
+      status: "active",
+      concurrencyPolicy: "coalesce_if_active",
+      catchUpPolicy: "skip_missed",
+      activityGatePolicy: "always",
+      activityGateScope: "company",
+      originKind: "vector_schedule_dispatch",
+      originId: seed.scheduleKey,
+    };
+    let routine = await db.select().from(routines).where(and(
+      eq(routines.companyId, seed.companyId),
+      eq(routines.id, seed.routineId),
+    )).then((rows) => rows[0] ?? null);
+    if (!routine) {
+      [routine] = await db.insert(routines).values(routineExpected).returning();
+    }
+    assertEqual("vectorScheduleRoutine", {
+      id: routine.id,
+      companyId: routine.companyId,
+      title: routine.title,
+      description: routine.description,
+      assigneeAgentId: routine.assigneeAgentId,
+      priority: routine.priority,
+      status: routine.status,
+      concurrencyPolicy: routine.concurrencyPolicy,
+      catchUpPolicy: routine.catchUpPolicy,
+      activityGatePolicy: routine.activityGatePolicy,
+      activityGateScope: routine.activityGateScope,
+      originKind: routine.originKind,
+      originId: routine.originId,
+    }, routineExpected);
+
+    const triggerExpected = {
+      id: seed.triggerId,
+      companyId: seed.companyId,
+      routineId: seed.routineId,
+      kind: "schedule",
+      label: `${seed.scheduleKey} due check`,
+      cronExpression: seed.cronExpression,
+      timezone: seed.timezone,
+    };
+    let trigger = await db.select().from(routineTriggers).where(and(
+      eq(routineTriggers.companyId, seed.companyId),
+      eq(routineTriggers.id, seed.triggerId),
+    )).then((rows) => rows[0] ?? null);
+    if (!trigger) {
+      [trigger] = await db.insert(routineTriggers).values({
+        ...triggerExpected,
+        enabled: false,
+        nextRunAt: null,
+      }).returning();
+    }
+    assertEqual("vectorScheduleRoutineTrigger", {
       id: trigger.id,
       companyId: trigger.companyId,
       routineId: trigger.routineId,
