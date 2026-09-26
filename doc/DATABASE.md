@@ -176,6 +176,11 @@ connection string. In this profile:
   application-database backup and restore system remains authoritative.
 - External PostgreSQL is mandatory; the embedded PostgreSQL fallback is
   rejected.
+- Startup also requires `PAPERCLIP_VECTOR_INSTALLATION_ID`,
+  `PAPERCLIP_VECTOR_PROFILE`, `PAPERCLIP_VECTOR_COMPANY_ID`, and a comma-separated
+  `PAPERCLIP_VECTOR_ALLOWED_AGENT_IDS`. The values must match the ownership row
+  and agent/company bindings created by the offline provisioner before any
+  database-backed worker or HTTP service is constructed.
 
 The migration runner rewrites upstream migration references that explicitly
 name `public` and scopes legacy catalog probes to `llm`. Runtime connections put
@@ -231,10 +236,12 @@ require a session-capable direct PostgreSQL connection. A deployment whose
 runtime `DATABASE_URL` uses transaction pooling must provide a direct migration
 URL to the same Vector application database.
 
-This is a temporary safety gate, not multi-install support. Running independent
-Paperclip installations against the same `llm` schema remains unsupported until
-installation identity scopes scheduling, work claiming, recovery, and related
-queries end to end. The standalone deployment profile is unchanged.
+The durable installation/profile/company admission binding is an additional
+omission-safe startup guard, not multi-install execution support. Running
+independent Paperclip processes against the same `llm` schema remains blocked by
+the singleton and unsupported until installation identity scopes scheduling,
+work claiming, recovery, reaping, cancellation, and related queries end to end.
+The standalone deployment profile is unchanged.
 
 ## Cloud runtime identity singleton
 

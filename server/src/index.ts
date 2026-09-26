@@ -106,6 +106,10 @@ import {
   reconcileAdapterAvailability,
 } from "./services/adapter-registry-bootstrap.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
+import {
+  assertVectorRuntimeScopeForDatabase,
+  resolveVectorRuntimeScope,
+} from "./services/vector-runtime-scope.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
 import { isLoopbackHost, rewriteLoopbackUrlPort } from "./url-utils.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
@@ -218,6 +222,10 @@ async function startServerWithDatabaseTeardown(
   await sentryReady;
   ensureDecisionSigningSecret();
   let config = loadConfig();
+  const vectorRuntimeScope = resolveVectorRuntimeScope(
+    config.databaseDeploymentProfile,
+    process.env,
+  );
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
@@ -679,6 +687,19 @@ async function startServerWithDatabaseTeardown(
     await Promise.all(clients.map((client) => endDatabaseClient(client, 5)));
   };
   startupDatabase.close = closeDatabaseClients;
+
+  if (vectorRuntimeScope) {
+    await assertVectorRuntimeScopeForDatabase(db as any, vectorRuntimeScope);
+    logger.info(
+      {
+        installationId: vectorRuntimeScope.installationId,
+        profile: vectorRuntimeScope.profile,
+        companyId: vectorRuntimeScope.companyId,
+        allowedAgentCount: vectorRuntimeScope.allowedAgentIds.length,
+      },
+      "Validated Vector installation runtime scope",
+    );
+  }
   
   // A claimed warm-pool stack may restart while its provider environment still
   // names the pool host. Restore the signed, durable identity before Better
@@ -925,6 +946,7 @@ async function startServerWithDatabaseTeardown(
     uiMode,
     serverPort: listenPort,
     storageService,
+    vectorRuntimeScope,
     feedbackExportService: feedback,
     databaseBackupService: {
       runManualBackup: async () => {

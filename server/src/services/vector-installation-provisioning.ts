@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { Db } from "@paperclipai/db";
+import { type Db, vectorInstallationOwnerships } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { agentService } from "./agents.js";
 import { companyService } from "./companies.js";
@@ -156,10 +157,19 @@ type AgentRecord = {
   metadata: Record<string, unknown> | null;
 };
 
+type InstallationOwnershipRecord = {
+  installationId: string;
+  profile: string;
+  companyId: string;
+};
+
 export interface VectorProvisioningPort {
   listCompanies(): Promise<CompanyRecord[]>;
   getCompany(id: string): Promise<CompanyRecord | null>;
   createCompany(input: CompanyRecord): Promise<CompanyRecord>;
+  getOwnershipByInstallationId(installationId: string): Promise<InstallationOwnershipRecord | null>;
+  getOwnershipByCompanyId(companyId: string): Promise<InstallationOwnershipRecord | null>;
+  createOwnership(input: InstallationOwnershipRecord): Promise<InstallationOwnershipRecord>;
   listAgents(companyId: string): Promise<AgentRecord[]>;
   getAgent(id: string): Promise<AgentRecord | null>;
   createAgent(companyId: string, input: Omit<AgentRecord, "companyId">): Promise<AgentRecord>;
@@ -180,7 +190,7 @@ export interface VectorProvisioningReceipt {
   manifestRevision: number;
   companyId: string;
   agentId: string;
-  created: { company: boolean; agent: boolean };
+  created: { company: boolean; ownership: boolean; agent: boolean };
 }
 
 function stableJson(value: unknown): string {
@@ -298,6 +308,27 @@ export async function reconcileVectorInstallation(
     companyCreated = true;
   }
 
+  const ownershipExpected = {
+    installationId: manifest.installationId,
+    profile: manifest.profile,
+    companyId: company.id,
+  };
+  const installationOwnership = await port.getOwnershipByInstallationId(manifest.installationId);
+  const companyOwnership = await port.getOwnershipByCompanyId(company.id);
+  if (installationOwnership && companyOwnership
+      && stableJson(installationOwnership) !== stableJson(companyOwnership)) {
+    throw new Error("Vector provisioning installation ownership collision");
+  }
+  const ownership = installationOwnership ?? companyOwnership;
+  let ownershipCreated = false;
+  if (ownership) {
+    assertEqual("installationOwnership", ownership, ownershipExpected);
+  } else {
+    const created = await port.createOwnership(ownershipExpected);
+    assertEqual("installationOwnership", created, ownershipExpected);
+    ownershipCreated = true;
+  }
+
   let agent = await port.getAgent(manifest.agent.id);
   let agentCreated = false;
   if (agent) {
@@ -318,7 +349,7 @@ export async function reconcileVectorInstallation(
     manifestRevision: manifest.manifestRevision,
     companyId: company.id,
     agentId: agent.id,
-    created: { company: companyCreated, agent: agentCreated },
+    created: { company: companyCreated, ownership: ownershipCreated, agent: agentCreated },
   };
 }
 
@@ -329,6 +360,32 @@ function productionPort(db: Db): VectorProvisioningPort {
     listCompanies: () => companies.list() as Promise<CompanyRecord[]>,
     getCompany: (id) => companies.getById(id) as Promise<CompanyRecord | null>,
     createCompany: (input) => companies.create(input) as Promise<CompanyRecord>,
+    getOwnershipByInstallationId: (installationId) =>
+      db
+        .select({
+          installationId: vectorInstallationOwnerships.installationId,
+          profile: vectorInstallationOwnerships.profile,
+          companyId: vectorInstallationOwnerships.companyId,
+        })
+        .from(vectorInstallationOwnerships)
+        .where(eq(vectorInstallationOwnerships.installationId, installationId))
+        .then((rows) => rows[0] ?? null),
+    getOwnershipByCompanyId: (companyId) =>
+      db
+        .select({
+          installationId: vectorInstallationOwnerships.installationId,
+          profile: vectorInstallationOwnerships.profile,
+          companyId: vectorInstallationOwnerships.companyId,
+        })
+        .from(vectorInstallationOwnerships)
+        .where(eq(vectorInstallationOwnerships.companyId, companyId))
+        .then((rows) => rows[0] ?? null),
+    createOwnership: (input) =>
+      db.insert(vectorInstallationOwnerships).values(input).returning({
+        installationId: vectorInstallationOwnerships.installationId,
+        profile: vectorInstallationOwnerships.profile,
+        companyId: vectorInstallationOwnerships.companyId,
+      }).then((rows) => rows[0]!),
     listAgents: (companyId) => agents.list(companyId, { includeTerminated: true }) as Promise<AgentRecord[]>,
     getAgent: (id) => agents.getById(id) as Promise<AgentRecord | null>,
     createAgent: (companyId, input) => agents.create(companyId, input) as Promise<AgentRecord>,

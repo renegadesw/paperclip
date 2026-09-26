@@ -68,15 +68,20 @@ async function fixture() {
   return { manifest, toolPolicy, stagedReleaseRoot, activeReleaseRoot };
 }
 
-function memoryPort(): VectorProvisioningPort & { companies: any[]; agents: any[] } {
+function memoryPort(): VectorProvisioningPort & { companies: any[]; ownerships: any[]; agents: any[] } {
   const companies: any[] = [];
+  const ownerships: any[] = [];
   const agents: any[] = [];
   return {
     companies,
+    ownerships,
     agents,
     listCompanies: async () => companies,
     getCompany: async (id) => companies.find((row) => row.id === id) ?? null,
     createCompany: async (input) => { companies.push({ ...input }); return companies.at(-1); },
+    getOwnershipByInstallationId: async (installationId) => ownerships.find((row) => row.installationId === installationId) ?? null,
+    getOwnershipByCompanyId: async (companyId) => ownerships.find((row) => row.companyId === companyId) ?? null,
+    createOwnership: async (input) => { ownerships.push({ ...input }); return ownerships.at(-1); },
     listAgents: async (companyId) => agents.filter((row) => row.companyId === companyId),
     getAgent: async (id) => agents.find((row) => row.id === id) ?? null,
     createAgent: async (companyId, input) => { agents.push({ ...input, companyId }); return agents.at(-1); },
@@ -92,14 +97,19 @@ describe("Vector installation provisioning", () => {
     expect(first).toMatchObject({
       companyId: f.manifest.company.id,
       agentId: f.manifest.agent.id,
-      created: { company: true, agent: true },
+      created: { company: true, ownership: true, agent: true },
     });
     expect(retry).toMatchObject({
       companyId: first.companyId,
       agentId: first.agentId,
-      created: { company: false, agent: false },
+      created: { company: false, ownership: false, agent: false },
     });
     expect(port.companies).toHaveLength(1);
+    expect(port.ownerships).toEqual([{
+      installationId: f.manifest.installationId,
+      profile: f.manifest.profile,
+      companyId: f.manifest.company.id,
+    }]);
     expect(port.agents).toHaveLength(1);
     expect(port.agents[0].adapterConfig).toMatchObject({
       executionMode: "rpc",
@@ -145,6 +155,7 @@ describe("Vector installation provisioning", () => {
         ...change,
       })).rejects.toThrow();
       expect(port.companies).toHaveLength(0);
+      expect(port.ownerships).toHaveLength(0);
       expect(port.agents).toHaveLength(0);
     }
 
@@ -155,6 +166,77 @@ describe("Vector installation provisioning", () => {
       selectedProfile: "engineering",
       effectiveToolPolicy: f.toolPolicy,
     })).rejects.toThrow("company identity collision");
+  });
+
+  it("fails on installation, company, or profile ownership drift", async () => {
+    const f = await fixture();
+    const cases = [
+      { installationId: f.manifest.installationId, profile: "standard", companyId: f.manifest.company.id },
+      { installationId: "another-installation", profile: f.manifest.profile, companyId: f.manifest.company.id },
+      { installationId: f.manifest.installationId, profile: f.manifest.profile, companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    ];
+    for (const ownership of cases) {
+      const port = memoryPort();
+      port.companies.push({ ...f.manifest.company });
+      port.ownerships.push(ownership);
+      await expect(reconcileVectorInstallation(port, {
+        ...f,
+        selectedProfile: "engineering",
+        effectiveToolPolicy: f.toolPolicy,
+      })).rejects.toThrow(/ownership|installationOwnership/);
+      expect(port.agents).toHaveLength(0);
+    }
+  });
+
+  it("keeps two installation ownerships distinct on a shared database port", async () => {
+    const first = await fixture();
+    const second = await fixture();
+    second.manifest.installationId = "stecke1-engineering";
+    second.manifest.company = {
+      ...second.manifest.company,
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "Vector Engineering Two",
+    };
+    second.manifest.agent = {
+      ...second.manifest.agent,
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      name: "FunkyDev Two",
+    };
+    const port = memoryPort();
+    await reconcileVectorInstallation(port, {
+      ...first,
+      selectedProfile: "engineering",
+      effectiveToolPolicy: first.toolPolicy,
+    });
+    await reconcileVectorInstallation(port, {
+      ...second,
+      selectedProfile: "engineering",
+      effectiveToolPolicy: second.toolPolicy,
+    });
+    expect(port.ownerships).toEqual([
+      {
+        installationId: first.manifest.installationId,
+        profile: "engineering",
+        companyId: first.manifest.company.id,
+      },
+      {
+        installationId: second.manifest.installationId,
+        profile: "engineering",
+        companyId: second.manifest.company.id,
+      },
+    ]);
+    const crossed = {
+      ...second,
+      manifest: {
+        ...second.manifest,
+        installationId: first.manifest.installationId,
+      },
+    };
+    await expect(reconcileVectorInstallation(port, {
+      ...crossed,
+      selectedProfile: "engineering",
+      effectiveToolPolicy: second.toolPolicy,
+    })).rejects.toThrow(/ownership/);
   });
 
   it.each([

@@ -180,6 +180,7 @@ import {
   resolveVectorIngressAuthConfig,
   vectorIngressRoutes,
 } from "./routes/vector-ingress.js";
+import type { VectorRuntimeScope } from "./services/vector-runtime-scope.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -463,6 +464,7 @@ export async function createApp(
     uiMode: UiMode;
     serverPort: number;
     storageService: StorageService;
+    vectorRuntimeScope?: VectorRuntimeScope | null;
     feedbackExportService?: {
       flushPendingFeedbackTraces(input?: {
         companyId?: string;
@@ -582,7 +584,10 @@ export async function createApp(
   const connectionIntentHeartbeat = heartbeatService(db, {
     pluginWorkerManager: workerManager,
   });
-  const vectorIngressAuth = resolveVectorIngressAuthConfig(process.env);
+  const vectorIngressAuth = resolveVectorIngressAuthConfig(
+    process.env,
+    opts.vectorRuntimeScope ?? null,
+  );
   if (vectorIngressAuth) {
     // This service-to-service boundary has its own exact-body HMAC and direct
     // loopback-peer check. Keep it outside the board mutation router: Vector OS
