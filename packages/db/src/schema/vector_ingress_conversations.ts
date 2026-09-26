@@ -37,6 +37,8 @@ export const vectorIngressConversations = pgTable(
     profileId: varchar("profile_id", { length: 256 }).notNull(),
     ownerSha256: varchar("owner_sha256", { length: 64 }).notNull(),
     externalSessionId: varchar("external_session_id", { length: 512 }).notNull(),
+    sessionRole: varchar("session_role", { length: 32 }),
+    repository: varchar("repository", { length: 201 }),
     model: varchar("model", { length: 256 }),
     thinking: varchar("thinking", { length: 16 }),
     createdAt: timestamp("created_at", { withTimezone: true })
