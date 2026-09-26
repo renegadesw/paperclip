@@ -146,6 +146,9 @@ import type {
 import {
   CLASS3_STATIC_LEASE_ALLOWLIST,
   GITHUB_CONNECTOR_PROFILES,
+  githubConnectorProfileForConfig,
+  githubConnectorProfileHeaders,
+  isGitHubConnectorToolAllowed,
   GOOGLE_WORKSPACE_CONNECTOR_PROFILES,
   connectionIntentPayloadSchema,
   credentialConfigPath,
@@ -6737,11 +6740,14 @@ export function toolAccessService(
     const composioSession = composioChild
       ? await composioSessions.ensureSession(connection.id)
       : null;
-    let headers = composioSession?.headers ??
-      credentialHeaders ?? {
-        ...projectedConnectionHeaders(connection),
-        ...(await resolveCredentialHeaders(connection, actor)),
-      };
+    let headers = {
+      ...githubConnectorProfileHeaders(connection.config),
+      ...(composioSession?.headers ??
+        credentialHeaders ?? {
+          ...projectedConnectionHeaders(connection),
+          ...(await resolveCredentialHeaders(connection, actor)),
+        }),
+    };
     const endpoint =
       composioSession?.url ?? (await resolvedRemoteEndpoint(connection, actor));
     // Pinned to the address the guard approved: `config.url` is operator-supplied,
@@ -7761,6 +7767,7 @@ export function toolAccessService(
         sourceTemplateKey === "posthog" ||
         refreshOptions.quarantineManagedOAuthDraft === true);
     const safeDefault = asRecord(connection.config).safeDefault === true;
+    const githubProfile = githubConnectorProfileForConfig(connection.config);
     for (const descriptor of descriptors) {
       const riskLevel = classifyRisk(descriptor, sourceTemplateKey);
       const hash = descriptorHash(descriptor, riskLevel);
@@ -7775,8 +7782,10 @@ export function toolAccessService(
         existing?.status !== "disabled" &&
         (!safeDefault || riskLevel !== "read");
       const googlePermanentlyBlocked = Boolean(
-        googleProfile &&
-        !isGoogleWorkspaceToolAllowed(googleProfile, descriptor),
+        (googleProfile &&
+          !isGoogleWorkspaceToolAllowed(googleProfile, descriptor)) ||
+        (githubProfile &&
+          !isGitHubConnectorToolAllowed(githubProfile, descriptor.name, riskLevel)),
       );
       const status = googlePermanentlyBlocked
         ? "disabled"

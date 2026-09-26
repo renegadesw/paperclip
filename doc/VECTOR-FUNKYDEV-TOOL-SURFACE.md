@@ -21,7 +21,7 @@ also contains:
 | Read-only Vault reference | `vault_search`, `vault_read` | Ported as a package asset; runtime selection requires the sealed engineering release manifest |
 | Operator question | `ask_user` | Paperclip callback bridge packaged; Vector OS must provide the durable question executor before activation |
 | Todos | `todo_add`, `todo_list`, `todo_update`, `todo_mark_done` | Paperclip callback bridge packaged; Vector OS must provide owner-scoped executors before activation |
-| GitHub broker and publisher | `github_read`, `github_manage`, `github_api`, `github_repo`, `publish_branch` | Ported through the run-scoped Vector callback; the grant is bound to the session's server-resolved role and repository, and the parent holds the GitHub App credential |
+| GitHub | Paperclip `github.code` connector | Retired from Vector: the `github_*` tools, `publish_branch`, and the `gh` shim are gone. GitHub is the hosted GitHub MCP connector plus Paperclip's run-scoped `git`/`gh` launchers |
 | Personal memory | `memory_save`, `memory_search`, `memory_forget` | Paperclip callback bridge packaged; Vector OS must provide the three owner-scoped executors before activation |
 | Voice marker | `speak` | Ported in the matching Vector OS release: sealed local extension for engineering/standard, existing tool-frame projection, and private per-turn voice context; physical-device playback still requires acceptance |
 | LLM meter | no model-callable tool | Not ported: Paperclip owns its run usage/cost accounting |
@@ -36,6 +36,51 @@ only surface proven to reach an actual `/fd` session from current source is
 Pi's built-ins (and the runtime user's ordinary environment); the other tools
 are intended but not proven active. Paperclip does not copy that service-name
 bug: the installation profile, not a request service string, owns the ceiling.
+
+## Paperclip connectors on every Vector profile
+
+Pi has no MCP client, so `pi_local` delivers the run's granted connections
+itself (`server/paperclip-connectors.ts`). Before spawn it calls
+`initialize` and `tools/list` on each `ctx.runtimeMcp` endpoint. Each endpoint
+is a Paperclip tool gateway with a short-lived run token, one per grant the
+agent effectively holds. The adapter writes the tools to a private 0600 file,
+and the adapter-owned `vector-extensions/paperclip-connectors.ts` registers
+them as Pi tools that forward to the same gateway's `tools/call`. The gateway
+enforces the grant, the write and destructive approval policy, and audit. The
+listed names are added to Pi's `--tools` allowlist on every profile. That
+admits connector tools on Standard and the Funky servers without enabling a
+Pi built-in or any filesystem or shell authority.
+
+| Profile | Pi built-ins | Vector tools | Paperclip connectors |
+| --- | --- | --- | --- |
+| engineering (FunkyDev) | bash, edit, find, grep, ls, read, write | ask_user, todo_*, memory_*, vault_read, vault_search, speak | granted connectors (GitHub via `github.code`, Google, ...), plus Paperclip's run-scoped git/gh launchers on bash's PATH |
+| standard (Standard Chat) | none | ask_user, todo_*, memory_*, speak | granted connectors |
+| staging / production (Funky) | none | the Funky analyst tools | granted connectors |
+| demo | none | none | granted connectors |
+
+`github.code` requests the hosted toolsets
+`context,repos,issues,pull_requests,users,labels,actions` (`X-MCP-Toolsets`).
+It admits every read tool and exactly these write tools: `create_branch`,
+`create_or_update_file`, `push_files`, `delete_file`, `issue_write`,
+`sub_issue_write`, `add_issue_comment`, `update_issue_comment`,
+`create_pull_request`, `update_pull_request`, `update_pull_request_branch`,
+`merge_pull_request`, `pull_request_review_write`,
+`add_comment_to_pending_review`, `add_reply_to_pull_request_comment`,
+`label_write`, and `actions_run_trigger`. Any other write tool is disabled in
+the catalog. Destructive tools still need formal approval at call time.
+
+To grant GitHub to FunkyDev on the board: Connectors, then GitHub, then
+Connect (managed). Authorize the Paperclip GitHub App and choose the
+repositories. Then grant the connection to the FunkyDev agent (an agent grant,
+or a user grant for the responsible user). Other connectors are granted the
+same way, to Standard Chat or to the Funky agents. The next run lists the
+granted tools and receives the git/gh identity.
+
+Controller-owned run env (the git/gh launcher `PATH`, the GitHub broker
+URL/token, Git hardening, and scratch directories) is not agent
+configuration. Engineering forwards it to Pi's bash. Restricted profiles strip
+the shell part. They still reject every key the agent's own `adapterConfig.env`
+sets.
 
 ## Legacy parity
 

@@ -3,14 +3,11 @@
   "description": "Legacy native FunkyDev pi tool surface, captured by executing agents/piext/*.ts with typebox 1.3.7. Memory recall is rendered from one stub core note (<CORE_SUMMARY>/<CORE_BODY>) and one standard note (<RECENT_SUMMARY>).",
   "source": {
     "repository": "renegadesw/vector-os",
-    "ref": "9bb788cfaaea7f5a14af066e92b2aaf4a73a53a2",
+    "ref": "9dab191a3e9ad218a2e29f1dbbbcf706d461f28b",
     "directory": "agents/piext",
     "files": {
       "todo.ts": "0a53eae4ce7cb429d398018c317c4e542cd5f5a6f2ec09ea90b0ef0b40f14b0b",
       "ask_user.ts": "16d5605c3ae82f5cae6527fd5e90f543091e31d28ea7ed20f6bc182b662a7ffb",
-      "github-publish.ts": "cbb5724a508466ab4ffd9974ad25d6d6b56c4bca033aef43e64c91c8b005d6ce",
-      "github-broker.ts": "fe09602ba15c7b9517eb5120f6eb6a1785651dc34fca038ebe265745e08626a4",
-      "github-fd.ts": "d42895ee3842f6ad592e60e17b0a4fb1bbee9e4c9e8d00cdb93d7c8014b62250",
       "speak.ts": "7666c99ec8ea7ab2cb5a693631848025f3830db708e487eb2c65404743ec9b3e",
       "memory.ts": "befd21759dc3d21947b08ec6f5f0d9473a4b9c783ba44eba058388f44dd6f966",
       "vault-reference.ts": "5dc2260773b506b6e594bdaf898028d5616127aa1fb327597b7860499b05a43a",
@@ -53,261 +50,6 @@
               }
             },
             "description": "Optional suggestions. The operator may choose one or type a different free-text answer."
-          }
-        }
-      }
-    },
-    {
-      "extension": "github-fd.ts",
-      "name": "github_api",
-      "label": "GitHub API",
-      "description": "Call GitHub's repo-scoped REST API using FD's GitHub App access. This is the general tool for creating/updating/closing/commenting on PRs and issues, reviews, workflow dispatch/rerun/cancel, deployments, releases, branches, and other repository operations. Use a path beginning /repos/owner/repo (for example POST /repos/acme/app/pulls). The response includes GitHub's status and body. PR merge is intentionally handled by github_manage(kind=merge) so its exact-head guard remains enforced.",
-      "parameters": {
-        "type": "object",
-        "required": [
-          "method",
-          "path"
-        ],
-        "properties": {
-          "method": {
-            "anyOf": [
-              {
-                "type": "string",
-                "const": "GET"
-              },
-              {
-                "type": "string",
-                "const": "POST"
-              },
-              {
-                "type": "string",
-                "const": "PATCH"
-              },
-              {
-                "type": "string",
-                "const": "PUT"
-              },
-              {
-                "type": "string",
-                "const": "DELETE"
-              }
-            ]
-          },
-          "path": {
-            "type": "string",
-            "description": "GitHub REST path beginning /repos/owner/repo; query parameters are allowed."
-          },
-          "body": {
-            "description": "Request body as an object literal (NOT a JSON string). Example: {\"base\":\"main\",\"head\":\"artifacts-pr1\",\"title\":\"…\"}. Do NOT call JSON.stringify — the wrapper handles serialization. If you pass a string GitHub returns 422 because bodies must be JSON objects."
-          }
-        }
-      }
-    },
-    {
-      "extension": "github-broker.ts",
-      "name": "github_manage",
-      "label": "Manage GitHub",
-      "description": "Change GitHub through the daemon: label_add / label_remove, label_ensure, ready, draft, or merge with the validated head `sha`. Merge requires the head sha from a pr_view in this turn and refuses if the head moved, if the PR is draft, or if mergeable_state is not \"clean\". The merge method is always a merge commit. Read-only roles are refused. Native FD supplies repo=owner/name.",
-      "parameters": {
-        "type": "object",
-        "required": [
-          "kind"
-        ],
-        "properties": {
-          "kind": {
-            "anyOf": [
-              {
-                "type": "string",
-                "const": "label_add"
-              },
-              {
-                "type": "string",
-                "const": "label_remove"
-              },
-              {
-                "type": "string",
-                "const": "ready"
-              },
-              {
-                "type": "string",
-                "const": "draft"
-              },
-              {
-                "type": "string",
-                "const": "merge"
-              },
-              {
-                "type": "string",
-                "const": "label_ensure"
-              }
-            ]
-          },
-          "repo": {
-            "type": "string",
-            "description": "Repository as owner/name. FD may choose any repository available to its GitHub App."
-          },
-          "number": {
-            "type": "number",
-            "description": "Pull request number. Omit to use this session's assigned PR."
-          },
-          "numbers": {
-            "type": "array",
-            "items": {
-              "type": "number"
-            },
-            "description": "Pull request numbers for a batch label operation."
-          },
-          "labels": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Labels, for label_add / label_remove."
-          },
-          "sha": {
-            "type": "string",
-            "description": "Head sha you validated. Required for kind=merge."
-          },
-          "color": {
-            "type": "string",
-            "description": "Six-digit color for label_ensure."
-          },
-          "description": {
-            "type": "string",
-            "description": "Label description for label_ensure."
-          }
-        }
-      }
-    },
-    {
-      "extension": "github-broker.ts",
-      "name": "github_read",
-      "label": "Read GitHub",
-      "description": "Read GitHub through the vector-agents daemon. Use this instead of `gh` — this session has no GitHub credential and `gh` is unauthenticated. kind=pr_view returns state, draft, mergeable_state, head/base refs, head sha and labels. kind=pr_diff returns the unified diff. kind=pr_checks returns each check plus a verdict of passing/failing/pending/none at the current head. kind=run_failures returns the failing job, failing step and the pre-filtered failure lines for a workflow run id. kind=pr_list and kind=issue_list return open pull requests / issues. kind=repo_list lists App repositories; kind=file_read reads a repository path. Native FD supplies repo=owner/name; assigned sessions remain pinned to their recorded repository.",
-      "parameters": {
-        "type": "object",
-        "required": [
-          "kind"
-        ],
-        "properties": {
-          "kind": {
-            "anyOf": [
-              {
-                "type": "string",
-                "const": "pr_view"
-              },
-              {
-                "type": "string",
-                "const": "pr_diff"
-              },
-              {
-                "type": "string",
-                "const": "pr_checks"
-              },
-              {
-                "type": "string",
-                "const": "run_failures"
-              },
-              {
-                "type": "string",
-                "const": "pr_list"
-              },
-              {
-                "type": "string",
-                "const": "issue_list"
-              },
-              {
-                "type": "string",
-                "const": "repo_list"
-              },
-              {
-                "type": "string",
-                "const": "file_read"
-              }
-            ]
-          },
-          "repo": {
-            "type": "string",
-            "description": "Repository as owner/name. FD may choose any repository available to its GitHub App."
-          },
-          "number": {
-            "type": "number",
-            "description": "Pull request number. Omit to use this session's assigned PR."
-          },
-          "run_id": {
-            "type": "number",
-            "description": "Workflow run id. Required for kind=run_failures."
-          },
-          "path": {
-            "type": "string",
-            "description": "Repository-relative path. Required for kind=file_read."
-          },
-          "ref": {
-            "type": "string",
-            "description": "Branch, tag, or SHA for kind=file_read."
-          }
-        }
-      }
-    },
-    {
-      "extension": "github-fd.ts",
-      "name": "github_repo",
-      "label": "GitHub repository",
-      "description": "Operate on a private or public GitHub checkout without exposing credentials or a shell. clone creates owner/name inside this session workspace. branch creates a non-default topic branch using ref. status reports the branch and changed files. commit stages all workspace changes and commits them using message. fetch/pull refresh; push publishes the current non-default branch; publish is an alias for push.",
-      "parameters": {
-        "type": "object",
-        "required": [
-          "kind",
-          "repo"
-        ],
-        "properties": {
-          "kind": {
-            "anyOf": [
-              {
-                "type": "string",
-                "const": "clone"
-              },
-              {
-                "type": "string",
-                "const": "fetch"
-              },
-              {
-                "type": "string",
-                "const": "pull"
-              },
-              {
-                "type": "string",
-                "const": "branch"
-              },
-              {
-                "type": "string",
-                "const": "status"
-              },
-              {
-                "type": "string",
-                "const": "commit"
-              },
-              {
-                "type": "string",
-                "const": "push"
-              },
-              {
-                "type": "string",
-                "const": "publish"
-              }
-            ]
-          },
-          "repo": {
-            "type": "string",
-            "description": "Repository as owner/name."
-          },
-          "ref": {
-            "type": "string",
-            "description": "Branch/tag for clone, or new topic branch for kind=branch."
-          },
-          "message": {
-            "type": "string",
-            "description": "Commit message for kind=commit."
           }
         }
       }
@@ -384,16 +126,6 @@
             "description": "Maximum results from 1 to 20. Default 8."
           }
         }
-      }
-    },
-    {
-      "extension": "github-publish.ts",
-      "name": "publish_branch",
-      "label": "Publish branch",
-      "description": "Publish the current committed branch through the vector-agents daemon. Use this instead of git push or gh. The daemon derives the assigned repository and delivery policy, normally refuses default branches, permits a guarded non-force default-branch push only for an allowlisted direct-main assignment, and never returns its GitHub credential.",
-      "parameters": {
-        "type": "object",
-        "properties": {}
       }
     },
     {
@@ -572,9 +304,6 @@
       "before_agent_start"
     ],
     "ask_user.ts": [],
-    "github-publish.ts": [],
-    "github-broker.ts": [],
-    "github-fd.ts": [],
     "speak.ts": [
       "before_agent_start"
     ],

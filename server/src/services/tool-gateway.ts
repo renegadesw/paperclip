@@ -75,6 +75,7 @@ import type {
 } from "@paperclipai/shared";
 import {
   isGitHubConnectorProfileId,
+  githubConnectorProfileHeaders,
   isGoogleWorkspaceConnectorProfileId,
   type GitHubConnectorProfileId,
   type GoogleWorkspaceConnectorProfileId,
@@ -3831,7 +3832,8 @@ export function createToolGatewayService(
               eq(runIdentityContexts.companyId, session.companyId),
             ),
           );
-      return headers;
+      // The managed GitHub profile selects its hosted MCP toolsets per request.
+      return { ...githubConnectorProfileHeaders(connection.config), ...headers };
     } catch (error) {
       if (tracked)
         await db

@@ -74,7 +74,10 @@ describe("FunkyDev legacy tool parity", () => {
   it("serves every legacy callback tool with the exact legacy label, description, and schema", async () => {
     const snapshot = await loadSnapshot();
     const legacy = snapshot.tools.filter((tool) => !VAULT_TOOLS.has(tool.name) && !VECTOR_OS_ASSET_TOOLS.has(tool.name));
-    expect(legacy.map((tool) => tool.name)).toContain("publish_branch");
+    expect(legacy.map((tool) => tool.name).sort()).toEqual([
+      "ask_user", "memory_forget", "memory_save", "memory_search",
+      "todo_add", "todo_list", "todo_mark_done", "todo_update",
+    ]);
     const { registered } = await bridgeWith(legacy.map((tool) => tool.name), () => json(200, { result: null }));
     for (const tool of legacy) {
       const got = registered.find((candidate) => candidate.name === tool.name);
@@ -147,18 +150,25 @@ describe("FunkyDev legacy tool parity", () => {
     expect(output.systemPrompt).toBe("BASE");
   });
 
+  it("carries no Vector GitHub tool definitions; GitHub is Paperclip's connector", async () => {
+    const snapshot = await loadSnapshot();
+    expect(snapshot.tools.some((tool) => tool.name.startsWith("github_") || tool.name === "publish_branch")).toBe(false);
+    const source = await fs.readFile(path.join(here, "..", "vector-extensions", "vector-tool-bridge.ts"), "utf8");
+    expect(source).not.toMatch(/\b(github_read|github_manage|github_api|github_repo|publish_branch)\b/);
+  });
+
   it("returns a refusal to the model as a tool result so it can correct the call", async () => {
-    const { registered } = await bridgeWith(["publish_branch"], () =>
-      json(422, { error: "tool_refused", message: "refusing to publish a detached HEAD" }));
-    const output = await registered[0].execute("call-publish", {});
+    const { registered } = await bridgeWith(["todo_add"], () =>
+      json(422, { error: "tool_refused", message: "todo_add requires a non-empty title" }));
+    const output = await registered[0].execute("call-todo", { title: "" });
     expect(output).toEqual({
-      content: [{ type: "text", text: "publish_branch refused: refusing to publish a detached HEAD" }],
+      content: [{ type: "text", text: "todo_add refused: todo_add requires a non-empty title" }],
       details: null,
     });
   });
 
   it("still fails closed on a transport or authority failure", async () => {
-    const { registered } = await bridgeWith(["publish_branch"], () => json(403, { error: "invalid_authority" }));
-    await expect(registered[0].execute("call-publish", {})).rejects.toThrow("failed with status 403");
+    const { registered } = await bridgeWith(["todo_list"], () => json(403, { error: "invalid_authority" }));
+    await expect(registered[0].execute("call-todo", {})).rejects.toThrow("failed with status 403");
   });
 });

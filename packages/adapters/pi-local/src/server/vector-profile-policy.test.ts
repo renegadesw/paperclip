@@ -216,7 +216,8 @@ describe("Vector Pi profile isolation", () => {
     expect(statuses.get("pi-builtins")).toBe("native");
     expect(statuses.get("operator-question")).toBe("ported");
     expect(statuses.get("todos")).toBe("ported");
-    expect(statuses.get("github-broker")).toBe("ported");
+    expect(statuses.get("github")).toBe("external");
+    expect(statuses.has("github-broker")).toBe(false);
     expect(statuses.get("personal-memory")).toBe("ported");
     expect(statuses.get("vector-os-mcp")).toBe("blocked");
     expect(statuses.get("rctl")).toBe("external");

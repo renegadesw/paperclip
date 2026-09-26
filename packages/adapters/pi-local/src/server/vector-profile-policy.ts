@@ -64,10 +64,10 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
     dependency: "Uses the run-scoped Vector callback authority and durable llm.paperclip_todos state.",
   },
   {
-    capability: "github-broker",
-    tools: ["github_read", "github_manage", "github_api", "github_repo", "publish_branch"],
-    status: "ported",
-    dependency: "Uses the run-scoped Vector callback authority bound to the session's server-resolved role and repository; the parent holds the GitHub App credential.",
+    capability: "github",
+    tools: [],
+    status: "external",
+    dependency: "Paperclip's github.code connector: hosted GitHub MCP tools and run-scoped git/gh launchers, granted to the agent on the board. Vector's legacy github_* tools and gh shim are retired.",
   },
   {
     capability: "personal-memory",
@@ -126,6 +126,28 @@ const RESTRICTED_LONG_FLAGS = [
   "--use-theme",
 ] as const;
 
+/**
+ * Shell and Git environment the Paperclip controller itself injects into every
+ * run (prepareGitHubExecutionEnvironment and prepareGitHubOperationLaunchers):
+ * the managed git/gh launchers on PATH, the GitHub broker URL/token, and Git
+ * hardening. It is not agent configuration. Engineering forwards it to Pi's
+ * bash; restricted profiles have no shell, ignore it here, and strip it.
+ */
+const PAPERCLIP_CONTROLLER_SHELL_ENV_KEY =
+  /^(PATH|ZDOTDIR|BASH_ENV|GH_CONFIG_DIR|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|SSH_AUTH_SOCK|SSH_ASKPASS|GIT_[A-Z0-9_]+|PAPERCLIP_GITHUB_[A-Z0-9_]+|PAPERCLIP_GIT_[A-Z0-9_]+|PAPERCLIP_RUNNER_NETWORK_[A-Z0-9_]+)$/;
+
+export function isPaperclipControllerShellEnvKey(key: string): boolean {
+  return PAPERCLIP_CONTROLLER_SHELL_ENV_KEY.test(key);
+}
+
+// The controller's per-run scratch and temp directories (paperclipScratch).
+const PAPERCLIP_CONTROLLER_SCRATCH_ENV_KEY =
+  /^(TMPDIR|TEMP|TMP|PAPERCLIP_TMPDIR|PAPERCLIP_SCRATCH_DIR|PAPERCLIP_RUN_SCRATCH_DIR|PAPERCLIP_TASK_SCRATCH_DIR)$/;
+
+function isPaperclipControllerEnvKey(key: string): boolean {
+  return PAPERCLIP_CONTROLLER_SHELL_ENV_KEY.test(key) || PAPERCLIP_CONTROLLER_SCRATCH_ENV_KEY.test(key);
+}
+
 function normalizeProfile(profile: string | undefined): string {
   return profile?.trim().toLowerCase() ?? "";
 }
@@ -167,6 +189,7 @@ function validateRestrictedConfig(
   extraArgs: readonly string[],
   command: string,
   deploymentCommand: string | undefined,
+  agentConfiguredEnv: Record<string, unknown> | undefined,
 ): void {
   const allowedCommand = deploymentCommand?.trim() || "pi";
   if (command !== allowedCommand) {
@@ -182,11 +205,20 @@ function validateRestrictedConfig(
     }
   }
 
+  // With the agent's own configured env in hand, every key the agent set is
+  // rejected, and the runtime config may additionally carry only
+  // controller-owned run env. Without it, any env is rejected.
   const env = normalizedEnv(config);
-  const envNames = Object.keys(env);
+  const agentNames = agentConfiguredEnv ? Object.keys(agentConfiguredEnv) : null;
+  const envNames = agentNames === null
+    ? Object.keys(env)
+    : Array.from(new Set([
+      ...agentNames,
+      ...Object.keys(env).filter((name) => !agentNames.includes(name) && !isPaperclipControllerEnvKey(name)),
+    ]));
   if (envNames.length > 0) {
     throw new Error(
-      `Vector profile "${profile}" forbids mutable agent env; move required values to the deployment process environment.`,
+      `Vector profile "${profile}" forbids mutable agent env (${envNames.sort().join(", ")}); move required values to the deployment process environment.`,
     );
   }
 
@@ -310,6 +342,8 @@ export async function prepareVectorPiProfilePolicy(input: {
   packagedExtensionsJson?: string;
   command?: string;
   deploymentCommand?: string;
+  /** The agent's stored adapterConfig.env, as opposed to the controller-merged runtime env. */
+  agentConfiguredEnv?: Record<string, unknown>;
 }): Promise<VectorPiProfilePolicy> {
   const profile = normalizeProfile(input.profile);
   const restricted = vectorPiProfileIsRestricted(profile);
@@ -333,6 +367,7 @@ export async function prepareVectorPiProfilePolicy(input: {
     input.extraArgs ?? [],
     input.command?.trim() || "pi",
     input.deploymentCommand,
+    input.agentConfiguredEnv,
   );
   const extensions = await verifyPackagedExtensions(input.packagedExtensionsJson, profile);
   const allowedTools = Array.from(new Set(extensions.flatMap((entry) => entry.tools)));
@@ -362,4 +397,50 @@ export async function prepareVectorPiProfilePolicy(input: {
     useBundledPaperclipSkillsOnly: true,
     additionalToolNames: [],
   };
+}
+
+/** Tool names a profile policy already admits (Pi built-ins excluded). */
+export function vectorPiPolicyToolNames(policy: VectorPiProfilePolicy): string[] {
+  const names = [...policy.additionalToolNames];
+  const toolsIndex = policy.cliArgs.indexOf("--tools");
+  if (toolsIndex >= 0 && policy.cliArgs[toolsIndex + 1]) {
+    names.push(...policy.cliArgs[toolsIndex + 1]!.split(",").map((name) => name.trim()).filter(Boolean));
+  }
+  return Array.from(new Set(names));
+}
+
+/**
+ * Admit the run's Paperclip connector tools on any profile. The connector
+ * extension is adapter-owned and registers only tools the Paperclip gateway
+ * listed for this run's grants; it adds no Pi built-in and no filesystem or
+ * shell authority, so restricted profiles stay restricted.
+ */
+export function withPaperclipConnectorTools(
+  policy: VectorPiProfilePolicy,
+  extensionPath: string,
+  toolNames: readonly string[],
+): VectorPiProfilePolicy {
+  const names = Array.from(new Set(toolNames.map((name) => name.trim()).filter(Boolean)));
+  if (names.length === 0) return policy;
+  if (!policy.restricted) {
+    return {
+      ...policy,
+      cliArgs: [...policy.cliArgs, "--extension", extensionPath],
+      additionalToolNames: Array.from(new Set([...policy.additionalToolNames, ...names])),
+    };
+  }
+  const cliArgs = [...policy.cliArgs];
+  const toolsIndex = cliArgs.indexOf("--tools");
+  if (toolsIndex >= 0) {
+    cliArgs[toolsIndex + 1] = Array.from(new Set([
+      ...(cliArgs[toolsIndex + 1] ?? "").split(",").filter(Boolean),
+      ...names,
+    ])).join(",");
+  } else {
+    const noTools = cliArgs.indexOf("--no-tools");
+    if (noTools >= 0) cliArgs.splice(noTools, 1, "--tools", names.join(","));
+    else cliArgs.push("--tools", names.join(","));
+  }
+  cliArgs.push("--extension", extensionPath);
+  return { ...policy, cliArgs };
 }

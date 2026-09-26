@@ -43,7 +43,7 @@ async function fixture() {
       permissions: { filesystem: true, shell: false },
     }, {
       name: "vector.tool-bridge",
-      tools: ["ask_user", "github_api", "github_manage", "github_read", "github_repo", "memory_forget", "memory_save", "memory_search", "publish_branch", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
+      tools: ["ask_user", "memory_forget", "memory_save", "memory_search", "todo_add", "todo_list", "todo_mark_done", "todo_update"],
       permissions: { filesystem: false, shell: false },
     }, {
       name: "vector.speak",
@@ -348,7 +348,7 @@ describe("Vector installation provisioning", () => {
     const speakOnly = f.toolPolicy.extensions[2];
     const chatBridge = {
       ...f.toolPolicy.extensions[1],
-      tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_") && tool !== "publish_branch"),
+      tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
     };
     expect(chatBridge.tools).toEqual([
       "ask_user", "memory_forget", "memory_save", "memory_search",
@@ -372,7 +372,7 @@ describe("Vector installation provisioning", () => {
       agent: { ...standard.agent, role: "implementation-worker" },
     }).success).toBe(false);
     for (const extensions of [[], [speakOnly], [chatBridge], [f.toolPolicy.extensions[0]],
-      [f.toolPolicy.extensions[1], speakOnly], [speakOnly, chatBridge],
+      [speakOnly, chatBridge],
       [chatBridge, { ...speakOnly, permissions: { filesystem: true, shell: false } }],
       [{ ...chatBridge, permissions: { filesystem: false, shell: true } }, speakOnly],
       [{ ...chatBridge, tools: [...chatBridge.tools, "github_read"] }, speakOnly],
@@ -922,7 +922,7 @@ describe("Vector installation provisioning", () => {
         builtinTools: [],
         extensions: [{
           ...f.toolPolicy.extensions[1],
-          tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_") && tool !== "publish_branch"),
+          tools: f.toolPolicy.extensions[1].tools.filter((tool) => !tool.startsWith("github_")),
         }, f.toolPolicy.extensions[2]],
       };
       const manifest = {

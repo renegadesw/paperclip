@@ -191,14 +191,11 @@ const chatCallbackExtension = {
   permissions: { filesystem: false, shell: false },
 };
 
-const engineeringCallbackExtension = {
-  ...chatCallbackExtension,
-  tools: [
-    "ask_user", "github_api", "github_manage", "github_read", "github_repo",
-    "memory_forget", "memory_save", "memory_search", "publish_branch", "todo_add",
-    "todo_list", "todo_mark_done", "todo_update",
-  ],
-};
+// FunkyDev's GitHub access is Paperclip's `github.code` connector (hosted
+// GitHub MCP plus the run-scoped git/gh launchers), granted to the agent on
+// the board. Vector's callback bridge carries only the tools no connector
+// provides, the same set as Standard Chat.
+const engineeringCallbackExtension = chatCallbackExtension;
 
 const stagingCallbackExtension = {
   name: "vector.tool-bridge",

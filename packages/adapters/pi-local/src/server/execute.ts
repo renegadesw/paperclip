@@ -58,8 +58,14 @@ import { extractPiRuntimeEvents, isPiUnknownSessionError, parsePiJsonl } from ".
 import { ensurePiModelConfiguredAndAvailable } from "./models.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { buildPiBuiltinToolArgs } from "./tools.js";
-import { prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
+import {
+  isPaperclipControllerShellEnvKey,
+  prepareVectorPiProfilePolicy,
+  vectorPiPolicyToolNames,
+  withPaperclipConnectorTools,
+} from "./vector-profile-policy.js";
 import { prepareVectorToolCapability } from "./vector-tool-capability.js";
+import { PAPERCLIP_CONNECTOR_TOOLS_ENV, prepareConnectorTools } from "./paperclip-connectors.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { appendVectorVoiceContext } from "./vector-voice-context.js";
 import {
@@ -75,6 +81,16 @@ import {
 } from "./vector-legacy-context.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+// The connector extension ships inside this adapter package (dist/ in the
+// runtime, src/ under test); agent config cannot choose it.
+async function resolvePaperclipConnectorExtensionPath(): Promise<string> {
+  for (const candidate of ["paperclip-connectors.js", "paperclip-connectors.ts"]) {
+    const resolved = path.resolve(__moduleDir, "..", "vector-extensions", candidate);
+    if (await fs.stat(resolved).then((stat) => stat.isFile(), () => false)) return resolved;
+  }
+  throw new Error("The Paperclip connector extension is missing from the Pi adapter package");
+}
 
 const PAPERCLIP_SESSIONS_DIR = path.join(os.homedir(), ".pi", "paperclips");
 const PI_AGENT_SKILLS_DIR = path.join(os.homedir(), ".pi", "agent", "skills");
@@ -126,7 +142,13 @@ const VECTOR_PI_EXPLICIT_ENV_KEYS = new Set([
   "PAPERCLIP_LINKED_ISSUE_IDS",
   "PAPERCLIP_WAKE_PAYLOAD_JSON",
   "PAPERCLIP_VECTOR_TOOL_AUTHORITY_FILE",
+  PAPERCLIP_CONNECTOR_TOOLS_ENV,
 ]);
+
+// Paperclip's managed GitHub identity reaches the shell through run-scoped
+// git/gh launchers on PATH plus a broker URL/token and Git hardening
+// (prepareGitHubOperationLaunchers). Only engineering holds Pi's bash, so only
+// engineering forwards them; restricted profiles strip them (see below).
 
 function vectorPiExplicitEnvKeyAllowed(key: string): boolean {
   return VECTOR_PI_EXPLICIT_ENV_KEYS.has(key)
@@ -137,6 +159,7 @@ function vectorPiExplicitEnvKeyAllowed(key: string): boolean {
 export function projectVectorEmbeddedPiEnvironment(
   inherited: NodeJS.ProcessEnv,
   explicit: Record<string, string>,
+  options: { githubLaunchers?: boolean } = {},
 ): Record<string, string> {
   const projected: Record<string, string> = {};
   for (const [key, value] of Object.entries(inherited)) {
@@ -145,7 +168,9 @@ export function projectVectorEmbeddedPiEnvironment(
     }
   }
   for (const [key, value] of Object.entries(explicit)) {
-    if (vectorPiExplicitEnvKeyAllowed(key)) projected[key] = value;
+    if (vectorPiExplicitEnvKeyAllowed(key) || (options.githubLaunchers && isPaperclipControllerShellEnvKey(key))) {
+      projected[key] = value;
+    }
   }
   return projected;
 }
@@ -571,13 +596,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (fromExtraArgs.length > 0) return fromExtraArgs;
     return asStringArray(config.args);
   })();
-  const vectorProfilePolicy = await prepareVectorPiProfilePolicy({
+  let vectorProfilePolicy = await prepareVectorPiProfilePolicy({
     profile: process.env.PAPERCLIP_VECTOR_PROFILE,
     config,
     extraArgs,
     packagedExtensionsJson: process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS,
     command,
     deploymentCommand: deploymentPiCommand,
+    agentConfiguredEnv: parseObject(parseObject(agent.adapterConfig).env),
   });
 
   // Parse model into provider and model id
@@ -679,6 +705,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
+  if (vectorProfilePolicy.restricted) {
+    // No shell on restricted profiles: the controller's git/gh launcher
+    // environment has nothing to serve and must not shape the Pi process.
+    for (const key of Object.keys(env)) {
+      if (isPaperclipControllerShellEnvKey(key)) delete env[key];
+    }
+  }
   // Materialize custom Pi providers (PAPERCLIP_PI_PROVIDERS) into a managed
   // PI_CODING_AGENT_DIR before runtimeEnv is computed, so both local validation
   // and the spawned Pi process resolve models against the managed models.json.
@@ -692,6 +725,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     env.PI_CODING_AGENT_DIR = localAgentConfigDir;
   }
   let cleanupVectorToolCapability: () => Promise<void> = async () => undefined;
+  let cleanupConnectorTools: () => Promise<void> = async () => undefined;
   try {
     const vectorToolCapability = await prepareVectorToolCapability(
       ctx.vectorToolAuthority,
@@ -699,6 +733,32 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
     cleanupVectorToolCapability = vectorToolCapability.cleanup;
     Object.assign(env, vectorToolCapability.env);
+    // Granted Paperclip connections (GitHub, Google, ...) as Pi tools, on
+    // every profile. See paperclip-connectors.ts.
+    const connectorServers = ctx.runtimeMcp?.getServers() ?? [];
+    if (connectorServers.length > 0 && executionTargetIsRemote) {
+      await onLog("stderr", "[paperclip] Paperclip connector tools are not delivered to remote Pi targets.\n");
+    }
+    const connectorTools = await prepareConnectorTools(
+      connectorServers,
+      ["read", "bash", "edit", "write", "grep", "find", "ls", ...vectorPiPolicyToolNames(vectorProfilePolicy), ...(ctx.vectorToolAuthority?.tools ?? [])],
+      {
+        remote: executionTargetIsRemote,
+        onError: (server, error) => {
+          void onLog("stderr", `[paperclip] Connector "${server.name}" tools unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
+        },
+      },
+    );
+    cleanupConnectorTools = connectorTools.cleanup;
+    Object.assign(env, connectorTools.env);
+    if (connectorTools.toolNames.length > 0) {
+      vectorProfilePolicy = withPaperclipConnectorTools(
+        vectorProfilePolicy,
+        await resolvePaperclipConnectorExtensionPath(),
+        connectorTools.toolNames,
+      );
+      await onLog("stdout", `[paperclip] Delivering ${connectorTools.toolNames.length} Paperclip connector tool(s) from ${connectorServers.length} granted connection(s).\n`);
+    }
     // Prepend installed skill `bin/` dirs to PATH so an agent's bash tool can
     // invoke skill binaries (e.g. `paperclip-get-issue`) by name. Without this,
     // any pi_local agent whose AGENTS.md calls a skill command via bash hits
@@ -713,7 +773,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       && process.env.PAPERCLIP_DATABASE_PROFILE?.trim() === "vector-embedded";
     const mergedEnv = ensurePathInEnv(
       vectorEmbeddedRpc
-        ? projectVectorEmbeddedPiEnvironment(process.env, env)
+        ? projectVectorEmbeddedPiEnvironment(process.env, env, { githubLaunchers: vectorProfilePolicy.profile === "engineering" })
         : { ...process.env, ...env },
     );
     const pathKey =
@@ -760,6 +820,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       resolvedCommand,
     });
     delete loggedEnv.PAPERCLIP_VECTOR_TOOL_AUTHORITY_FILE;
+    delete loggedEnv[PAPERCLIP_CONNECTOR_TOOLS_ENV];
 
     if (!executionTargetIsRemote) {
       await ensurePiModelConfiguredAndAvailable({
@@ -863,7 +924,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           runtimeEnv: Object.fromEntries(
             Object.entries(ensurePathInEnv(
               vectorEmbeddedRpc
-                ? projectVectorEmbeddedPiEnvironment(process.env, env)
+                ? projectVectorEmbeddedPiEnvironment(process.env, env, { githubLaunchers: vectorProfilePolicy.profile === "engineering" })
                 : { ...process.env, ...env },
             )).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -873,6 +934,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           resolvedCommand,
         });
         delete loggedEnv.PAPERCLIP_VECTOR_TOOL_AUTHORITY_FILE;
+    delete loggedEnv[PAPERCLIP_CONNECTOR_TOOLS_ENV];
       }
     }
 
@@ -1186,7 +1248,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? ["-e", PI_RPC_TURN_SUPERVISOR, command, JSON.stringify(args), vectorSessionCaptureNonce]
         : args;
       const processEnvSource = executionTargetIsRemote && vectorEmbeddedRpc
-        ? ensurePathInEnv(projectVectorEmbeddedPiEnvironment(process.env, env))
+        ? ensurePathInEnv(projectVectorEmbeddedPiEnvironment(process.env, env, { githubLaunchers: vectorProfilePolicy.profile === "engineering" }))
         : executionTargetIsRemote
           ? env
           : runtimeEnv;
@@ -1355,6 +1417,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   } finally {
     await Promise.all([
       cleanupVectorToolCapability(),
+      cleanupConnectorTools(),
       preparedRuntimeConfig.cleanup(),
     ]);
   }
