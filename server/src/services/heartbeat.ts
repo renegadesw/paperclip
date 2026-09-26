@@ -161,6 +161,7 @@ import {
 } from "../instrumentation.js";
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
+import { prepareActiveVectorToolRuntimeAccess } from "./vector-tool-authority.js";
 import { logger } from "../middleware/logger.js";
 import {
   createGitRemoteAuthProvider,
@@ -23590,8 +23591,23 @@ export function heartbeatService(
         const runGoalControlRequestId = readNonEmptyString(
           context.goalControlRequestId,
         );
+        // A persisted pending marker means this run was admitted with Vector
+        // tools. Await the memory-only grant bind before either provider path
+        // can start; after restart the marker survives but the raw handle does
+        // not, so this throws and the run fails instead of silently losing its
+        // tool boundary.
         try {
+          const vectorToolAuthority = await prepareActiveVectorToolRuntimeAccess({
+            runId: run.id,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issueRef?.id ?? null,
+            pending: context.vectorToolAuthorityPending,
+          });
           if (nativeRuntimeResolution.kind === "native") {
+            if (vectorToolAuthority) {
+              throw new Error("Vector tool authority requires an adapter runtime");
+            }
             if (!nativeExecution || !nativeRunnerInstanceId)
               throw new Error("native_runtime_selection_not_persisted");
             const expectedNativeMcpDigest =
@@ -23932,6 +23948,7 @@ export function heartbeatService(
                       : undefined,
                     runtimeMcp,
                     runtimeTools,
+                    vectorToolAuthority: vectorToolAuthority ?? undefined,
                     onLog,
                     onMeta: onAdapterMeta,
                     onEvent: onAdapterEvent,

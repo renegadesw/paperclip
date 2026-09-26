@@ -8,6 +8,7 @@ import {
   vectorIngressService,
   type VectorIngressService,
 } from "../services/vector-ingress.js";
+import { VectorToolAuthorityBridge } from "../services/vector-tool-authority.js";
 
 const VECTOR_INGRESS_SECRET_ENV = "PAPERCLIP_VECTOR_INGRESS_SECRET";
 const VECTOR_INGRESS_MAX_SKEW_ENV =
@@ -33,7 +34,14 @@ const turnSchema = scopeSchema.extend({
   clientRequestId: z.string().trim().min(1).max(255),
   body: z.string().min(1).max(1_000_000),
   attachmentIds: z.array(z.string().uuid()).max(20).optional(),
+  authorityHandle: z.string().trim().min(1).max(1024).optional(),
 });
+
+const toolCallbackSchema = z.object({
+  requestId: z.string().uuid(),
+  tool: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/),
+  arguments: z.unknown(),
+}).strict();
 
 const resetSchema = scopeSchema.extend({
   clientRequestId: z.string().trim().min(1).max(255),
@@ -162,11 +170,30 @@ export function vectorIngressRoutes(
   options: {
     auth: VectorIngressAuthConfig;
     service?: VectorIngressService;
+    toolAuthority?: VectorToolAuthorityBridge;
     now?: () => number;
   },
 ) {
   const router = Router();
   const service = options.service ?? vectorIngressService(db);
+  if (options.toolAuthority) {
+    router.post("/tools/callback", async (req, res) => {
+      if (!isLoopbackRemoteAddress(req.socket.remoteAddress)) {
+        throw unauthorized("Vector tool callback requires a direct loopback peer");
+      }
+      const authorization = req.header("authorization") ?? "";
+      const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(authorization);
+      if (!match) throw unauthorized("Vector tool callback token is required");
+      const input = toolCallbackSchema.parse(req.body);
+      const result = await options.toolAuthority!.call({
+        bearerToken: match[1],
+        requestId: input.requestId,
+        tool: input.tool,
+        arguments: input.arguments,
+      });
+      res.status(result.status).type(result.contentType).send(result.body);
+    });
+  }
   router.use(vectorIngressAuth(options.auth, options.now));
 
   router.post("/turns", async (req, res) => {

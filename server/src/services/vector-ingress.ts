@@ -14,6 +14,7 @@ import { deliverConversationComments } from "./agent-conversations.js";
 import { heartbeatService } from "./heartbeat.js";
 import { issueService } from "./issues.js";
 import { logActivity } from "./activity-log.js";
+import type { VectorToolPendingDescriptor } from "./vector-tool-authority.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
@@ -28,6 +29,7 @@ export interface VectorIngressTurnInput extends VectorIngressScope {
   clientRequestId: string;
   body: string;
   attachmentIds?: string[];
+  authorityHandle?: string;
 }
 
 export interface VectorIngressCancelInput extends VectorIngressScope {
@@ -37,6 +39,19 @@ export interface VectorIngressCancelInput extends VectorIngressScope {
 export interface VectorIngressHeartbeat {
   wakeup: ReturnType<typeof heartbeatService>["wakeup"];
   cancelRun: ReturnType<typeof heartbeatService>["cancelRun"];
+}
+
+export interface VectorIngressToolAuthority {
+  registerPending(input: VectorIngressScope & {
+    issueId: string;
+    commentId: string;
+    authorityHandle: string;
+  }): VectorToolPendingDescriptor;
+  bindRun(input: VectorIngressScope & {
+    issueId: string;
+    runId: string;
+    authorityHandle: string;
+  }): Promise<void>;
 }
 
 export interface VectorIngressTurnResult {
@@ -84,6 +99,7 @@ export function vectorIngressService(
   options: {
     heartbeat?: VectorIngressHeartbeat;
     responsibleUserId?: string;
+    toolAuthority?: VectorIngressToolAuthority;
   } = {},
 ) {
   const issuesSvc = issueService(db);
@@ -156,6 +172,11 @@ export function vectorIngressService(
   }
 
   async function addTurn(input: VectorIngressTurnInput) {
+    if (input.authorityHandle && !options.toolAuthority) {
+      throw conflict("Vector tool authority is disabled", {
+        code: "vector_tool_authority_disabled",
+      });
+    }
     const { issue, ownerId } = await resolveConversation(input);
     const requestedAttachmentIds = [...new Set(input.attachmentIds ?? [])];
     let replayed = false;
@@ -241,9 +262,28 @@ export function vectorIngressService(
       });
     }
 
+    const pendingAuthority = input.authorityHandle
+      ? options.toolAuthority!.registerPending({
+          companyId: input.companyId,
+          agentId: input.agentId,
+          externalSessionId: input.externalSessionId,
+          issueId: issue.id,
+          commentId: comment.id,
+          authorityHandle: input.authorityHandle,
+        })
+      : null;
     let deliveredRunId: string | null = null;
     await deliverConversationComments(db, issue, async (agentId, wakeup) => {
-      const run = await heartbeat.wakeup(agentId, wakeup);
+      const targetWake = wakeup.idempotencyKey === `conversation-comment:${comment.id}` && pendingAuthority
+        ? {
+            ...wakeup,
+            contextSnapshot: {
+              ...wakeup.contextSnapshot,
+              vectorToolAuthorityPending: pendingAuthority,
+            },
+          }
+        : wakeup;
+      const run = await heartbeat.wakeup(agentId, targetWake);
       if (
         wakeup.idempotencyKey === `conversation-comment:${comment.id}` &&
         run &&
@@ -284,13 +324,30 @@ export function vectorIngressService(
       )
       .then((rows) => rows[0] ?? null);
 
+    const runId = deliveredRunId ?? receipt?.runId ?? null;
+    if (input.authorityHandle) {
+      if (!runId) {
+        throw conflict("Vector tool authority requires a created run", {
+          code: "vector_tool_authority_run_missing",
+        });
+      }
+      await options.toolAuthority!.bindRun({
+        companyId: input.companyId,
+        agentId: input.agentId,
+        externalSessionId: input.externalSessionId,
+        issueId: issue.id,
+        runId,
+        authorityHandle: input.authorityHandle,
+      });
+    }
+
     return {
       companyId: input.companyId,
       agentId: input.agentId,
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       commentId: comment.id,
-      runId: deliveredRunId ?? receipt?.runId ?? null,
+      runId,
       wakeupRequestId: receipt?.id ?? null,
       wakeupStatus: receipt?.status ?? null,
       sessionGeneration: current?.generation ?? issue.conversationSessionGeneration,
