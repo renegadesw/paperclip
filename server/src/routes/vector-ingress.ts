@@ -17,6 +17,7 @@ import {
   type VectorIngressCursorPosition,
   type VectorIngressService,
 } from "../services/vector-ingress.js";
+import type { VectorRuntimeScope } from "../services/vector-runtime-scope.js";
 
 const VECTOR_INGRESS_SECRET_ENV = "PAPERCLIP_VECTOR_INGRESS_SECRET";
 const VECTOR_INGRESS_MAX_SKEW_ENV =
@@ -33,6 +34,7 @@ export interface VectorIngressAuthConfig {
   secret: string;
   maxClockSkewSeconds: number;
   responsibleUserId: string;
+  scope: VectorRuntimeScope;
 }
 
 const boundedOpaqueId = (label: string, max: number) =>
@@ -218,12 +220,18 @@ function transcriptCursorScope(input: z.infer<typeof transcriptSchema>) {
 
 export function resolveVectorIngressAuthConfig(
   env: NodeJS.ProcessEnv = process.env,
+  scope: VectorRuntimeScope | null = null,
 ): VectorIngressAuthConfig | null {
   const secret = env[VECTOR_INGRESS_SECRET_ENV]?.trim();
   if (!secret) return null;
   if (secret.length < MIN_SECRET_LENGTH) {
     throw new Error(
       `${VECTOR_INGRESS_SECRET_ENV} must be at least ${MIN_SECRET_LENGTH} characters`,
+    );
+  }
+  if (!scope) {
+    throw new Error(
+      `${VECTOR_INGRESS_SECRET_ENV} requires an immutable Vector runtime scope`,
     );
   }
   const rawSkew = env[VECTOR_INGRESS_MAX_SKEW_ENV]?.trim();
@@ -249,6 +257,7 @@ export function resolveVectorIngressAuthConfig(
     maxClockSkewSeconds,
     responsibleUserId:
       env[VECTOR_INGRESS_RESPONSIBLE_USER_ENV]?.trim() || "local-board",
+    scope,
   };
 }
 
@@ -264,6 +273,7 @@ export function isLoopbackRemoteAddress(address: string | undefined): boolean {
 
 export function signVectorIngressRequest(input: {
   secret: string;
+  scope: VectorRuntimeScope;
   timestamp: string;
   method: string;
   path: string;
@@ -271,13 +281,33 @@ export function signVectorIngressRequest(input: {
 }) {
   const bodySha256 = createHash("sha256").update(input.rawBody).digest("hex");
   const canonical = [
-    "paperclip-vector-ingress/v1",
+    "paperclip-vector-ingress/v2",
+    input.scope.installationId,
+    input.scope.profile,
+    input.scope.companyId,
+    [...input.scope.allowedAgentIds].sort().join(","),
     input.timestamp,
     input.method.toUpperCase(),
     input.path,
     bodySha256,
   ].join("\n");
-  return `v1=${createHmac("sha256", input.secret).update(canonical).digest("hex")}`;
+  return `v2=${createHmac("sha256", input.secret).update(canonical).digest("hex")}`;
+}
+
+function requestMatchesRuntimeScope(
+  body: unknown,
+  scope: VectorRuntimeScope,
+): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const requestScope = body as Record<string, unknown>;
+  if (requestScope.companyId !== scope.companyId) return false;
+  if (typeof requestScope.agentId !== "string"
+      || !scope.allowedAgentIds.includes(requestScope.agentId)) return false;
+  if (requestScope.installationId !== undefined
+      && requestScope.installationId !== scope.installationId) return false;
+  if (requestScope.profileId !== undefined
+      && requestScope.profileId !== scope.profile) return false;
+  return true;
 }
 
 function signaturesEqual(expected: string, actual: string) {
@@ -317,6 +347,7 @@ export function vectorIngressAuth(
     }
     const expected = signVectorIngressRequest({
       secret: config.secret,
+      scope: config.scope,
       timestamp,
       method: req.method,
       path: req.originalUrl,
@@ -324,6 +355,10 @@ export function vectorIngressAuth(
     });
     if (!signaturesEqual(expected, signature)) {
       next(unauthorized("Vector ingress signature did not verify"));
+      return;
+    }
+    if (!requestMatchesRuntimeScope(req.body, config.scope)) {
+      next(unauthorized("Vector ingress request is outside its configured runtime scope"));
       return;
     }
     next();

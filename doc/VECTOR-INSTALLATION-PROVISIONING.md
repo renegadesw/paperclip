@@ -1,7 +1,9 @@
 # Vector installation provisioning
 
 Vector's native release may provision one installation-owned company and root
-agent before the Paperclip server starts. The supported entrypoint is:
+agent before the Paperclip server starts. Provisioning also creates the durable
+installation/profile/company ownership binding used by startup admission. The
+supported entrypoint is:
 
 ```text
 server/dist/vector-provision.js
@@ -27,9 +29,10 @@ stable `current` symlink so it survives release-directory renames and rollback.
 
 Reconciliation is intentionally strict:
 
-- first application creates the company and agent atomically;
+- first application creates the company, ownership binding, and agent atomically;
 - retry returns the same company and agent IDs without creating duplicates;
 - a name owned by another stable ID is an identity collision;
+- an installation ID, profile, or company ownership mismatch is immutable drift;
 - an immutable field difference is drift and aborts provisioning;
 - an operator-owned field is preserved only when its name appears in that
   entity's explicit `mutableFields` list;

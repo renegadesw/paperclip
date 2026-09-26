@@ -91,6 +91,7 @@ export {
   vectorIngressConversations,
   vectorIngressTurns,
 } from "./vector_ingress_conversations.js";
+export { vectorInstallationOwnerships } from "./vector_installation_ownerships.js";
 export { issueCreateIdempotencyKeys } from "./issue_create_idempotency_keys.js";
 export { issueThreadInteractions } from "./issue_thread_interactions.js";
 export { issueQuestionResponseDeliveries } from "./issue_question_response_deliveries.js";

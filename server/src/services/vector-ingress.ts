@@ -120,7 +120,45 @@ function eventPayloadRecord(payload: unknown): Record<string, unknown> {
     : {};
 }
 
-function projectVectorEventPayload(eventType: string, payload: unknown) {
+const VECTOR_TOOL_VALUE_BUDGET = 32 * 1024;
+const VECTOR_TOOL_MAX_DEPTH = 8;
+const VECTOR_TOOL_MAX_ENTRIES = 50;
+const VECTOR_TOOL_MAX_STRING = 4 * 1024;
+const sensitiveToolKey = /(?:^|[_-])(?:api[_-]?key|token|password|secret|credential|authorization|cookie|private[_-]?key|database[_-]?url)(?:$|[_-])/i;
+const sensitiveToolValue = /(?:\bBearer\s+[A-Za-z0-9._~+/=-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:postgres(?:ql)?|https?):\/\/[^/\s:@]+:[^@\s/]+@)/gi;
+
+function sanitizeVectorToolValue(value: unknown): unknown {
+  const budget = { remaining: VECTOR_TOOL_VALUE_BUDGET };
+  const visit = (current: unknown, depth: number): unknown => {
+    if (budget.remaining <= 0 || depth > VECTOR_TOOL_MAX_DEPTH) return "[truncated]";
+    if (typeof current === "string") {
+      const redacted = current.replace(sensitiveToolValue, "[redacted]");
+      const bounded = redacted.slice(0, Math.min(VECTOR_TOOL_MAX_STRING, budget.remaining));
+      budget.remaining -= bounded.length;
+      return bounded.length < redacted.length ? `${bounded}[truncated]` : bounded;
+    }
+    if (current === null || typeof current === "number" || typeof current === "boolean") {
+      budget.remaining -= 16;
+      return current;
+    }
+    if (Array.isArray(current)) {
+      return current.slice(0, VECTOR_TOOL_MAX_ENTRIES).map((entry) => visit(entry, depth + 1));
+    }
+    if (!current || typeof current !== "object") return null;
+    const entries = Object.entries(current as Record<string, unknown>)
+      .slice(0, VECTOR_TOOL_MAX_ENTRIES);
+    return Object.fromEntries(entries.map(([key, entry]) => {
+      budget.remaining -= key.length;
+      const normalizedKey = key
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+        .replace(/-/g, "_");
+      return [key, sensitiveToolKey.test(normalizedKey) ? "[redacted]" : visit(entry, depth + 1)];
+    }));
+  };
+  return visit(value, 0);
+}
+
+export function projectVectorEventPayload(eventType: string, payload: unknown) {
   const source = eventPayloadRecord(payload);
   const pick = (...keys: string[]) =>
     Object.fromEntries(
@@ -132,17 +170,29 @@ function projectVectorEventPayload(eventType: string, payload: unknown) {
     case "assistant_delta":
       return pick("text", "delta");
     case "tool_call":
-      return pick("toolCallId", "toolName", "args");
+      return {
+        ...pick("toolCallId", "toolName"),
+        ...(source.args === undefined ? {} : { args: sanitizeVectorToolValue(source.args) }),
+      };
     case "tool_update":
-      return pick("toolCallId", "toolName", "args", "partialResult");
+      return {
+        ...pick("toolCallId", "toolName"),
+        ...(source.args === undefined ? {} : { args: sanitizeVectorToolValue(source.args) }),
+        ...(source.partialResult === undefined ? {} : {
+          partialResult: sanitizeVectorToolValue(source.partialResult),
+        }),
+      };
     case "tool_result":
-      return pick("toolCallId", "toolName", "result", "isError");
+      return {
+        ...pick("toolCallId", "toolName", "isError"),
+        ...(source.result === undefined ? {} : { result: sanitizeVectorToolValue(source.result) }),
+      };
     case "assistant_final":
       return pick("text", "stopReason");
     case "usage":
       return pick("inputTokens", "outputTokens", "cachedInputTokens", "costUsd");
     case "error":
-      return pick("source", "command", "requestId");
+      return pick("source", "requestId");
     case "agent_settled":
       return pick("settled");
     default:

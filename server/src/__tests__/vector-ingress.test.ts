@@ -31,6 +31,7 @@ import {
   vectorIngressService,
   type VectorIngressHeartbeat,
 } from "../services/vector-ingress.js";
+import type { VectorRuntimeScope } from "../services/vector-runtime-scope.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -39,12 +40,19 @@ import {
 
 const secret = "vector-ingress-test-secret-with-at-least-32-characters";
 const path = "/api/internal/vector/v1/turns";
+const runtimeScope = {
+  installationId: "t480-engineering",
+  profile: "engineering",
+  companyId: "12d42db4-38df-5ae1-9b10-204b6f2e5d0c",
+  allowedAgentIds: ["e5b45684-168d-51af-9bb4-e9a5d96f6329"],
+} as const;
 
 function signedPost(
   app: express.Express,
   requestPath: string,
   body: Record<string, unknown>,
   timestamp = "1700000000",
+  signingScope: VectorRuntimeScope = runtimeScope,
 ) {
   const rawBody = Buffer.from(JSON.stringify(body));
   return request(app)
@@ -55,6 +63,7 @@ function signedPost(
       "x-vector-signature",
       signVectorIngressRequest({
         secret,
+        scope: signingScope,
         timestamp,
         method: "POST",
         path: requestPath,
@@ -72,6 +81,12 @@ describe("Vector ingress service authentication", () => {
         PAPERCLIP_VECTOR_INGRESS_SECRET: "too-short",
       }),
     ).toThrow(/at least 32/);
+    expect(() => resolveVectorIngressAuthConfig({
+      PAPERCLIP_VECTOR_INGRESS_SECRET: secret,
+    })).toThrow(/immutable Vector runtime scope/);
+    expect(resolveVectorIngressAuthConfig({
+      PAPERCLIP_VECTOR_INGRESS_SECRET: secret,
+    }, runtimeScope)).toMatchObject({ scope: runtimeScope });
   });
 
   it("recognizes only direct loopback peers", () => {
@@ -120,6 +135,7 @@ describe("Vector ingress service authentication", () => {
           secret,
           maxClockSkewSeconds: 60,
           responsibleUserId: "local-board",
+          scope: runtimeScope,
         },
         service: {
           addTurn,
@@ -135,8 +151,8 @@ describe("Vector ingress service authentication", () => {
     );
     app.use(errorHandler);
     const body = {
-      companyId: randomUUID(),
-      agentId: randomUUID(),
+      companyId: runtimeScope.companyId,
+      agentId: runtimeScope.allowedAgentIds[0],
       externalSessionId: "opaque-thread",
       clientRequestId: "request-1",
       body: "Hello",
@@ -160,11 +176,11 @@ describe("Vector ingress service authentication", () => {
 
     const inventoryPath = "/api/internal/vector/v1/sessions/list";
     const inventoryBody = {
-      companyId: randomUUID(),
-      agentId: randomUUID(),
+      companyId: runtimeScope.companyId,
+      agentId: runtimeScope.allowedAgentIds[0],
       ownerId: "authenticated-owner",
-      installationId: "vector-installation",
-      profileId: "standard",
+      installationId: runtimeScope.installationId,
+      profileId: runtimeScope.profile,
       limit: 25,
     };
     const inventoryResponse = await signedPost(
@@ -184,6 +200,19 @@ describe("Vector ingress service authentication", () => {
     };
     await signedPost(app, transcriptPath, transcriptBody).expect(200);
     expect(transcript).toHaveBeenCalledExactlyOnceWith(transcriptBody);
+
+    await signedPost(app, path, { ...body, companyId: randomUUID() }).expect(401);
+    await signedPost(app, path, { ...body, agentId: randomUUID() }).expect(401);
+    await signedPost(app, inventoryPath, {
+      ...inventoryBody,
+      installationId: "stecke1-standard",
+    }).expect(401);
+    await signedPost(app, path, body, "1700000000", {
+      ...runtimeScope,
+      installationId: "stecke1-standard",
+    }).expect(401);
+    expect(addTurn).toHaveBeenCalledTimes(1);
+    expect(inventory).toHaveBeenCalledTimes(1);
   });
 
   it("keeps opaque cursors restart-stable and rejects tampering or cross-scope reuse", () => {
@@ -896,7 +925,11 @@ const support = await getEmbeddedPostgresTestSupport();
           payload: {
             toolCallId: "tool-1",
             toolName: "todo_get",
-            args: { id: "todo-1" },
+            args: {
+              id: "todo-1",
+              nested: { apiKey: "do-not-leak-api-key" },
+              oversized: "x".repeat(40_000),
+            },
             internalTrace: "do-not-leak",
           },
           createdAt: times.firstTool,
@@ -911,7 +944,11 @@ const support = await getEmbeddedPostgresTestSupport();
           payload: {
             toolCallId: "tool-1",
             toolName: "todo_get",
-            result: { title: "Ship" },
+            result: {
+              title: "Ship",
+              nested: { password: "do-not-leak-password" },
+              auth: "Bearer do-not-leak-bearer",
+            },
             internalTrace: "do-not-leak",
           },
           createdAt: times.firstResult,
@@ -943,7 +980,11 @@ const support = await getEmbeddedPostgresTestSupport();
           seq: 2,
           eventType: "error",
           message: "private event failure detail",
-          payload: { source: "provider", internalTrace: "do-not-leak" },
+          payload: {
+            source: "provider",
+            command: "curl -H 'Authorization: do-not-leak-command'",
+            internalTrace: "do-not-leak",
+          },
           createdAt: new Date("2026-09-25T20:00:06.500Z"),
         },
       ]);
@@ -996,7 +1037,20 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(replayed[2]?.payload).toEqual({
         toolCallId: "tool-1",
         toolName: "todo_get",
-        args: { id: "todo-1" },
+        args: {
+          id: "todo-1",
+          nested: { apiKey: "[redacted]" },
+          oversized: `${"x".repeat(4_096)}[truncated]`,
+        },
+      });
+      expect(replayed[3]?.payload).toEqual({
+        toolCallId: "tool-1",
+        toolName: "todo_get",
+        result: {
+          title: "Ship",
+          nested: { password: "[redacted]" },
+          auth: "[redacted]",
+        },
       });
       expect(replayed.at(-1)?.payload).toEqual({ status: "failed", failed: true });
       const wire = JSON.stringify(replayed);
@@ -1005,6 +1059,11 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(wire).not.toContain("do-not-leak");
       expect(wire).not.toContain("private provider failure");
       expect(wire).not.toContain("private event failure detail");
+      expect(wire).not.toContain("do-not-leak-api-key");
+      expect(wire).not.toContain("do-not-leak-password");
+      expect(wire).not.toContain("do-not-leak-bearer");
+      expect(wire).not.toContain("do-not-leak-command");
+      expect(JSON.stringify(replayed[2]?.payload).length).toBeLessThan(5_000);
       expect(replayed.at(-2)?.message).toBe("Agent run failed");
       expect(wire).not.toContain(first.issueId);
       expect(wire).not.toContain(first.runId!);

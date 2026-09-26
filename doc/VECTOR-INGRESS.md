@@ -5,21 +5,27 @@ its public `/os` and `/v1` contracts while Paperclip owns conversation tasks and
 agent runs. It does not replace or extend Paperclip board or agent-key auth.
 
 The routes exist only when `PAPERCLIP_VECTOR_INGRESS_SECRET` is set to an
-independent random secret of at least 32 characters. Every request must also
-arrive directly from a loopback socket. `X-Forwarded-For` is deliberately not
-trusted for this check.
+independent random secret of at least 32 characters and the server has admitted
+a complete Vector runtime scope. Every request must also arrive directly from a
+loopback socket. `X-Forwarded-For` is deliberately not trusted for this check.
+The signed request company and agent must match the configured company and
+allowed-agent set. Supplied installation/profile fields must match as well.
 
 ## Signing
 
 Send:
 
 - `X-Vector-Timestamp`: current Unix time in seconds
-- `X-Vector-Signature`: `v1=<lowercase hex HMAC-SHA256>`
+- `X-Vector-Signature`: `v2=<lowercase hex HMAC-SHA256>`
 
 The signature input is the following newline-separated string:
 
 ```text
-paperclip-vector-ingress/v1
+paperclip-vector-ingress/v2
+<PAPERCLIP_VECTOR_INSTALLATION_ID>
+<PAPERCLIP_VECTOR_PROFILE>
+<PAPERCLIP_VECTOR_COMPANY_ID>
+<sorted comma-separated PAPERCLIP_VECTOR_ALLOWED_AGENT_IDS>
 <timestamp>
 <uppercase HTTP method>
 <exact request path>
@@ -27,7 +33,9 @@ paperclip-vector-ingress/v1
 ```
 
 Sign that input with `PAPERCLIP_VECTOR_INGRESS_SECRET`. The default accepted
-clock skew is 60 seconds. It can be set from 1 through 300 seconds with
+This prevents the same signed body from being replayed under a different
+installation/profile authority even if a secret is accidentally shared. The
+default accepted clock skew is 60 seconds. It can be set from 1 through 300 seconds with
 `PAPERCLIP_VECTOR_INGRESS_MAX_CLOCK_SKEW_SECONDS`.
 
 Runs and comments are attributed to
@@ -58,3 +66,8 @@ match that exact conversation. A foreign or stale run ID is `409`.
 
 Attachment IDs must already belong to the resolved Paperclip issue and company.
 The normal Paperclip attachment binding and conflict checks remain authoritative.
+
+Transcript projection is an intentionally reduced surface. Error commands and
+provider error text are not returned. Tool arguments, partial results, and
+results are recursively redacted for secret-bearing fields and bearer/private
+authority patterns, with bounded depth, entry count, strings, and total budget.
