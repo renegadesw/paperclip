@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  FUNKYDEV_CAPABILITY_INVENTORY,
   prepareVectorPiProfilePolicy,
   vectorPiProfileIsRestricted,
 } from "./vector-profile-policy.js";
@@ -147,7 +149,76 @@ describe("Vector Pi profile isolation", () => {
       cliArgs: [],
       discoveryCliArgs: [],
       useBundledPaperclipSkillsOnly: false,
+      additionalToolNames: [],
     });
+  });
+
+  it("loads the manifest-selected, hash-pinned Vault bridge only for engineering", async () => {
+    const extensionPath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../vector-extensions/funkydev-vault-reference.ts",
+    );
+    const contents = await fs.readFile(extensionPath);
+    const sha256 = createHash("sha256").update(contents).digest("hex");
+    const engineering = await prepareVectorPiProfilePolicy({
+      profile: "engineering",
+      config: {},
+      packagedExtensionsJson: JSON.stringify([{
+        profile: "engineering",
+        path: extensionPath,
+        sha256,
+        tools: ["vault_read", "vault_search"],
+        permissions: { filesystem: true, shell: false },
+      }]),
+    });
+    expect(engineering.additionalToolNames).toEqual(["vault_read", "vault_search"]);
+    expect(engineering.cliArgs).toHaveLength(2);
+    expect(engineering.cliArgs[0]).toBe("--extension");
+    expect(engineering.cliArgs[1]).toMatch(/funkydev-vault-reference\.ts$/);
+
+    await expect(prepareVectorPiProfilePolicy({
+      profile: "standard",
+      config: {},
+      packagedExtensionsJson: JSON.stringify([{
+        profile: "engineering",
+        path: extensionPath,
+        sha256,
+        tools: ["vault_read", "vault_search"],
+        permissions: { filesystem: true, shell: false },
+      }]),
+    })).rejects.toThrow('declares profile "engineering", expected "standard"');
+  });
+
+  it("rejects filesystem or shell authority in a restricted profile", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-extension-policy-"));
+    cleanupPaths.add(root);
+    const extensionPath = path.join(root, "unsafe.ts");
+    const contents = "export default function unsafe() {}\n";
+    await fs.writeFile(extensionPath, contents, "utf8");
+    const sha256 = createHash("sha256").update(contents).digest("hex");
+    await expect(prepareVectorPiProfilePolicy({
+      profile: "standard",
+      config: {},
+      packagedExtensionsJson: JSON.stringify([{
+        profile: "standard",
+        path: extensionPath,
+        sha256,
+        tools: ["unsafe_read"],
+        permissions: { filesystem: true, shell: false },
+      }]),
+    })).rejects.toThrow("forbids packaged Pi extensions with filesystem or shell authority");
+  });
+
+  it("records callback-bound legacy tools as blocked rather than claiming name-only parity", () => {
+    const statuses = new Map(FUNKYDEV_CAPABILITY_INVENTORY.map((entry) => [entry.capability, entry.status]));
+    expect(statuses.get("vault-reference")).toBe("ported");
+    expect(statuses.get("pi-builtins")).toBe("native");
+    expect(statuses.get("operator-question")).toBe("blocked");
+    expect(statuses.get("todos")).toBe("blocked");
+    expect(statuses.get("github-broker")).toBe("blocked");
+    expect(statuses.get("personal-memory")).toBe("blocked");
+    expect(statuses.get("vector-os-mcp")).toBe("blocked");
+    expect(statuses.get("rctl")).toBe("external");
   });
 
   it("loads only deployment-owned packaged extensions with an exact path and digest", async () => {
@@ -162,7 +233,13 @@ describe("Vector Pi profile isolation", () => {
       profile: "standard",
       config: {},
       packagedExtensionsJson: JSON.stringify([
-        { path: extensionPath, sha256, tools: ["vector_chat_read"] },
+        {
+          profile: "standard",
+          path: extensionPath,
+          sha256,
+          tools: ["vector_chat_read"],
+          permissions: { filesystem: false, shell: false },
+        },
       ]),
     });
 
@@ -184,7 +261,13 @@ describe("Vector Pi profile isolation", () => {
       profile: "standard",
       config: {},
       packagedExtensionsJson: JSON.stringify([
-        { path: extensionPath, sha256: "0".repeat(64), tools: [] },
+        {
+          profile: "standard",
+          path: extensionPath,
+          sha256: "0".repeat(64),
+          tools: [],
+          permissions: { filesystem: false, shell: false },
+        },
       ]),
     })).rejects.toThrow("digest mismatch");
   });

@@ -794,6 +794,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       args.push(...buildPiBuiltinToolArgs(config, {
         vectorProfile: process.env.PAPERCLIP_VECTOR_PROFILE,
         extraArgs,
+        additionalToolNames: vectorProfilePolicy.additionalToolNames,
       }));
       args.push(...vectorProfilePolicy.cliArgs);
       args.push("--session", sessionFile);

@@ -8,13 +8,90 @@ export type VectorPiProfilePolicy = {
   cliArgs: string[];
   discoveryCliArgs: string[];
   useBundledPaperclipSkillsOnly: boolean;
+  additionalToolNames: string[];
 };
 
 type PackagedExtension = {
+  profile: string;
   path: string;
   sha256: string;
   tools: string[];
+  permissions: {
+    filesystem: boolean;
+    shell: boolean;
+  };
 };
+
+export type FunkyDevCapabilityStatus = "native" | "ported" | "blocked" | "external";
+
+export type FunkyDevCapability = {
+  capability: string;
+  tools: string[];
+  status: FunkyDevCapabilityStatus;
+  dependency?: string;
+};
+
+/**
+ * Audited against vector-os/agents' pinative source on 2026-09-25.
+ *
+ * Keep blocked entries visible.  A matching tool name is not parity when its
+ * run-scoped identity, callback, or frontend consumer still belongs to the
+ * legacy Agents service.
+ */
+export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
+  {
+    capability: "pi-builtins",
+    tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+    status: "native",
+  },
+  {
+    capability: "vault-reference",
+    tools: ["vault_search", "vault_read"],
+    status: "ported",
+  },
+  {
+    capability: "operator-question",
+    tools: ["ask_user"],
+    status: "blocked",
+    dependency: "Paperclip must route Pi extension_ui_request/response over the Vector chat continuation contract.",
+  },
+  {
+    capability: "todos",
+    tools: ["todo_add", "todo_list", "todo_update", "todo_mark_done"],
+    status: "blocked",
+    dependency: "The current tools call legacy /v1/todos endpoints with a legacy session token.",
+  },
+  {
+    capability: "github-broker",
+    tools: ["github_read", "github_manage", "github_api", "github_repo"],
+    status: "blocked",
+    dependency: "The current tools call legacy GitHub broker endpoints and require a run-scoped repository/actor capability.",
+  },
+  {
+    capability: "personal-memory",
+    tools: ["memory_save", "memory_search", "memory_forget"],
+    status: "blocked",
+    dependency: "The current tools call legacy /v1/memories endpoints and require run-scoped user authority.",
+  },
+  {
+    capability: "voice-marker",
+    tools: ["speak"],
+    status: "blocked",
+    dependency: "The extension is local, but Vector chat clients still need the Paperclip tool event projected onto their existing speak frame contract.",
+  },
+  {
+    capability: "rctl",
+    tools: [],
+    status: "external",
+    dependency: "Current FunkyDev installs rctl on PATH for Pi bash; source does not mount it as an MCP server.",
+  },
+  {
+    capability: "vector-os-mcp",
+    tools: [],
+    status: "blocked",
+    dependency: "The /os/mcp bridge is current Funky analyst behavior, not current native FunkyDev behavior; it needs explicit Vector authority before adoption.",
+  },
+] as const;
 
 const RESTRICTED_CONFIG_FIELDS = [
   "agentDir",
@@ -124,7 +201,7 @@ function validateRestrictedConfig(
   }
 }
 
-function parsePackagedExtensions(raw: string | undefined): PackagedExtension[] {
+function parsePackagedExtensions(raw: string | undefined, activeProfile: string): PackagedExtension[] {
   if (!raw?.trim()) return [];
 
   let parsed: unknown;
@@ -142,11 +219,21 @@ function parsePackagedExtensions(raw: string | undefined): PackagedExtension[] {
       throw new Error(`Packaged Pi extension entry ${index} must be an object.`);
     }
     const record = entry as Record<string, unknown>;
+    const profile = typeof record.profile === "string" ? normalizeProfile(record.profile) : "";
     const extensionPath = typeof record.path === "string" ? record.path.trim() : "";
     const sha256 = typeof record.sha256 === "string" ? record.sha256.trim().toLowerCase() : "";
     const tools = Array.isArray(record.tools)
       ? record.tools.map((tool) => typeof tool === "string" ? tool.trim() : "")
       : [];
+    const permissions = typeof record.permissions === "object" && record.permissions !== null && !Array.isArray(record.permissions)
+      ? record.permissions as Record<string, unknown>
+      : {};
+
+    if (profile !== activeProfile) {
+      throw new Error(
+        `Packaged Pi extension entry ${index} declares profile "${profile || "<empty>"}", expected "${activeProfile}".`,
+      );
+    }
 
     if (!path.isAbsolute(extensionPath)) {
       throw new Error(`Packaged Pi extension entry ${index} requires an absolute path.`);
@@ -157,14 +244,34 @@ function parsePackagedExtensions(raw: string | undefined): PackagedExtension[] {
     if (tools.some((tool) => !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(tool))) {
       throw new Error(`Packaged Pi extension entry ${index} contains an invalid tool name.`);
     }
-    return { path: path.resolve(extensionPath), sha256, tools: Array.from(new Set(tools)) };
+    if (typeof permissions.filesystem !== "boolean" || typeof permissions.shell !== "boolean") {
+      throw new Error(
+        `Packaged Pi extension entry ${index} must explicitly declare boolean filesystem and shell permissions.`,
+      );
+    }
+    if (activeProfile !== "engineering" && (permissions.filesystem || permissions.shell)) {
+      throw new Error(
+        `Vector profile "${activeProfile}" forbids packaged Pi extensions with filesystem or shell authority.`,
+      );
+    }
+    return {
+      profile,
+      path: path.resolve(extensionPath),
+      sha256,
+      tools: Array.from(new Set(tools)),
+      permissions: {
+        filesystem: permissions.filesystem,
+        shell: permissions.shell,
+      },
+    };
   });
 }
 
 async function verifyPackagedExtensions(
   raw: string | undefined,
+  activeProfile: string,
 ): Promise<PackagedExtension[]> {
-  const extensions = parsePackagedExtensions(raw);
+  const extensions = parsePackagedExtensions(raw, activeProfile);
   for (const extension of extensions) {
     const stat = await fs.stat(extension.path).catch(() => null);
     if (!stat?.isFile()) {
@@ -198,12 +305,16 @@ export async function prepareVectorPiProfilePolicy(input: {
   const profile = normalizeProfile(input.profile);
   const restricted = vectorPiProfileIsRestricted(profile);
   if (!restricted) {
+    const engineeringExtensions = profile === "engineering"
+      ? await verifyPackagedExtensions(input.packagedExtensionsJson, profile)
+      : [];
     return {
       profile,
       restricted: false,
-      cliArgs: [],
+      cliArgs: engineeringExtensions.flatMap((entry) => ["--extension", entry.path]),
       discoveryCliArgs: [],
       useBundledPaperclipSkillsOnly: false,
+      additionalToolNames: engineeringExtensions.flatMap((entry) => entry.tools),
     };
   }
 
@@ -214,7 +325,7 @@ export async function prepareVectorPiProfilePolicy(input: {
     input.command?.trim() || "pi",
     input.deploymentCommand,
   );
-  const extensions = await verifyPackagedExtensions(input.packagedExtensionsJson);
+  const extensions = await verifyPackagedExtensions(input.packagedExtensionsJson, profile);
   const allowedTools = Array.from(new Set(extensions.flatMap((entry) => entry.tools)));
 
   return {
@@ -240,5 +351,6 @@ export async function prepareVectorPiProfilePolicy(input: {
       "--no-tools",
     ],
     useBundledPaperclipSkillsOnly: true,
+    additionalToolNames: [],
   };
 }
