@@ -44,7 +44,7 @@ async function enableSmokeLab(db: TestDb) {
     singletonKey: "default",
     experimental: { enableSmokeLab: true },
   }).onConflictDoUpdate({
-    target: [instanceSettings.singletonKey],
+    target: [instanceSettings.vectorInstallationId, instanceSettings.singletonKey],
     set: { experimental: { enableSmokeLab: true }, updatedAt: new Date() },
   });
 }
