@@ -31,6 +31,7 @@ import {
   inspectMigrations,
   assertMigrationsCurrent,
   applyPendingMigrations,
+  acquireVectorRuntimeOwnership,
   createEmbeddedPostgresLogBuffer,
   databaseClientOptionsFromEnv,
   prepareEmbeddedPostgresNativeRuntime,
@@ -41,6 +42,7 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  type VectorRuntimeOwnership,
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
@@ -415,6 +417,7 @@ async function startServerWithDatabaseTeardown(
   
   let db;
   let pluginMigrationDb;
+  let vectorRuntimeOwnership: VectorRuntimeOwnership | null = null;
   let embeddedPostgres: EmbeddedPostgresInstance | null = null;
   let embeddedPostgresSupervisor: EmbeddedPostgresSupervisor | null = null;
   let embeddedPostgresStartedByThisProcess = false;
@@ -433,6 +436,19 @@ async function startServerWithDatabaseTeardown(
   if (config.databaseUrl) {
     const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
     migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
+
+    if (config.databaseDeploymentProfile === "vector-embedded") {
+      // Advisory locks require a session-capable direct connection. A runtime
+      // URL may point at a transaction-mode pooler, while the migration URL is
+      // already required to be direct in that topology.
+      vectorRuntimeOwnership = await acquireVectorRuntimeOwnership(migrationUrl);
+      startupDatabase.close = () => vectorRuntimeOwnership?.release() ?? Promise.resolve();
+      void vectorRuntimeOwnership.lost.then((error) => {
+        logger.fatal({ err: error }, "vector-embedded runtime ownership lost; stopping server");
+        process.kill(process.pid, "SIGTERM");
+      });
+      logger.info("Acquired vector-embedded singleton runtime ownership");
+    }
 
     const databaseClientOptions = {
       ...databaseClientOptionsFromEnv(),
@@ -657,6 +673,8 @@ async function startServerWithDatabaseTeardown(
   // (after the application services, before the embedded provider stops) and
   // by the fail-loud startup path, so no exit leaves pooled backends behind.
   const closeDatabaseClients = async () => {
+    await vectorRuntimeOwnership?.release();
+    vectorRuntimeOwnership = null;
     const clients = pluginMigrationDb === db ? [db] : [db, pluginMigrationDb];
     await Promise.all(clients.map((client) => endDatabaseClient(client, 5)));
   };

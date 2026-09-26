@@ -215,6 +215,27 @@ When authoring migrations or one-time backfills:
 - Do not hand-edit a snapshot to resolve a merge conflict. Renumber your migration and run `generate` again, as `packages/db/.gitattributes` describes.
 - `packages/db/src/migration-snapshot-drift.test.ts` is the enforcement backstop. It repeats the diff that `generate` performs and fails when the newest snapshot no longer matches `packages/db/src/schema/`.
 
+## Vector shared-database runtime ownership
+
+The `vector-embedded` deployment profile currently permits exactly one running
+Paperclip server process per Vector application database. At startup the server
+reserves a dedicated PostgreSQL session and takes a well-known advisory lock
+before constructing its ordinary database pools. A second process refuses to
+start with `vector_runtime_already_owned`. The reserved client's connection-loss
+notification stops the server rather than allowing a replacement database
+session to continue without ownership. Graceful shutdown explicitly unlocks and
+closes the reserved session.
+
+The lock uses `DATABASE_MIGRATION_URL` when configured because advisory locks
+require a session-capable direct PostgreSQL connection. A deployment whose
+runtime `DATABASE_URL` uses transaction pooling must provide a direct migration
+URL to the same Vector application database.
+
+This is a temporary safety gate, not multi-install support. Running independent
+Paperclip installations against the same `llm` schema remains unsupported until
+installation identity scopes scheduling, work claiming, recovery, and related
+queries end to end. The standalone deployment profile is unchanged.
+
 ## Cloud runtime identity singleton
 
 The private `instance_settings` row whose singleton key is
