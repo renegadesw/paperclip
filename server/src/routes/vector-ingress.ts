@@ -43,6 +43,11 @@ const cancelSchema = scopeSchema.extend({
   runId: z.string().uuid().optional(),
 });
 
+const eventsSchema = scopeSchema.extend({
+  afterSeq: z.number().int().min(0).optional(),
+  limit: z.number().int().min(1).max(1000).optional(),
+});
+
 export function resolveVectorIngressAuthConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): VectorIngressAuthConfig | null {
@@ -184,6 +189,16 @@ export function vectorIngressRoutes(
   router.post("/sessions/cancel", async (req, res) => {
     const input = cancelSchema.parse(req.body);
     res.json(await service.cancel(input));
+  });
+
+  router.post("/sessions/status", async (req, res) => {
+    const input = scopeSchema.parse(req.body);
+    res.json(await service.status(input));
+  });
+
+  router.post("/sessions/events", async (req, res) => {
+    const input = eventsSchema.parse(req.body);
+    res.json(await service.events(input));
   });
 
   return router;

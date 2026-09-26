@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, or, sql } from "drizzle-orm";
 import {
   agentWakeupRequests,
   agents,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueAttachments,
   issueComments,
@@ -34,9 +35,61 @@ export interface VectorIngressCancelInput extends VectorIngressScope {
   runId?: string;
 }
 
+export interface VectorIngressEventsInput extends VectorIngressScope {
+  afterSeq?: number;
+  limit?: number;
+}
+
 export interface VectorIngressHeartbeat {
   wakeup: ReturnType<typeof heartbeatService>["wakeup"];
   cancelRun: ReturnType<typeof heartbeatService>["cancelRun"];
+}
+
+const VECTOR_PRESENTATION_EVENT_TYPES = [
+  "assistant_delta",
+  "tool_call",
+  "tool_update",
+  "tool_result",
+  "assistant_final",
+  "usage",
+  "error",
+  "agent_settled",
+] as const;
+
+function eventPayloadRecord(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : {};
+}
+
+function projectVectorEventPayload(eventType: string, payload: unknown) {
+  const source = eventPayloadRecord(payload);
+  const pick = (...keys: string[]) =>
+    Object.fromEntries(
+      keys
+        .filter((key) => key in source)
+        .map((key) => [key, source[key]]),
+    );
+  switch (eventType) {
+    case "assistant_delta":
+      return pick("text", "delta");
+    case "tool_call":
+      return pick("toolCallId", "toolName", "args");
+    case "tool_update":
+      return pick("toolCallId", "toolName", "args", "partialResult");
+    case "tool_result":
+      return pick("toolCallId", "toolName", "result", "isError");
+    case "assistant_final":
+      return pick("text", "stopReason");
+    case "usage":
+      return pick("inputTokens", "outputTokens", "cachedInputTokens", "costUsd");
+    case "error":
+      return pick("source", "command", "requestId");
+    case "agent_settled":
+      return pick("settled");
+    default:
+      return {};
+  }
 }
 
 export interface VectorIngressTurnResult {
@@ -153,6 +206,100 @@ export function vectorIngressService(
       details: { agentId: scope.agentId, source: "vector_ingress" },
     });
     return { issue, ownerId: existing.ownerId, created: true };
+  }
+
+  async function latestConversationRun(
+    scope: VectorIngressScope,
+    issue: Awaited<ReturnType<typeof requireConversation>>["issue"],
+  ) {
+    return db
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, scope.companyId),
+          eq(heartbeatRuns.agentId, scope.agentId),
+          or(
+            eq(heartbeatRuns.nativeIssueId, issue.id),
+            sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+          ),
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function status(input: VectorIngressScope) {
+    const { issue } = await requireConversation(input);
+    const run = await latestConversationRun(input, issue);
+    return {
+      companyId: input.companyId,
+      agentId: input.agentId,
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      sessionGeneration: issue.conversationSessionGeneration,
+      run: run
+        ? {
+            id: run.id,
+            status: run.status,
+            error: run.error,
+            errorCode: run.errorCode,
+            usage: run.usageJson,
+            eventCursor: Math.max(0, run.nextEventSeq - 1),
+            createdAt: run.createdAt,
+            startedAt: run.startedAt,
+            finishedAt: run.finishedAt,
+          }
+        : null,
+    };
+  }
+
+  async function events(input: VectorIngressEventsInput) {
+    const snapshot = await status(input);
+    const afterSeq = input.afterSeq ?? 0;
+    const runEvents = snapshot.run
+      ? await db
+          .select({
+            seq: heartbeatRunEvents.seq,
+            eventType: heartbeatRunEvents.eventType,
+            stream: heartbeatRunEvents.stream,
+            level: heartbeatRunEvents.level,
+            color: heartbeatRunEvents.color,
+            message: heartbeatRunEvents.message,
+            payload: heartbeatRunEvents.payload,
+            createdAt: heartbeatRunEvents.createdAt,
+          })
+          .from(heartbeatRunEvents)
+          .where(
+            and(
+              eq(heartbeatRunEvents.companyId, input.companyId),
+              eq(heartbeatRunEvents.agentId, input.agentId),
+              eq(heartbeatRunEvents.runId, snapshot.run.id),
+              gt(heartbeatRunEvents.seq, afterSeq),
+              inArray(heartbeatRunEvents.eventType, [
+                ...VECTOR_PRESENTATION_EVENT_TYPES,
+              ]),
+            ),
+          )
+          .orderBy(asc(heartbeatRunEvents.seq))
+          .limit(Math.max(1, Math.min(input.limit ?? 200, 1000)))
+      : [];
+    return {
+      ...snapshot,
+      afterSeq,
+      nextSeq: runEvents.at(-1)?.seq ?? afterSeq,
+      events: runEvents.map((event) => ({
+        seq: event.seq,
+        eventType: event.eventType,
+        stream: event.stream,
+        level: event.level,
+        color: event.color,
+        message: event.message,
+        payload: projectVectorEventPayload(event.eventType, event.payload),
+        createdAt: event.createdAt,
+      })),
+    };
   }
 
   async function addTurn(input: VectorIngressTurnInput) {
@@ -380,6 +527,8 @@ export function vectorIngressService(
     reset: (input: Omit<VectorIngressTurnInput, "body">) =>
       addTurn({ ...input, body: "/new" }),
     cancel,
+    status,
+    events,
   };
 }
 
