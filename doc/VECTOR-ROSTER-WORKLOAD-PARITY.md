@@ -44,6 +44,13 @@ and 48k run budgets and 180- and 240-minute deadlines. Vector's enqueue gate
 narrows those requests to the task-type ceilings of 8k and 24k. Paperclip does
 not apply either value.
 
+The signed workload launch ingress validates the exact agent/workload mapping
+and preserves the dynamic Vector system prompt, role, model policy, tool list,
+execution metadata, and a non-reversible lease-token digest through the Pi run.
+Vector OS remains the executable owner of claim, heartbeat, retry, detach,
+cancellation, and settlement; Paperclip does not emulate those database
+semantics with routines.
+
 ## Why these are not Paperclip routines yet
 
 Paperclip issues already provide assignment, atomic checkout, heartbeat runs,
