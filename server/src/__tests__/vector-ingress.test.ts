@@ -1105,10 +1105,16 @@ const support = await getEmbeddedPostgresTestSupport();
 
     it("inventories only one owner and paginates without exposing internal IDs", async () => {
       const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
+      const personaContext = {
+        schemaVersion: 1 as const, personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const, systemPrompt: "Be a calm, precise collaborator.",
+      };
       const ownerA = "authenticated-owner-a";
       const ownerB = "authenticated-owner-b";
       const ownerScope = {
-        installationId: "vector-installation",
+        installationId: "stecke1-standard",
         profileId: "standard",
       };
       const baseTime = new Date("2026-09-25T19:00:00.000Z");
@@ -1126,6 +1132,7 @@ const support = await getEmbeddedPostgresTestSupport();
           externalSessionId,
           clientRequestId: `inventory-a-${index}`,
           body: `Owner A ${index}`,
+          personaContext,
         });
         await db
           .update(vectorIngressConversations)
@@ -1141,6 +1148,7 @@ const support = await getEmbeddedPostgresTestSupport();
         externalSessionId: "client-a",
         clientRequestId: "inventory-b-0",
         body: "Owner B",
+        personaContext,
       });
       expect(ownerBTurn.issueId).not.toBe(ownerASessions[0]?.issueId);
 
@@ -1215,11 +1223,12 @@ const support = await getEmbeddedPostgresTestSupport();
 
     it("replays ordered multi-turn and multi-run history without leaking internal events", async () => {
       const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
       const scope = {
         companyId,
         agentId,
         ownerId: "transcript-owner",
-        installationId: "vector-installation",
+        installationId: "stecke1-standard",
         profileId: "standard",
         externalSessionId: "transcript-thread",
       };
@@ -1227,6 +1236,11 @@ const support = await getEmbeddedPostgresTestSupport();
         ...scope,
         clientRequestId: "transcript-1",
         body: "First question",
+        personaContext: {
+          schemaVersion: 1, personaId: "00000000-0000-0000-0000-000000000023",
+          personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+          noBuiltinTools: true, systemPrompt: "Be a calm, precise collaborator.",
+        },
       });
       const second = await service.addTurn({
         ...scope,
@@ -1439,11 +1453,12 @@ const support = await getEmbeddedPostgresTestSupport();
 
     it("does not synthesize a terminal event for an incomplete run", async () => {
       const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
       const scope = {
         companyId,
         agentId,
         ownerId: "incomplete-owner",
-        installationId: "vector-installation",
+        installationId: "stecke1-standard",
         profileId: "standard",
         externalSessionId: "incomplete-thread",
       };
@@ -1451,6 +1466,11 @@ const support = await getEmbeddedPostgresTestSupport();
         ...scope,
         clientRequestId: "incomplete-1",
         body: "Still running",
+        personaContext: {
+          schemaVersion: 1, personaId: "00000000-0000-0000-0000-000000000023",
+          personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+          noBuiltinTools: true, systemPrompt: "Be a calm, precise collaborator.",
+        },
       });
       const result = await service.transcript(scope);
       expect(result.events.map((event) => event.eventType)).toEqual(["user_turn"]);

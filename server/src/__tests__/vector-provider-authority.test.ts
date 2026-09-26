@@ -22,13 +22,13 @@ describe("Vector provider authority configuration", () => {
   it("is disabled by default and accepts only a complete loopback contract", () => {
     expect(resolveVectorProviderAuthorityConfig({})).toBeNull();
     expect(() => resolveVectorProviderAuthorityConfig({
-      PAPERCLIP_VECTOR_PROVIDER_BRIDGE_URL: "http://localhost:8431/internal/paperclip/v1/providers/redeem",
+      PAPERCLIP_VECTOR_PROVIDER_BRIDGE_URL: "http://localhost:8431/inbound/paperclip/v1/providers/redeem",
       PAPERCLIP_VECTOR_PROVIDER_BRIDGE_SECRET: secret,
       PAPERCLIP_VECTOR_INSTALLATION_ID: "t480-funkydev",
       PAPERCLIP_VECTOR_PROFILE: "engineering",
     })).toThrow(/literal loopback/);
     expect(resolveVectorProviderAuthorityConfig({
-      PAPERCLIP_VECTOR_PROVIDER_BRIDGE_URL: "http://127.0.0.1:8431/internal/paperclip/v1/providers/redeem",
+      PAPERCLIP_VECTOR_PROVIDER_BRIDGE_URL: "http://127.0.0.1:8431/inbound/paperclip/v1/providers/redeem",
       PAPERCLIP_VECTOR_PROVIDER_BRIDGE_SECRET: secret,
       PAPERCLIP_VECTOR_INSTALLATION_ID: "t480-funkydev",
       PAPERCLIP_VECTOR_PROFILE: "engineering",
@@ -91,16 +91,16 @@ describe("Vector provider authority configuration", () => {
     const expiresAt = new Date(now + 90 * 60_000).toISOString();
     expect(validateVectorProviderRedemption({
       version: 1,
-      router_url: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+      router_url: "http://127.0.0.1:8431/inbound/paperclip/v1/router",
       router_token: "opaque-parent-proxy-capability-32-bytes",
       expires_at: expiresAt,
     }, now)).toMatchObject({
-      baseUrl: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+      baseUrl: "http://127.0.0.1:8431/inbound/paperclip/v1/router",
     });
     for (const routerUrl of [
       "https://router.example.invalid",
       "http://127.0.0.1:8431/internal/paperclip/v1/not-router",
-      "http://localhost:8431/internal/paperclip/v1/router",
+      "http://localhost:8431/inbound/paperclip/v1/router",
     ]) {
       expect(() => validateVectorProviderRedemption({
         version: 1,
@@ -158,7 +158,7 @@ const support = await getEmbeddedPostgresTestSupport();
   it("redeems one run-bound handle and keeps credentials out of persisted context", async () => {
     const now = Date.parse("2026-09-26T04:00:00Z");
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).endsWith("/internal/paperclip/v1/providers/redeem")) {
+      if (String(input).endsWith("/inbound/paperclip/v1/providers/redeem")) {
         const rawBody = Buffer.from(String(init?.body));
         expect(init?.headers).toMatchObject({
           "x-paperclip-signature": signVectorProviderRedeem({
@@ -196,7 +196,7 @@ const support = await getEmbeddedPostgresTestSupport();
       }), { status: 200 });
     });
     const bridge = new VectorProviderAuthorityBridge(db, {
-      endpoint: new URL("http://127.0.0.1:8431/internal/paperclip/v1/providers/redeem"),
+      endpoint: new URL("http://127.0.0.1:8431/inbound/paperclip/v1/providers/redeem"),
       installationId: "t480-funkydev",
       profile: "engineering",
       secret,
@@ -236,16 +236,16 @@ const support = await getEmbeddedPostgresTestSupport();
   it("accepts a longer parent-proxy capability only on the exact loopback proxy path", async () => {
     const now = Date.parse("2026-09-26T04:00:00Z");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).endsWith("/internal/paperclip/v1/providers/redeem")) {
+      if (String(input).endsWith("/inbound/paperclip/v1/providers/redeem")) {
         return new Response(JSON.stringify({
           version: 1,
-          router_url: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+          router_url: "http://127.0.0.1:8431/inbound/paperclip/v1/router",
           router_token: "opaque-parent-proxy-capability-32-bytes",
           expires_at: new Date(now + 90 * 60_000).toISOString(),
         }), { status: 200 });
       }
       expect(String(input)).toBe(
-        "http://127.0.0.1:8431/internal/paperclip/v1/router/api/router/runtime-catalog",
+        "http://127.0.0.1:8431/inbound/paperclip/v1/router/api/router/runtime-catalog",
       );
       return new Response(JSON.stringify({
         provider: "router",
@@ -254,7 +254,7 @@ const support = await getEmbeddedPostgresTestSupport();
       }), { status: 200 });
     });
     const bridge = new VectorProviderAuthorityBridge(db, {
-      endpoint: new URL("http://127.0.0.1:8431/internal/paperclip/v1/providers/redeem"),
+      endpoint: new URL("http://127.0.0.1:8431/inbound/paperclip/v1/providers/redeem"),
       installationId: "t480-funkydev",
       profile: "engineering",
       secret,
@@ -276,7 +276,7 @@ const support = await getEmbeddedPostgresTestSupport();
     });
     await expect(bridge.runtimeAccess({ runId: run.id, companyId, agentId, issueId }))
       .resolves.toMatchObject({
-        baseUrl: "http://127.0.0.1:8431/internal/paperclip/v1/router",
+        baseUrl: "http://127.0.0.1:8431/inbound/paperclip/v1/router",
         apiKey: "opaque-parent-proxy-capability-32-bytes",
       });
   });

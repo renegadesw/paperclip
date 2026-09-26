@@ -149,7 +149,7 @@ accepted only when signed Vector ingress and the complete provider bridge
 configuration are enabled:
 
 - `PAPERCLIP_VECTOR_PROVIDER_BRIDGE_URL` is the exact literal-loopback Vector OS
-  endpoint `http://127.x.x.x:<port>/internal/paperclip/v1/providers/redeem`.
+  endpoint `http://127.x.x.x:<port>/inbound/paperclip/v1/providers/redeem`.
 - `PAPERCLIP_VECTOR_PROVIDER_BRIDGE_SECRET` is an independent secret of at
   least 32 characters.
 - `PAPERCLIP_VECTOR_INSTALLATION_ID` and `PAPERCLIP_VECTOR_PROFILE` bind the
@@ -168,7 +168,7 @@ invocation metadata. The managed directory is removed after execution.
 
 Direct router grants are bounded to ten minutes plus clock tolerance. A grant
 may last up to two hours only when its URL is the exact literal-loopback parent
-proxy path `/internal/paperclip/v1/router`. That Vector OS proxy owns upstream
+proxy path `/inbound/paperclip/v1/router`. That Vector OS proxy owns upstream
 Gleiss exchange/renewal per request, so a turn resumed after a blocking tool
 does not hold or outlive a real router token in the Pi process.
 

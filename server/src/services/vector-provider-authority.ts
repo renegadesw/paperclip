@@ -3,7 +3,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import { conflict, unprocessable } from "../errors.js";
 
-const PROVIDER_REDEEM_PATH = "/internal/paperclip/v1/providers/redeem";
+const PROVIDER_REDEEM_PATH = "/inbound/paperclip/v1/providers/redeem";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
 const MAX_REDEEM_BYTES = 64 * 1024;
 const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
@@ -189,7 +189,7 @@ function parseRouterUrl(raw: unknown): { baseUrl: string; parentProxy: boolean }
   }
   const parentProxy = url.protocol === "http:" &&
     isLiteralLoopbackHostname(url.hostname) &&
-    url.pathname === "/internal/paperclip/v1/router";
+    url.pathname === "/inbound/paperclip/v1/router";
   return { baseUrl: url.toString().replace(/\/$/, ""), parentProxy };
 }
 

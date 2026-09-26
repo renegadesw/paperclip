@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureLinuxSharedLibraryAliases, prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
+import { ensureDarwinSharedLibraryAliases, ensureLinuxSharedLibraryAliases, prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 
 const require = createRequire(import.meta.url);
 
@@ -51,6 +51,19 @@ describe("embedded Postgres native runtime", () => {
     await prepareEmbeddedPostgresNativeRuntime();
 
     expect(childProcess.spawn).toBe(originalSpawn);
+  });
+
+  it.runIf(process.platform !== "win32")("repairs bundled Darwin install names without replacing existing entries", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-embedded-pg-dylibs-"));
+    tempDirs.push(tempDir);
+    fs.writeFileSync(path.join(tempDir, "libicudata.77.1.dylib"), "icu");
+    fs.writeFileSync(path.join(tempDir, "libz.1.3.1.dylib"), "z");
+    fs.writeFileSync(path.join(tempDir, "libpq.5.dylib"), "existing");
+    const created = await ensureDarwinSharedLibraryAliases(tempDir);
+    expect(created.map((value) => path.basename(value)).sort()).toEqual(["libicudata.77.dylib", "libicudata.dylib", "libpq.dylib", "libz.1.dylib", "libz.dylib"]);
+    expect(fs.readlinkSync(path.join(tempDir, "libicudata.77.dylib"))).toBe("libicudata.77.1.dylib");
+    expect(await ensureDarwinSharedLibraryAliases(tempDir)).toEqual([]);
+    expect(fs.readFileSync(path.join(tempDir, "libpq.5.dylib"), "utf8")).toBe("existing");
   });
 
   it("uses the dependency-scoped portable locale patch", () => {
