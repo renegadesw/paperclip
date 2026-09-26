@@ -134,13 +134,13 @@ export async function installVectorRuntimeIsolation(connectionString: string): P
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
           AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-          AND has_schema_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, n.oid, 'USAGE')
+          AND (n.nspname = 'llm' OR has_schema_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, n.oid, 'USAGE'))
           AND NOT (n.nspname = 'llm' AND c.relname = ANY(${permitted}))
           AND has_table_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')`;
       if (outsideGrants.length) throw new Error("paperclip_runtime has access outside its managed relations (possibly through PUBLIC)");
       const definers = await tx`SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-          AND has_schema_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, n.oid, 'USAGE')
+          AND (n.nspname = 'llm' OR has_schema_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, n.oid, 'USAGE'))
           AND p.prosecdef AND has_function_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, p.oid, 'EXECUTE') LIMIT 1`;
       if (definers.length) throw new Error("paperclip_runtime can execute an application SECURITY DEFINER function; review its grants first");
       await tx.unsafe(`GRANT USAGE ON SCHEMA llm TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
