@@ -70,6 +70,15 @@ export {
   type VectorLegacyPiContextSessionParams,
   type VectorLegacyService,
 } from "./vector-legacy-context.js";
+export {
+  controlVectorPiSession,
+  removeVectorPiForkFile,
+  VectorPiSessionControlError,
+  type VectorPiForkPoint,
+  type VectorPiSessionControlInput,
+  type VectorPiSessionControlResult,
+  type VectorPiSessionState,
+} from "./vector-session-control.js";
 export { listPiSkills, syncPiSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export {

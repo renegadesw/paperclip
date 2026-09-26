@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import {
@@ -162,6 +163,7 @@ const { spawn } = require("node:child_process");
 
 const piCommand = process.argv[1];
 const piArgs = JSON.parse(process.argv[2]);
+const captureNonce = process.argv[3];
 const child = spawn(piCommand, piArgs, {
   cwd: process.cwd(),
   env: process.env,
@@ -171,6 +173,11 @@ const child = spawn(piCommand, piArgs, {
 let input = "";
 let stdoutBuffer = "";
 let stdinClosed = false;
+let finalCaptureStarted = false;
+let promptAccepted = false;
+let afterMessages = null;
+let finalState = null;
+let captureTimer = null;
 
 function closeChildStdin() {
   if (stdinClosed) return;
@@ -178,16 +185,59 @@ function closeChildStdin() {
   child.stdin.end();
 }
 
+function sendCommand(command) {
+  if (stdinClosed || child.killed || child.stdin.destroyed) return;
+  child.stdin.write(JSON.stringify(command) + "\n");
+}
+
+function beginFinalCapture() {
+  if (finalCaptureStarted) return;
+  finalCaptureStarted = true;
+  sendCommand({ id: "paperclip-vector-after", type: "get_fork_messages" });
+  sendCommand({ id: "paperclip-vector-state", type: "get_state" });
+  captureTimer = setTimeout(closeChildStdin, 500);
+}
+
+function maybeFinishCapture() {
+  if (!afterMessages || !finalState) return;
+  const promptEntry = promptAccepted ? afterMessages[afterMessages.length - 1] : null;
+  if (
+    typeof promptEntry?.entryId === "string" &&
+    typeof finalState.sessionFile === "string" &&
+    typeof finalState.sessionId === "string"
+  ) {
+    process.stdout.write(JSON.stringify({
+      type: "paperclip_vector_session_state",
+      nonce: captureNonce,
+      promptEntryId: promptEntry.entryId,
+      sessionFile: finalState.sessionFile,
+      sessionId: finalState.sessionId,
+    }) + "\n");
+  }
+  closeChildStdin();
+}
+
 function inspectLine(line) {
   if (!line.trim()) return;
   try {
     const event = JSON.parse(line);
-    if (event.type === "agent_settled") closeChildStdin();
+    if (event.type === "agent_settled") beginFinalCapture();
     if (
       event.type === "response" &&
       event.command === "prompt" &&
       event.success === false
-    ) closeChildStdin();
+    ) beginFinalCapture();
+    if (event.type === "response" && event.command === "prompt" && event.success === true) {
+      promptAccepted = true;
+    }
+    if (event.type === "response" && event.id === "paperclip-vector-after") {
+      afterMessages = Array.isArray(event.data?.messages) ? event.data.messages : [];
+      maybeFinishCapture();
+    }
+    if (event.type === "response" && event.id === "paperclip-vector-state") {
+      finalState = event.data && typeof event.data === "object" ? event.data : {};
+      maybeFinishCapture();
+    }
   } catch {
     // Pi owns stdout. Forward malformed/non-JSON lines unchanged and let the
     // adapter parser decide whether they are meaningful.
@@ -216,6 +266,7 @@ child.on("error", (error) => {
   process.exitCode = 1;
 });
 child.on("close", (code, signal) => {
+  if (captureTimer) clearTimeout(captureTimer);
   if (signal) {
     process.kill(process.pid, signal);
     return;
@@ -223,6 +274,36 @@ child.on("close", (code, signal) => {
   process.exitCode = code ?? 1;
 });
 `;
+
+export interface VectorPiTurnSessionState {
+  promptEntryId: string;
+  sessionFile: string;
+  sessionId: string;
+}
+
+export function extractVectorPiTurnSessionState(
+  stdout: string,
+  nonce: string,
+): VectorPiTurnSessionState | null {
+  let resolved: VectorPiTurnSessionState | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { continue; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const record = parsed as Record<string, unknown>;
+    if (record.type !== "paperclip_vector_session_state" || record.nonce !== nonce) continue;
+    const promptEntryId = typeof record.promptEntryId === "string" ? record.promptEntryId.trim() : "";
+    const sessionFile = typeof record.sessionFile === "string" ? record.sessionFile.trim() : "";
+    const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+    if (
+      !promptEntryId || promptEntryId.length > 256 ||
+      !path.isAbsolute(sessionFile) || sessionFile.length > 4096 ||
+      !sessionId || sessionId.length > 256
+    ) continue;
+    resolved = { promptEntryId, sessionFile, sessionId };
+  }
+  return resolved;
+}
 
 function firstNonEmptyLine(text: string): string {
   return (
@@ -1115,9 +1196,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
 
       const rpcPrompt = buildPiRpcPrompt(runId, userPrompt, vectorIngressImages);
+      const vectorSessionCaptureNonce = randomUUID();
       const processCommand = executionMode === "rpc" ? "node" : command;
       const processArgs = executionMode === "rpc"
-        ? ["-e", PI_RPC_TURN_SUPERVISOR, command, JSON.stringify(args)]
+        ? ["-e", PI_RPC_TURN_SUPERVISOR, command, JSON.stringify(args), vectorSessionCaptureNonce]
         : args;
       const processEnvSource = executionTargetIsRemote && vectorEmbeddedRpc
         ? ensurePathInEnv(projectVectorEmbeddedPiEnvironment(process.env, env))
@@ -1161,6 +1243,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         proc: { ...proc, stdout: sanitizedStdout, stderr: sanitizedStderr },
         rawStderr: sanitizedStderr,
         parsed: parsePiJsonl(sanitizedStdout),
+        vectorPiSession: executionMode === "rpc"
+          ? extractVectorPiTurnSessionState(sanitizedStdout, vectorSessionCaptureNonce)
+          : null,
       };
     };
 
@@ -1169,6 +1254,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string; errorCode?: string | null };
         rawStderr: string;
         parsed: ReturnType<typeof parsePiJsonl>;
+        vectorPiSession: VectorPiTurnSessionState | null;
       },
       clearSessionOnMissingSession = false,
     ): AdapterExecutionResult => {
@@ -1229,6 +1315,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         resultJson: {
           stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,
+          ...(attempt.vectorPiSession ? { vectorPiSession: attempt.vectorPiSession } : {}),
         },
         summary: attempt.parsed.finalMessage ?? attempt.parsed.messages.join("\n\n").trim(),
         clearSession: Boolean(clearSessionOnMissingSession),
