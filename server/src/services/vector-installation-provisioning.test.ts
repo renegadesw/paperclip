@@ -17,6 +17,8 @@ import {
   vectorInstallationManifestSchema,
   type VectorProvisioningPort,
 } from "./vector-installation-provisioning.js";
+import { syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";
+import { agentService } from "./agents.js";
 
 const roots: string[] = [];
 const embeddedPostgres = await getEmbeddedPostgresTestSupport();
@@ -1108,6 +1110,269 @@ describe("Vector installation provisioning", () => {
       port.agents.push({ ...structuredClone(port.agents[0]), id: "0f5b7f4e-3a55-4d0b-9a0e-5b7c1d2e3f41", metadata: {} });
       const input = await standardRevision(f, 2, "# Standard Chat v2\n");
       await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("agent identity collision");
+    });
+  });
+
+  describe("operator-owned adapterConfig keys and board instructions metadata", () => {
+    const body = "# FunkyDev\n";
+    const sha = createHash("sha256").update(body).digest("hex");
+    const relative = "paperclip/profile-assets/engineering/funkydev/AGENTS.md";
+
+    /**
+     * The active release as fdctl lays it out: `current` is a symlink to a
+     * versioned release directory holding the sealed persona.
+     */
+    async function releaseFixture(options: { operatorOwned?: string[] } = {}) {
+      const f = await fixture();
+      const versioned = path.join(path.dirname(f.activeReleaseRoot), "0062b83");
+      await fs.mkdir(path.dirname(path.join(versioned, relative)), { recursive: true });
+      await fs.writeFile(path.join(versioned, relative), body);
+      await fs.symlink(versioned, f.activeReleaseRoot);
+      (f.manifest.agent as any).operatorOwnedAdapterConfigKeys = options.operatorOwned ?? ["model", "thinking"];
+      const input = { ...f, selectedProfile: "engineering", effectiveToolPolicy: f.toolPolicy };
+      return { f, input, versioned, canonical: path.join(f.activeReleaseRoot, relative) };
+    }
+
+    /** Exactly what a board save does to adapterConfig (routes/agents.ts). */
+    function boardSave(agent: any, patch: Record<string, unknown>) {
+      return syncInstructionsBundleConfigFromFilePath(agent, { ...agent.adapterConfig, ...patch });
+    }
+
+    function countingPort() {
+      const port = memoryPort();
+      const updates: unknown[] = [];
+      const update = port.updateAgent;
+      port.updateAgent = async (id, patch) => { updates.push(structuredClone(patch)); return update(id, patch); };
+      return { port, updates };
+    }
+
+    it("rejects duplicate or redundant operator-owned keys and unknown keys", async () => {
+      const { f } = await releaseFixture();
+      for (const [keys, mutable] of [
+        [["model", "model"], []],
+        [["model"], ["adapterConfig"]],
+        [["cwd"], []],
+        [["instructionsFilePath"], []],
+      ] as const) {
+        const manifest = structuredClone(f.manifest) as any;
+        manifest.agent.operatorOwnedAdapterConfigKeys = keys;
+        manifest.agent.mutableFields = mutable;
+        expect(vectorInstallationManifestSchema.safeParse(manifest).success).toBe(false);
+      }
+      const legacy = structuredClone(f.manifest) as any;
+      delete legacy.agent.operatorOwnedAdapterConfigKeys;
+      expect(vectorInstallationManifestSchema.parse(legacy).agent.operatorOwnedAdapterConfigKeys).toEqual([]);
+    });
+
+    it("creates with the seed value, then preserves board model and thinking across reinstalls and upgrades", async () => {
+      const { f, input, canonical } = await releaseFixture();
+      const { port, updates } = countingPort();
+      await reconcileVectorInstallation(port, input);
+      expect(port.agents[0].adapterConfig).toEqual({ ...f.manifest.agent.adapterConfig, instructionsFilePath: canonical });
+      expect(port.agents[0].metadata.vectorProvisioning.instructionsSha256).toBe(sha);
+
+      port.agents[0].adapterConfig = { ...port.agents[0].adapterConfig, model: "router/Other-Model", thinking: "medium" };
+      await reconcileVectorInstallation(port, input);
+      expect(updates).toEqual([]);
+      expect(port.agents[0].adapterConfig).toMatchObject({ model: "router/Other-Model", thinking: "medium" });
+
+      const next = structuredClone(input);
+      next.manifest.manifestRevision = 2;
+      next.manifest.agent.adapterConfig.thinking = "low";
+      next.manifest.agent.adapterConfig.cwd = "/home/funkydev/work";
+      await reconcileVectorInstallation(port, next);
+      expect(port.agents[0].adapterConfig).toEqual({
+        model: "router/Other-Model",
+        thinking: "medium",
+        executionMode: "rpc",
+        cwd: "/home/funkydev/work",
+        instructionsFilePath: canonical,
+      });
+      await reconcileVectorInstallation(port, next);
+      expect(updates).toHaveLength(1);
+    });
+
+    it("keeps every other adapterConfig key sealed, and keys not declared operator-owned sealed too", async () => {
+      const { input } = await releaseFixture({ operatorOwned: ["model"] });
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      const created = structuredClone(port.agents[0]);
+      for (const [key, value] of [["thinking", "medium"], ["cwd", "/tmp"], ["executionMode", "json"], ["extensions", ["x"]]] as const) {
+        port.agents[0] = { ...structuredClone(created), adapterConfig: { ...created.adapterConfig, [key]: value } };
+        const before = structuredClone(port.agents);
+        await expect(reconcileVectorInstallation(port, input)).rejects.toThrow(`immutable field agent.adapterConfig.${key} differs`);
+        expect(port.agents).toEqual(before);
+      }
+    });
+
+    it("rejects an invalid operator-owned value instead of preserving it", async () => {
+      const { input } = await releaseFixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      port.agents[0].adapterConfig.thinking = "extreme";
+      await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("operator-owned adapterConfig.thinking is invalid");
+    });
+
+    it("same content with board metadata: normalizes to the release's canonical instructions idempotently", async () => {
+      const { f, input, versioned, canonical } = await releaseFixture();
+      const { port, updates } = countingPort();
+      await reconcileVectorInstallation(port, input);
+      // The board saved a thinking change and rewrote the path to the real
+      // (symlink-resolved) release directory, adding its bundle metadata.
+      const edited = boardSave(port.agents[0], { thinking: "medium", instructionsFilePath: path.join(versioned, relative) });
+      expect(edited).toMatchObject({ instructionsBundleMode: "external", instructionsEntryFile: "AGENTS.md" });
+      expect(edited.instructionsFilePath).not.toBe(canonical);
+      port.agents[0].adapterConfig = edited;
+
+      const receipt = await reconcileVectorInstallation(port, input);
+      expect(receipt.created.agent).toBe(false);
+      expect(port.agents[0].adapterConfig).toEqual({
+        ...f.manifest.agent.adapterConfig,
+        thinking: "medium",
+        instructionsFilePath: canonical,
+      });
+      expect(updates).toHaveLength(1);
+      await reconcileVectorInstallation(port, input);
+      expect(updates).toHaveLength(1);
+    });
+
+    it("same content with board metadata on a revision upgrade from a marker without a recorded digest", async () => {
+      const { input, canonical } = await releaseFixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      delete port.agents[0].metadata.vectorProvisioning.instructionsSha256;
+      port.agents[0].adapterConfig = boardSave(port.agents[0], { thinking: "medium" });
+      const next = structuredClone(input);
+      next.manifest.manifestRevision = 2;
+      await reconcileVectorInstallation(port, next);
+      expect(port.agents[0].adapterConfig).toMatchObject({ thinking: "medium", instructionsFilePath: canonical });
+      expect(port.agents[0].adapterConfig).not.toHaveProperty("instructionsBundleMode");
+      expect(port.agents[0].metadata.vectorProvisioning).toMatchObject({ manifestRevision: 2, instructionsSha256: input.manifest.agent.instructions.sha256 });
+    });
+
+    it("an upgrade that ships a new persona proves the live file against the digest last provisioned", async () => {
+      const { f, input, canonical } = await releaseFixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      port.agents[0].adapterConfig = boardSave(port.agents[0], { thinking: "medium" });
+      const v2 = "# FunkyDev v2\n";
+      await fs.writeFile(path.join(f.stagedReleaseRoot, relative), v2);
+      const next = structuredClone(input);
+      next.manifest.manifestRevision = 2;
+      next.manifest.agent.instructions.sha256 = createHash("sha256").update(v2).digest("hex");
+      await reconcileVectorInstallation(port, next);
+      expect(port.agents[0].adapterConfig).toMatchObject({ thinking: "medium", instructionsFilePath: canonical });
+      expect(port.agents[0].metadata.vectorProvisioning.instructionsSha256).toBe(next.manifest.agent.instructions.sha256);
+    });
+
+    it("different content: fails closed naming the agent and both digests, without mutation", async () => {
+      const { input, versioned } = await releaseFixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      // A board persona edit: the bundle is switched to a copy with new text.
+      const managed = path.join(path.dirname(versioned), "board-copy");
+      await fs.mkdir(managed, { recursive: true });
+      await fs.writeFile(path.join(managed, "AGENTS.md"), "# FunkyDev, edited on the board\n");
+      port.agents[0].adapterConfig = boardSave(port.agents[0], { instructionsFilePath: path.join(managed, "AGENTS.md") });
+      const liveSha = createHash("sha256").update("# FunkyDev, edited on the board\n").digest("hex");
+      const before = structuredClone(port.agents);
+      for (const revision of [1, 2]) {
+        const attempt = structuredClone(input);
+        attempt.manifest.manifestRevision = revision;
+        const error = await reconcileVectorInstallation(port, attempt).catch((err: Error) => err);
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain("FunkyDev instructions differ from the release");
+        expect((error as Error).message).toContain(`live sha256 ${liveSha}`);
+        expect((error as Error).message).toContain(`release sha256 ${sha}`);
+        expect(port.agents).toEqual(before);
+      }
+    });
+
+    it("different content: an in-place edit of the release file or a missing file also fails closed", async () => {
+      const { input, versioned } = await releaseFixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      port.agents[0].adapterConfig = boardSave(port.agents[0], { thinking: "medium" });
+      await fs.writeFile(path.join(versioned, relative), "# rewritten in place\n");
+      await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("FunkyDev instructions differ from the release");
+      await fs.rm(path.join(versioned, relative));
+      await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("live sha256 unreadable");
+      port.agents[0].adapterConfig = boardSave(port.agents[0], { instructionsFilePath: "" });
+      await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("FunkyDev instructions were removed on the board");
+    });
+
+    it("no board metadata: a reinstall is a no-op and never reads or rewrites instructions", async () => {
+      const { input, versioned } = await releaseFixture();
+      const { port, updates } = countingPort();
+      await reconcileVectorInstallation(port, input);
+      const before = structuredClone(port.agents);
+      // Content is not consulted when the release's own canonical path is live.
+      await fs.writeFile(path.join(versioned, relative), "# release file replaced by the next install\n");
+      await reconcileVectorInstallation(port, input);
+      expect(port.agents).toEqual(before);
+      expect(updates).toEqual([]);
+    });
+
+    it("no board metadata: an equivalent path form with the same content is normalized, a different file is refused", async () => {
+      const { input, versioned, canonical } = await releaseFixture();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      port.agents[0].adapterConfig.instructionsFilePath = path.join(versioned, relative);
+      await reconcileVectorInstallation(port, input);
+      expect(port.agents[0].adapterConfig.instructionsFilePath).toBe(canonical);
+      port.agents[0].adapterConfig.instructionsFilePath = "/etc/hosts";
+      await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("FunkyDev instructions differ from the release");
+    });
+
+    (embeddedPostgres.supported ? describe : describe.skip)("through the production agent service", () => {
+      let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+      let db: ReturnType<typeof createDb>;
+
+      beforeAll(async () => {
+        database = await startEmbeddedPostgresTestDatabase("paperclip-vector-provision-operator-");
+        db = createDb(database.connectionString);
+      }, 90_000);
+
+      afterAll(async () => {
+        await db?.$client.end({ timeout: 0 });
+        await database?.cleanup();
+      });
+
+      it("installs over the live t480 FunkyDev board edit (thinking=medium, board bundle metadata, same persona)", async () => {
+        const { f, input, versioned, canonical } = await releaseFixture();
+        // The revision the live agent was provisioned at, before operator ownership existed.
+        const legacy = structuredClone(input);
+        delete (legacy.manifest.agent as any).operatorOwnedAdapterConfigKeys;
+        await provisionVectorInstallation(db, legacy);
+        const service = agentService(db);
+        const row = await service.getById(f.manifest.agent.id);
+        const legacyMetadata = structuredClone(row!.metadata as any);
+        delete legacyMetadata.vectorProvisioning.instructionsSha256;
+        await service.update(f.manifest.agent.id, {
+          metadata: legacyMetadata,
+          adapterConfig: boardSave(row, { thinking: "medium", instructionsFilePath: path.join(versioned, relative) }),
+        });
+        // Without operator ownership the old contract still refuses it.
+        await expect(provisionVectorInstallation(db, legacy)).rejects.toThrow("drift");
+
+        const next = structuredClone(input);
+        next.manifest.manifestRevision = 2;
+        const receipt = await provisionVectorInstallation(db, next);
+        expect(receipt).toMatchObject({ manifestRevision: 2, agentsCreated: 0 });
+        const upgraded = await db.select().from(agentsTable).where(eq(agentsTable.id, f.manifest.agent.id)).then((rows) => rows[0]!);
+        expect(upgraded.adapterConfig).toEqual({ ...f.manifest.agent.adapterConfig, thinking: "medium", instructionsFilePath: canonical });
+        expect(await provisionVectorInstallation(db, next)).toEqual(receipt);
+        const rerun = await db.select().from(agentsTable).where(eq(agentsTable.id, f.manifest.agent.id)).then((rows) => rows[0]!);
+        expect(rerun.updatedAt).toEqual(upgraded.updatedAt);
+
+        // A second board edit at the new revision normalizes in place.
+        await service.update(f.manifest.agent.id, { adapterConfig: boardSave(rerun, { model: "router/Other-Model" }) });
+        await provisionVectorInstallation(db, next);
+        const normalized = await db.select().from(agentsTable).where(eq(agentsTable.id, f.manifest.agent.id)).then((rows) => rows[0]!);
+        expect(normalized.adapterConfig).toEqual({
+          ...f.manifest.agent.adapterConfig, model: "router/Other-Model", thinking: "medium", instructionsFilePath: canonical,
+        });
+      });
     });
   });
 });

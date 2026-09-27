@@ -5,6 +5,7 @@ import { type Db, routineTriggers, routines, vectorInstallationOwnerships } from
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-profiles";
+import { resolveHomeAwarePath } from "../home-paths.js";
 import { agentService } from "./agents.js";
 import { companyService } from "./companies.js";
 import { VECTOR_SCHEDULE_KEYS } from "./vector-schedule-routine-dispatch.js";
@@ -25,6 +26,22 @@ const agentMutableField = z.enum([
   "permissions",
   "metadata",
 ]);
+
+// adapterConfig keys an operator may change on the board (and Vector OS may
+// change through its admin relay) without breaking the next release install.
+// The seed value is used on create; afterwards the live value is preserved,
+// excluded from the drift assertion, and never overwritten by an upgrade.
+// Every other adapterConfig key stays sealed.
+const operatorOwnedAdapterConfigKey = z.enum(["model", "thinking"]);
+
+// The release owns instructionsFilePath. When the board saves an agent it
+// derives these bundle keys from that path (syncInstructionsBundleConfigFromFilePath)
+// and may rewrite the path into an equivalent form. They are normalized away,
+// never treated as a persona change, as long as the file they name still holds
+// the sealed release content.
+const RELEASE_INSTRUCTIONS_KEY = "instructionsFilePath";
+const BOARD_INSTRUCTIONS_METADATA_KEYS = ["instructionsBundleMode", "instructionsRootPath", "instructionsEntryFile"] as const;
+const BOARD_INSTRUCTIONS_DEFAULT_ENTRY_FILE = "AGENTS.md";
 
 const toolPolicySchema = z.object({
   profile: vectorProfileSchema,
@@ -84,6 +101,11 @@ function assertNoEmbeddedAuthority(value: unknown, location = "manifest"): void 
   }
 }
 
+const operatorAdapterConfigValueSchemas = {
+  model: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
+  thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
+} as const satisfies Record<z.infer<typeof operatorOwnedAdapterConfigKey>, z.ZodTypeAny>;
+
 const vectorAgentManifestSchema = z.object({
   id: UUID,
   name: z.string().min(1),
@@ -92,11 +114,12 @@ const vectorAgentManifestSchema = z.object({
   capabilities: z.string().nullable(),
   adapterType: z.literal("pi_local"),
   adapterConfig: z.object({
-    model: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
-    thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
+    model: operatorAdapterConfigValueSchemas.model,
+    thinking: operatorAdapterConfigValueSchemas.thinking,
     executionMode: z.literal("rpc"),
     cwd: z.string().refine(path.isAbsolute, "cwd must be absolute"),
   }).strict(),
+  operatorOwnedAdapterConfigKeys: z.array(operatorOwnedAdapterConfigKey).default([]),
   instructions: z.object({
     path: z.string().min(1),
     sha256: SHA256,
@@ -377,6 +400,20 @@ export const vectorInstallationManifestSchema = z.object({
     agentNames.add(agent.name);
     if (new Set(agent.mutableFields).size !== agent.mutableFields.length) {
       ctx.addIssue({ code: "custom", path: [...prefix, "mutableFields"], message: "agent.mutableFields must be unique" });
+    }
+    if (new Set(agent.operatorOwnedAdapterConfigKeys).size !== agent.operatorOwnedAdapterConfigKeys.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: [...prefix, "operatorOwnedAdapterConfigKeys"],
+        message: "agent.operatorOwnedAdapterConfigKeys must be unique",
+      });
+    }
+    if (agent.operatorOwnedAdapterConfigKeys.length > 0 && agent.mutableFields.includes("adapterConfig")) {
+      ctx.addIssue({
+        code: "custom",
+        path: [...prefix, "operatorOwnedAdapterConfigKeys"],
+        message: "operator-owned adapterConfig keys are redundant when all of adapterConfig is mutable",
+      });
     }
     if (path.posix.isAbsolute(agent.instructions.path)
         || agent.instructions.path !== path.posix.normalize(agent.instructions.path)
@@ -711,6 +748,117 @@ function ownedManifestRevision(
   return typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 1 ? revision : null;
 }
 
+/**
+ * The instructions digest this installation last provisioned onto an agent,
+ * or null for a marker written before the digest was recorded.
+ */
+function provisionedInstructionsSha256(agent: AgentRecord): string | null {
+  const marker = agent.metadata?.vectorProvisioning;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return null;
+  const digest = (marker as Record<string, unknown>).instructionsSha256;
+  return typeof digest === "string" && SHA256.safeParse(digest).success ? digest : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+async function sha256OfFile(filePath: string): Promise<string | null> {
+  try {
+    return createHash("sha256").update(await fs.readFile(filePath)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every file the live adapterConfig names as the agent's instructions: the
+ * path Pi appends (instructionsFilePath, resolved against cwd like pi_local
+ * does) and the board's bundle root + entry file. They must all hold the same
+ * release content, or the persona was edited.
+ */
+function liveInstructionsTargets(live: Record<string, unknown>, cwd: string): string[] {
+  const targets = new Set<string>();
+  const filePath = nonEmptyString(live[RELEASE_INSTRUCTIONS_KEY]);
+  if (filePath) targets.add(path.resolve(cwd, filePath));
+  const rootPath = nonEmptyString(live.instructionsRootPath);
+  if (rootPath) {
+    const entryFile = nonEmptyString(live.instructionsEntryFile) ?? BOARD_INSTRUCTIONS_DEFAULT_ENTRY_FILE;
+    targets.add(path.resolve(resolveHomeAwarePath(rootPath), entryFile));
+  }
+  return [...targets];
+}
+
+/**
+ * Reconciles a live agent's adapterConfig against the release.
+ *
+ * - Operator-owned keys keep their live value (seed value only when absent).
+ * - The release re-asserts its canonical instructionsFilePath and drops the
+ *   board's bundle metadata, but only after proving every file the live config
+ *   names still holds the provisioned persona. A different persona fails closed.
+ * - With `assertSealed`, every other key must equal the release exactly (same
+ *   revision). Without it (a revision upgrade) the release overwrites them.
+ *
+ * Returns the adapterConfig the agent must carry after this install.
+ */
+async function reconcileAdapterConfig(input: {
+  agentName: string;
+  live: unknown;
+  expected: Record<string, unknown>;
+  operatorOwnedKeys: readonly z.infer<typeof operatorOwnedAdapterConfigKey>[];
+  provisionedInstructionsSha256: string;
+  assertSealed: boolean;
+}): Promise<Record<string, unknown>> {
+  const live = asRecord(input.live);
+  const operatorOwned = new Set<string>(input.operatorOwnedKeys);
+  const instructionKeys = new Set<string>([RELEASE_INSTRUCTIONS_KEY, ...BOARD_INSTRUCTIONS_METADATA_KEYS]);
+
+  if (input.assertSealed) {
+    for (const key of new Set([...Object.keys(live), ...Object.keys(input.expected)])) {
+      if (operatorOwned.has(key) || instructionKeys.has(key)) continue;
+      assertEqual(`agent.adapterConfig.${key}`, live[key], input.expected[key]);
+    }
+  }
+
+  const canonicalInstructions = input.expected[RELEASE_INSTRUCTIONS_KEY];
+  const boardMetadataPresent = BOARD_INSTRUCTIONS_METADATA_KEYS.some((key) => live[key] !== undefined);
+  if (boardMetadataPresent || (input.assertSealed && live[RELEASE_INSTRUCTIONS_KEY] !== canonicalInstructions)) {
+    const cwd = nonEmptyString(live.cwd) ?? String(input.expected.cwd);
+    const targets = liveInstructionsTargets(live, path.isAbsolute(cwd) ? cwd : String(input.expected.cwd));
+    if (targets.length === 0) {
+      throw new Error(
+        `Vector provisioning drift: ${input.agentName} instructions were removed on the board; `
+          + `release sha256 ${input.provisionedInstructionsSha256}`,
+      );
+    }
+    for (const target of targets) {
+      const liveDigest = await sha256OfFile(target);
+      if (liveDigest !== input.provisionedInstructionsSha256) {
+        throw new Error(
+          `Vector provisioning drift: ${input.agentName} instructions differ from the release `
+            + `(live sha256 ${liveDigest ?? "unreadable"}, release sha256 ${input.provisionedInstructionsSha256}); `
+            + "the persona is release-owned and cannot be edited on the board",
+        );
+      }
+    }
+  }
+
+  const reconciled: Record<string, unknown> = { ...input.expected };
+  for (const key of input.operatorOwnedKeys) {
+    if (live[key] === undefined) continue;
+    const parsed = operatorAdapterConfigValueSchemas[key].safeParse(live[key]);
+    if (!parsed.success) {
+      throw new Error(`Vector provisioning drift: ${input.agentName} operator-owned adapterConfig.${key} is invalid`);
+    }
+    reconciled[key] = parsed.data;
+  }
+  return reconciled;
+}
+
 function containedReleasePath(root: string, relative: string): string {
   if (!path.isAbsolute(root)) throw new Error("Vector provisioning release roots must be absolute");
   const resolvedRoot = path.resolve(root);
@@ -740,7 +888,11 @@ async function resolveManifest(input: VectorProvisioningInput) {
     }
   }
 
-  const rosterAgents = [manifest.agent, ...manifest.additionalAgents].map(({ mutableFields: _mutableFields, ...agent }) => agent);
+  const rosterAgents = [manifest.agent, ...manifest.additionalAgents].map(({
+    mutableFields: _mutableFields,
+    operatorOwnedAdapterConfigKeys: _operatorOwnedAdapterConfigKeys,
+    ...agent
+  }) => agent);
   return {
     manifest,
     workloadCatalogSha256: createHash("sha256").update(stableJson({
@@ -849,6 +1001,7 @@ export async function reconcileVectorInstallation(
           profile: manifest.profile,
           manifestRevision: manifest.manifestRevision,
           rosterCatalogSha256,
+          instructionsSha256: desired.instructions.sha256,
         },
          vectorWorkloads: {
            schemaVersion: 1,
@@ -878,17 +1031,40 @@ export async function reconcileVectorInstallation(
           `Vector provisioning downgrade refused: agent is at manifest revision ${storedRevision}, manifest is ${manifest.manifestRevision}`,
         );
       }
-      if (storedRevision < manifest.manifestRevision) {
-        // A newer revision owns every declared field except operator-mutable ones.
+      const mutable = new Set<string>(desired.mutableFields);
+      const upgrading = storedRevision < manifest.manifestRevision;
+      // Validated before any agent mutation so a refused install changes nothing.
+      const adapterConfig = mutable.has("adapterConfig")
+        ? agentExpected.adapterConfig
+        : await reconcileAdapterConfig({
+          agentName: desired.name,
+          live: agent.adapterConfig,
+          expected: agentExpected.adapterConfig,
+          operatorOwnedKeys: desired.operatorOwnedAdapterConfigKeys,
+          // An upgrade proves the live persona against the one this installation
+          // last provisioned; markers from before the digest was recorded fall
+          // back to the release's digest.
+          provisionedInstructionsSha256: (upgrading ? provisionedInstructionsSha256(agent) : null)
+            ?? desired.instructions.sha256,
+          assertSealed: !upgrading,
+        });
+      const expectedAfter = { ...agentExpected, adapterConfig };
+      if (upgrading) {
+        // A newer revision owns every declared field except operator-mutable
+        // fields and operator-owned adapterConfig keys.
         const collision = existingAgents.find((candidate) => candidate.id !== agent!.id && candidate.name === desired.name);
         if (collision) throw new Error("Vector provisioning agent identity collision");
-        const mutable = new Set<string>(desired.mutableFields);
-        const { id: _id, ...declared } = agentExpected;
+        const { id: _id, ...declared } = expectedAfter;
         const patch = Object.fromEntries(Object.entries(declared).filter(([key]) => !mutable.has(key)));
         agent = await port.updateAgent(agent.id, patch);
         if (!agent || agent.companyId !== company.id) throw new Error("Vector provisioning agent upgrade failed");
+      } else if (!mutable.has("adapterConfig") && stableJson(agent.adapterConfig) !== stableJson(adapterConfig)) {
+        // Same revision: re-assert the release's canonical instructions over
+        // board bundle metadata, keeping operator-owned values.
+        agent = await port.updateAgent(agent.id, { adapterConfig });
+        if (!agent || agent.companyId !== company.id) throw new Error("Vector provisioning agent normalization failed");
       }
-      assertImmutableFields("agent", agent, agentExpected, desired.mutableFields);
+      assertImmutableFields("agent", agent, expectedAfter, desired.mutableFields);
     } else {
       const collision = existingAgents.find((candidate) => candidate.name === desired.name);
       if (collision) throw new Error("Vector provisioning agent identity collision");
