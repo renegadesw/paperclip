@@ -359,6 +359,11 @@ export class VectorProviderAuthorityBridge {
     });
   }
 
+  hasRunGrant(runId: string): boolean {
+    const grant = this.byRun.get(runId);
+    return Boolean(grant && grant.expiresAt > this.now());
+  }
+
   async runtimeAccess(input: {
     runId: string;
     companyId: string;

@@ -192,6 +192,12 @@ import {
   setActiveVectorProviderAuthorityBridge,
   VectorProviderAuthorityBridge,
 } from "./services/vector-provider-authority.js";
+import {
+  dbActiveBoardRun,
+  resolveVectorBoardRunAuthorityConfig,
+  setActiveVectorBoardRunAuthority,
+  VectorBoardRunAuthority,
+} from "./services/vector-board-run-authority.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -606,8 +612,13 @@ export async function createApp(
   );
   const vectorToolAuthorityConfig = resolveVectorToolAuthorityConfig(process.env);
   const vectorProviderAuthorityConfig = resolveVectorProviderAuthorityConfig(process.env);
+  const vectorBoardRunAuthorityConfig = resolveVectorBoardRunAuthorityConfig(
+    process.env,
+    vectorProviderAuthorityConfig,
+  );
   setActiveVectorToolAuthorityBridge(null);
   setActiveVectorProviderAuthorityBridge(null);
+  setActiveVectorBoardRunAuthority(null);
   if ((vectorToolAuthorityConfig || vectorProviderAuthorityConfig) && !vectorIngressAuth) {
     throw new Error("Vector runtime authority requires signed Vector ingress");
   }
@@ -631,6 +642,15 @@ export async function createApp(
       : null;
     setActiveVectorToolAuthorityBridge(vectorToolAuthority);
     setActiveVectorProviderAuthorityBridge(vectorProviderAuthority);
+    setActiveVectorBoardRunAuthority(
+      vectorBoardRunAuthorityConfig && vectorProviderAuthority
+        ? new VectorBoardRunAuthority(vectorBoardRunAuthorityConfig, {
+            activeRun: dbActiveBoardRun(db),
+            provider: vectorProviderAuthority,
+            tool: vectorToolAuthority,
+          })
+        : null,
+    );
     // This service-to-service boundary has its own exact-body HMAC and direct
     // loopback-peer check. Keep it outside the board mutation router: Vector OS
     // is neither a board session nor an agent API-key principal.

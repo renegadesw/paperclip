@@ -165,6 +165,7 @@ import {
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { prepareActiveVectorToolRuntimeAccess } from "./vector-tool-authority.js";
+import { prepareActiveVectorBoardRunAuthority } from "./vector-board-run-authority.js";
 import {
   hasActiveVectorProviderAuthorityBridge,
   prepareActiveVectorProviderRuntimeAccess,
@@ -23616,6 +23617,23 @@ export function heartbeatService(
         // not, so this throws and the run fails instead of silently losing its
         // tool boundary.
         try {
+          const vectorProviderAuthorityRequired = hasActiveVectorProviderAuthorityBridge() &&
+            typeof runtimeConfig.model === "string" &&
+            runtimeConfig.model.startsWith("router/");
+          // A board-started run (task, assignment, routine Run now, board
+          // chat) has no Vector ingress handle. On the engineering operator
+          // host Vector OS may grant it run-scoped provider and tool
+          // authority; a refusal fails the run exactly as before.
+          await prepareActiveVectorBoardRunAuthority({
+            runId: run.id,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issueRef?.id ?? null,
+            toolPending: context.vectorToolAuthorityPending,
+            providerPending: context.vectorProviderAuthorityPending,
+            providerBound: context.vectorProviderAuthority,
+            required: vectorProviderAuthorityRequired,
+          });
           const vectorToolAuthority = await prepareActiveVectorToolRuntimeAccess({
             runId: run.id,
             companyId: agent.companyId,
@@ -23630,9 +23648,7 @@ export function heartbeatService(
             issueId: issueRef?.id ?? null,
             pending: context.vectorProviderAuthorityPending,
             bound: context.vectorProviderAuthority,
-            required: hasActiveVectorProviderAuthorityBridge() &&
-              typeof runtimeConfig.model === "string" &&
-              runtimeConfig.model.startsWith("router/"),
+            required: vectorProviderAuthorityRequired,
           });
           if (nativeRuntimeResolution.kind === "native") {
             if (vectorToolAuthority || vectorProviderAuthority) {
