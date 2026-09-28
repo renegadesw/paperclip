@@ -304,6 +304,21 @@ export async function installVectorRuntimeIsolation(
       if (!held!.migrations) await tx.unsafe(`GRANT SELECT ON llm.paperclip_migrations TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
       // A monotonic transport identifier, not a scheduler or company-data table.
       if (!held!.sequence) await tx.unsafe(`GRANT USAGE ON SEQUENCE llm.chat_telegram_draft_ids TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
+      // serial/bigserial defaults call nextval() under the caller, so a table the
+      // runtime may INSERT into needs USAGE on its owned sequence (identity
+      // columns are exempt). USAGE is nextval/currval only, never setval.
+      // MATERIALIZED keeps the privilege checks off non-sequence relations.
+      const sequences = await tx`WITH owned AS MATERIALIZED (
+          SELECT s.oid, s.relname, d.refobjid FROM pg_class s
+          JOIN pg_namespace n ON n.oid = s.relnamespace
+          JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = s.oid AND d.deptype = 'a'
+          WHERE n.nspname = 'llm' AND s.relkind = 'S')
+        SELECT relname FROM owned
+        WHERE has_table_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, refobjid, 'INSERT')
+          AND NOT has_sequence_privilege(${VECTOR_RUNTIME_DATABASE_ROLE}, oid, 'USAGE')`;
+      for (const sequence of sequences) {
+        await tx.unsafe(`GRANT USAGE ON SEQUENCE llm.${identifier(sequence.relname as string)} TO ${VECTOR_RUNTIME_DATABASE_ROLE}`);
+      }
     });
     return {
       scopedTables: relations.filter((row) => !["quarantined", "vector-parent"].includes(row.mode)).length,
@@ -386,6 +401,18 @@ export async function assertVectorRuntimeIsolation(
       WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
         AND has_schema_privilege(n.oid, 'USAGE') AND p.prosecdef AND has_function_privilege(p.oid, 'EXECUTE') LIMIT 1`;
     if (definers.length) throw new Error("Vector runtime role can execute an application SECURITY DEFINER function");
+    const ungranted = await db`WITH owned AS MATERIALIZED (
+        SELECT s.oid, s.relname AS sequence_name, t.oid AS table_oid, t.relname AS table_name FROM pg_class s
+        JOIN pg_namespace n ON n.oid = s.relnamespace
+        JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = s.oid AND d.deptype = 'a'
+        JOIN pg_class t ON t.oid = d.refobjid
+        WHERE n.nspname = 'llm' AND s.relkind = 'S')
+      SELECT table_name, sequence_name FROM owned
+      WHERE has_table_privilege(table_oid, 'INSERT') AND NOT has_sequence_privilege(oid, 'USAGE')`;
+    if (ungranted.length) {
+      const names = ungranted.map((row) => `${row.table_name} (${row.sequence_name})`).join(", ");
+      throw new Error(`Vector runtime role cannot draw ids for writable relations: ${names}; rerun the isolation installer`);
+    }
   } finally {
     await db.end({ timeout: 1 });
   }

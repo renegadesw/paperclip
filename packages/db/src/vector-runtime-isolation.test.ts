@@ -65,6 +65,12 @@ embedded("shared runtime role on real PostgreSQL", () => {
     await expect(assertVectorRuntimeIsolation(database.connectionString, { companyId: companyA, installationId: "funkydev-t480" })).rejects.toThrow(/restricted paperclip_runtime role/);
     await expect(assertVectorRuntimeIsolation(runtimeUrl.href, { companyId: companyA, installationId: "funkydev-t480" })).resolves.toBeUndefined();
     await expect(assertVectorRuntimeIsolation(runtimeUrl.href, { companyId: companyA, installationId: "standard-stecke1" })).rejects.toThrow(/no matching installation/);
+    // A run's first event insert draws heartbeat_run_events.id from its bigserial.
+    expect(await admin`SELECT has_sequence_privilege('paperclip_runtime', 'llm.heartbeat_run_events_id_seq', 'USAGE') AS held`).toEqual([{ held: true }]);
+    await admin.unsafe("REVOKE USAGE ON SEQUENCE llm.heartbeat_run_events_id_seq FROM paperclip_runtime");
+    await expect(assertVectorRuntimeIsolation(runtimeUrl.href, { companyId: companyA, installationId: "funkydev-t480" })).rejects.toThrow(/heartbeat_run_events \(heartbeat_run_events_id_seq\)/);
+    await installVectorRuntimeIsolation(database.connectionString);
+    await expect(assertVectorRuntimeIsolation(runtimeUrl.href, { companyId: companyA, installationId: "funkydev-t480" })).resolves.toBeUndefined();
     const connect = (companyId: string, installationId: string) => createDb(runtimeUrl.href, {
       deploymentProfile: "vector-embedded", vectorRuntimeScope: { companyId, installationId }, maxConnections: 3,
     });
