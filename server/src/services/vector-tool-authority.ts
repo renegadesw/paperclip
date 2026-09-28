@@ -5,7 +5,8 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import { conflict, unauthorized, unprocessable } from "../errors.js";
 
-const CALLBACK_PATH = "/api/internal/vector/v1/tools/callback";
+export const VECTOR_TOOL_CALLBACK_PATH = "/api/internal/vector/v1/tools/callback";
+const CALLBACK_PATH = VECTOR_TOOL_CALLBACK_PATH;
 const VECTOR_TOOL_PATH = "/inbound/paperclip/v1/tools/call";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -451,8 +452,13 @@ export class VectorToolAuthorityBridge {
     const grant = [...this.byRun.values()].find((candidate) =>
       tokenEqual(candidate.bearerToken, input.bearerToken)
     );
-    if (!grant || grant.expiresAt <= this.now()) {
-      throw unauthorized("Vector tool callback token is invalid or expired");
+    // Say which of the two it was: an unknown token (never minted by this
+    // process, e.g. after a restart) and an expired grant have different fixes.
+    if (!grant) {
+      throw unauthorized("Vector tool callback token matches no live run grant");
+    }
+    if (grant.expiresAt <= this.now()) {
+      throw unauthorized(`Vector tool callback grant for run ${grant.runId} expired`);
     }
     if (!grant.allowedTools.includes(input.tool)) {
       throw unprocessable("Vector tool is not approved for this installation profile", {
