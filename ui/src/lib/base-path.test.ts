@@ -42,4 +42,17 @@ describe("Paperclip UI base path", () => {
       nested: [{ downloadPath: "/__paperclip/api/files/a?download=1" }],
     });
   });
+
+  it("leaves the self-hosted connector broker's root paths outside the mount", () => {
+    expect(qualifyPublicPathsForBase({
+      url: "/__connector/oauth/github/callback?state=abc",
+      auth: { startUrl: "/__connector/oauth/github/callback?state=def" },
+      other: { url: "/issues/PAP-1" },
+    }, "/__paperclip/")).toEqual({
+      url: "/__connector/oauth/github/callback?state=abc",
+      auth: { startUrl: "/__connector/oauth/github/callback?state=def" },
+      other: { url: "/__paperclip/issues/PAP-1" },
+    });
+  });
 });
+

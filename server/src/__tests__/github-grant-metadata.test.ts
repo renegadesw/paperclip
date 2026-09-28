@@ -92,4 +92,104 @@ describe("GitHub grant metadata", () => {
       details: expect.objectContaining({ code: "github_access_check_failed" }),
     });
   });
+
+  describe("GitHub App installation (bot) tokens", () => {
+    function installationRequest(overrides: { bot?: unknown; secondPageOwnerType?: string } = {}) {
+      return vi.fn<typeof fetch>(async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/user" || url.pathname.startsWith("/user/")) {
+          // What GitHub answers an installation token on user-only endpoints.
+          return new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403 });
+        }
+        if (url.pathname === "/users/renegade-agents%5Bbot%5D") {
+          return json(overrides.bot ?? { id: 900001, login: "renegade-agents[bot]", type: "Bot", avatar_url: "https://avatars.example/bot" });
+        }
+        if (url.pathname === "/installation/repositories") {
+          const secondPage = url.searchParams.get("page") === "2";
+          return json({
+            total_count: 3,
+            repository_selection: "all",
+            repositories: secondPage
+              ? [{ id: 3, full_name: "renegadesw/vector-os", private: true, owner: { login: "renegadesw", type: overrides.secondPageOwnerType ?? "Organization" }, clone_url: "must-not-persist" }]
+              : [
+                  { id: 1, full_name: "renegadesw/vector", private: true, owner: { login: "renegadesw", type: "Organization" } },
+                  { id: 2, full_name: "renegadesw/paperclip", private: false, owner: { login: "renegadesw", type: "Organization" } },
+                ],
+          }, !secondPage);
+        }
+        throw new Error(`Unexpected GitHub path: ${url.pathname}`);
+      });
+    }
+
+    it("builds the bot identity from the installation's repositories without user-only endpoints", async () => {
+      const request = installationRequest();
+      const metadata = await loadGitHubGrantMetadata("ghs_installation", request, "renegade-agents", { installationId: "155009613" });
+      expect(metadata).toMatchObject({
+        userId: "900001",
+        login: "renegade-agents[bot]",
+        avatarUrl: "https://avatars.example/bot",
+        installationCount: 1,
+        repositoryCount: 3,
+        repositorySelection: "all",
+        installationIds: ["155009613"],
+        installationOwnerLogins: ["renegadesw"],
+        repositories: [
+          { id: "2", fullName: "renegadesw/paperclip", installationId: "155009613", private: false },
+          { id: "1", fullName: "renegadesw/vector", installationId: "155009613", private: true },
+          { id: "3", fullName: "renegadesw/vector-os", installationId: "155009613", private: true },
+        ],
+        installationUrl: "https://github.com/apps/renegade-agents/installations/new",
+        managementUrl: "https://github.com/organizations/renegadesw/settings/installations/155009613",
+        appSlug: "renegade-agents",
+        webhookHealth: "pending",
+        tokenKind: "installation",
+      });
+      expect(JSON.stringify(metadata)).not.toContain("must-not-persist");
+      const paths = request.mock.calls.map(([input]) => new URL(String(input)).pathname);
+      expect(paths.some((path) => path === "/user" || path.startsWith("/user/"))).toBe(false);
+      for (const [input, init] of request.mock.calls) {
+        expect(new URL(String(input)).origin).toBe("https://api.github.com");
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer ghs_installation");
+      }
+    });
+
+    it("keeps user tokens on the user endpoints (no installation id means a person)", async () => {
+      await expect(loadGitHubGrantMetadata("ghs_installation", installationRequest(), "renegade-agents")).rejects.toMatchObject({
+        details: expect.objectContaining({ code: "github_access_check_failed" }),
+      });
+    });
+
+    it("refuses an installation credential without a usable app slug or installation id", async () => {
+      for (const [slug, installationId] of [[undefined, "155009613"], ["Bad Slug", "155009613"], ["renegade-agents", "0"], ["renegade-agents", "abc"]] as const) {
+        await expect(loadGitHubGrantMetadata("ghs_installation", installationRequest(), slug, { installationId })).rejects.toMatchObject({
+          details: expect.objectContaining({ code: "github_bad_response" }),
+        });
+      }
+    });
+
+    it("refuses a bot account GitHub reports under another login", async () => {
+      await expect(loadGitHubGrantMetadata("ghs_installation", installationRequest({ bot: { id: 7, login: "someone-else" } }), "renegade-agents", { installationId: "155009613" })).rejects.toMatchObject({
+        details: expect.objectContaining({ code: "github_bad_response" }),
+      });
+    });
+
+    it("requires at least one repository and points at the App's install page", async () => {
+      const request = vi.fn<typeof fetch>(async (input) => String(input).includes("/users/")
+        ? json({ id: 900001, login: "renegade-agents[bot]" })
+        : json({ total_count: 0, repository_selection: "selected", repositories: [] }));
+      await expect(loadGitHubGrantMetadata("ghs_installation", request, "renegade-agents", { installationId: "155009613" })).rejects.toMatchObject({
+        details: expect.objectContaining({
+          code: "github_installation_required",
+          installationUrl: "https://github.com/apps/renegade-agents/installations/new",
+        }),
+      });
+    });
+
+    it("maps an expired installation token to reauthorization, like a user token", async () => {
+      const request = vi.fn<typeof fetch>(async () => new Response("{}", { status: 401 }));
+      await expect(loadGitHubGrantMetadata("ghs_expired", request, "renegade-agents", { installationId: "155009613" })).rejects.toMatchObject({
+        details: expect.objectContaining({ code: "oauth_reauthorization_required" }),
+      });
+    });
+  });
 });

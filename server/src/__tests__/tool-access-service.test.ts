@@ -7298,6 +7298,183 @@ describeEmbeddedPostgres("tool access service", () => {
     ).toBe(false);
   });
 
+  it("binds a self-hosted broker's GitHub App installation token as the bot identity", async () => {
+    const company = await createCompany(db);
+    const userId = `github-manager-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const agent = await createAgent(db, company.id);
+    const subject = `agent:${agent.id}`;
+    let minted = 0;
+    const installationCredentials = () => ({
+      v: 1 as const,
+      accessToken: `ghs_installation_${++minted}`,
+      refreshToken: "vcb1.broker-handle.mac",
+      tokenType: "bearer",
+      accessTokenExpiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      refreshTokenExpiresAt: null,
+      scopes: [...GITHUB_CONNECTOR_PROFILES["github.code"].scopes],
+      subject,
+      companyId: company.id,
+      instanceId: "test-instance",
+      environment: "production" as const,
+      provider: "github" as const,
+      profile: "github.code" as const,
+      appSlug: "renegade-agents",
+      installationId: "155009613",
+    });
+    const connector: PaperclipCloudConnector = {
+      ...fakeGitHubConnector(company.id, subject),
+      // The broker completes on the board origin, not at github.com.
+      startAuthorization: vi.fn(async ({ returnState }) => ({
+        authorizationUrl: `/__connector/oauth/github/callback?state=${encodeURIComponent(returnState)}`,
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      })),
+      claim: vi.fn(async () => installationCredentials()),
+      refresh: vi.fn(async () => installationCredentials()),
+    };
+    const service = createTestToolAccessService(db, {
+      paperclipCloudConnector: connector,
+    });
+    const actor = { actorType: "user" as const, actorId: userId };
+    const githubDefinition = getConnectableAppDefinition("github")!;
+    const previousOwnershipAvailability = githubDefinition.ownershipAvailability;
+    githubDefinition.ownershipAvailability = {
+      ...previousOwnershipAvailability,
+      platform_shared: true,
+    };
+    const githubPaths: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const href = String(url);
+      if (href.startsWith("https://api.github.com/")) {
+        const path = new URL(href).pathname;
+        githubPaths.push(path);
+        if (path === "/users/renegade-agents%5Bbot%5D") {
+          return mcpHttpResponse({ id: 900001, login: "renegade-agents[bot]", type: "Bot" });
+        }
+        if (path === "/installation/repositories") {
+          return mcpHttpResponse({
+            total_count: 2,
+            repository_selection: "all",
+            repositories: [1, 2].map((id) => ({
+              id,
+              full_name: `renegadesw/repo-${id}`,
+              owner: { login: "renegadesw", type: "Organization" },
+              description: "do-not-store",
+            })),
+          });
+        }
+        return new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403 });
+      }
+      if (href === GITHUB_CONNECTOR_PROFILES["github.code"].serverUrl) {
+        return mcpHttpResponse({
+          jsonrpc: "2.0",
+          id: "paperclip-catalog-refresh",
+          result: { tools: [{ name: "get_pull_request", annotations: { readOnlyHint: true } }] },
+        });
+      }
+      throw new Error(`unexpected fetch ${href}`);
+    });
+    try {
+      const connected = await service.connectGalleryApp(
+        company.id,
+        {
+          galleryKey: "github",
+          connectionMethodKey: "managed",
+          grantKind: "agent",
+          subjectAgentId: agent.id,
+          name: "FunkyDev GitHub",
+        },
+        actor,
+      );
+      const started = await service.startOAuth(company.id, connected.connectionId, {
+        redirectUri: "http://127.0.0.1:3100/api/tools/oauth/cloud-connector/callback",
+        actor,
+        subjectAgentId: agent.id,
+      });
+      expect(started.authorizationUrl.startsWith("/__connector/oauth/github/callback?")).toBe(true);
+      const state = new URL(started.authorizationUrl, "http://board.invalid").searchParams.get("state")!;
+      await service.completePaperclipCloudConnectorCallback({
+        state,
+        claimId: "installation-claim",
+        actor,
+      });
+      const [grant] = await db
+        .select()
+        .from(connectionGrants)
+        .where(
+          and(
+            eq(connectionGrants.connectionId, connected.connectionId),
+            eq(connectionGrants.kind, "agent"),
+            eq(connectionGrants.subjectAgentId, agent.id),
+          ),
+        );
+      expect(grant).toMatchObject({
+        status: "active",
+        providerTenant: {
+          name: "renegade-agents[bot]",
+          oauth: { strategy: "paperclip_cloud_connector", tokenType: "bearer" },
+          github: {
+            userId: "900001",
+            login: "renegade-agents[bot]",
+            installationCount: 1,
+            repositoryCount: 2,
+            repositorySelection: "all",
+            installationIds: ["155009613"],
+            installationOwnerLogins: ["renegadesw"],
+            appSlug: "renegade-agents",
+            managementUrl: "https://github.com/organizations/renegadesw/settings/installations/155009613",
+            tokenKind: "installation",
+          },
+        },
+      });
+      expect(grant!.credentialSecretRefs.map((ref) => ref.configPath).sort()).toEqual([
+        "oauth.access_token",
+        "oauth.refresh_token",
+      ]);
+      expect(JSON.stringify(grant)).not.toContain("do-not-store");
+      expect(githubPaths.some((path) => path === "/user" || path.startsWith("/user/"))).toBe(false);
+
+      // A fresh one-hour installation token is not re-minted on every use...
+      await service.refreshOAuthGrantCredentials({
+        companyId: company.id,
+        connectionId: connected.connectionId,
+        grantId: grant!.id,
+        actor,
+      });
+      expect(connector.refresh).not.toHaveBeenCalled();
+      // ...but an exported-run window (or near expiry) mints a new one.
+      const refreshed = await service.refreshOAuthGrantCredentials({
+        companyId: company.id,
+        connectionId: connected.connectionId,
+        grantId: grant!.id,
+        refreshWindowMs: 61 * 60_000,
+        actor,
+      });
+      expect(connector.refresh).toHaveBeenCalledWith(
+        expect.objectContaining({ subject, profile: "github.code", refreshToken: "vcb1.broker-handle.mac" }),
+      );
+      expect(refreshed.providerTenant?.github?.tokenKind).toBe("installation");
+
+      // The continuity refresh keeps the bot identity (installation, not /user).
+      githubPaths.length = 0;
+      await service.checkHealth(connected.connectionId, actor);
+      expect(githubPaths).toContain("/installation/repositories");
+      expect(githubPaths.some((path) => path === "/user" || path.startsWith("/user/"))).toBe(false);
+      const [checked] = await db
+        .select()
+        .from(connectionGrants)
+        .where(eq(connectionGrants.id, grant!.id));
+      expect(checked!.providerTenant?.github).toMatchObject({
+        login: "renegade-agents[bot]",
+        tokenKind: "installation",
+        installationIds: ["155009613"],
+      });
+    } finally {
+      githubDefinition.ownershipAvailability = previousOwnershipAvailability;
+      vi.restoreAllMocks();
+    }
+  });
+
   it.each(["none", "event", "same-time-refresh", "one-conflict"])(
     "binds a managed GitHub identity and protects refresh from concurrent access changes (%s)",
     async (concurrentChange) => {

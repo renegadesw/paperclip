@@ -357,3 +357,26 @@ describe("DEFAULT_GITHUB_TOKEN_SECRET_NAMES", () => {
     ]);
   });
 });
+
+describe("GitHub App installation (bot) identity", () => {
+  it("authenticates with the installation token and commits as the App's bot account", () => {
+    const invocation = buildGitAuthInvocation({
+      token: "ghs_installation",
+      source: "managed_connection",
+      secretName: null,
+      githubIdentity: { userId: "900001", login: "renegade-agents[bot]" },
+      identitySource: "dedicated",
+    });
+    expect(invocation.env).toMatchObject({
+      [GIT_CREDENTIAL_TOKEN_ENV_KEY]: "ghs_installation",
+      GH_TOKEN: "ghs_installation",
+      GITHUB_TOKEN: "ghs_installation",
+      GIT_AUTHOR_NAME: "renegade-agents[bot]",
+      GIT_COMMITTER_NAME: "renegade-agents[bot]",
+      // GitHub attributes bot commits by this exact noreply address.
+      GIT_AUTHOR_EMAIL: "900001+renegade-agents[bot]@users.noreply.github.com",
+      GIT_COMMITTER_EMAIL: "900001+renegade-agents[bot]@users.noreply.github.com",
+    });
+    expect(invocation.configArgs.join(" ")).not.toContain("ghs_installation");
+  });
+});

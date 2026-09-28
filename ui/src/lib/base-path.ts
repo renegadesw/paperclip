@@ -1,3 +1,5 @@
+import { SELF_HOSTED_BROKER_RELAY_PREFIX } from "@paperclipai/shared";
+
 /**
  * Public mount point for the Paperclip board.
  *
@@ -54,7 +56,10 @@ const ROOTED_PATH = /^\/(?!\/)/;
 export function qualifyPublicPathsForBase(value: unknown, basePath: string, fieldName = ""): unknown {
   const normalizedBasePath = normalizeBasePath(basePath);
   if (typeof value === "string") {
-    const browserUrl = BROWSER_URL_FIELD.test(fieldName) && ROOTED_PATH.test(value);
+    // The host (not Paperclip) serves the self-hosted connector broker's
+    // browser paths at the origin root; they must not move under the mount.
+    const browserUrl = BROWSER_URL_FIELD.test(fieldName) && ROOTED_PATH.test(value)
+      && !value.startsWith(SELF_HOSTED_BROKER_RELAY_PREFIX);
     const publicPath = PATH_FIELD.test(fieldName) && PUBLIC_ROOT.test(value);
     if (!browserUrl && !publicPath) return value;
     if (normalizedBasePath && value.startsWith(`${normalizedBasePath}/`)) return value;

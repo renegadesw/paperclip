@@ -59,4 +59,27 @@ describe("resolveAuthorizationTarget", () => {
     });
     expect(resolveAuthorizationTarget("https://auth.example.test/authorize").ok).toBe(true);
   });
+
+  it("resolves a self-hosted broker's /__connector/ path against the board's own origin only", () => {
+    for (const protocol of ["http:", "https:"] as const) {
+      serveBoardOver(protocol);
+      const target = resolveAuthorizationTarget("/__connector/oauth/github/callback?state=abc");
+      expect(target).toEqual({
+        ok: true,
+        url: new URL("/__connector/oauth/github/callback?state=abc", window.location.origin).toString(),
+        host: new URL(window.location.origin).host,
+      });
+    }
+    for (const value of [
+      "//evil.test/__connector/x",
+      "/__connector//evil.test/x",
+      "/__connector/../api/companies",
+      "/__connector\\evil",
+      "/api/tools/oauth/callback",
+      "/__paperclip/__connector/x",
+    ]) {
+      expect(resolveAuthorizationTarget(value).ok).toBe(false);
+    }
+  });
 });
+

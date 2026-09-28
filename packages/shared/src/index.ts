@@ -369,6 +369,8 @@ export {
   isSafeOAuthEndpointUrl,
   oauthEndpointDisplayHost,
   oauthEndpointUrlRejectionMessage,
+  SELF_HOSTED_BROKER_RELAY_PREFIX,
+  selfHostedBrokerRelayPath,
   type OAuthEndpointKind,
   type OAuthEndpointUrlCheck,
   type OAuthEndpointUrlOptions,

@@ -1,6 +1,7 @@
 import { runIdentityContexts } from "@paperclipai/db";
 import { captureRunIdentity } from "./run-identity.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { managedAccessTokenRefreshWindowMs } from "./github-installation-identity.js";
 import { logger } from "../middleware/logger.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -3616,7 +3617,8 @@ export function createToolGatewayService(
     if (
       !forceRefresh &&
       Number.isFinite(expiresAt) &&
-      expiresAt > currentTime + 60 * 60_000 &&
+      expiresAt >
+        currentTime + managedAccessTokenRefreshWindowMs(grant.providerTenant) &&
       !rotationDue
     )
       return grant;

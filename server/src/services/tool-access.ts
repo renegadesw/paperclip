@@ -210,6 +210,11 @@ import { secretService } from "./secrets.js";
 import { agentmailApi } from "./agentmail-api.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import {
+  githubAppBotLogin,
+  githubInstallationIdOf,
+  managedAccessTokenRefreshWindowMs,
+} from "./github-installation-identity.js";
+import {
   readSignedToolArgumentsPayload,
   TOOL_ACTION_REQUEST_SIGNING_GRACE_MS,
 } from "./tool-content-guards.js";
@@ -2514,6 +2519,15 @@ export async function loadGitHubGrantMetadata(
   accessToken: string,
   request: typeof fetch = fetch,
   appSlug?: string,
+  options: {
+    /**
+     * Set only for a GitHub App installation token (the self-hosted broker's
+     * sealed `installationId`, or a grant already recorded as
+     * `tokenKind: "installation"`). Installation tokens cannot call `/user`
+     * or `/user/installations`; the identity is the App's bot account.
+     */
+    installationId?: string | null;
+  } = {},
 ): Promise<{
   userId: string;
   login: string;
@@ -2535,6 +2549,7 @@ export async function loadGitHubGrantMetadata(
   accessRevision: string;
   lastAccessRefreshAt: string;
   webhookHealth: "pending";
+  tokenKind?: "installation";
 }> {
   let resolvedAppSlug = appSlug;
   const accessRefreshStartedAt = new Date().toISOString();
@@ -2594,6 +2609,14 @@ export async function loadGitHubGrantMetadata(
       if (!hasNext) return items;
     }
   };
+  if (options.installationId !== undefined && options.installationId !== null) {
+    return loadGitHubInstallationIdentity({
+      github,
+      installationId: options.installationId,
+      appSlug: resolvedAppSlug,
+      accessRefreshStartedAt,
+    });
+  }
   const { data: user } = await github("/user");
   const userId = githubId(user.id);
   const login = typeof user.login === "string" ? user.login : null;
@@ -2707,6 +2730,131 @@ export async function loadGitHubGrantMetadata(
     accessRevision: randomUUID(),
     lastAccessRefreshAt: accessRefreshStartedAt,
     webhookHealth: "pending",
+  };
+}
+
+/**
+ * Access metadata for a GitHub App installation token: the App's bot account
+ * is the identity (`<slug>[bot]`, id from the public users API) and the
+ * repositories are the installation's own (`GET /installation/repositories`).
+ */
+async function loadGitHubInstallationIdentity(input: {
+  github: (path: string) => Promise<{ data: Record<string, unknown>; hasNext: boolean }>;
+  installationId: string;
+  appSlug: string | undefined;
+  accessRefreshStartedAt: string;
+}): Promise<Awaited<ReturnType<typeof loadGitHubGrantMetadata>>> {
+  const installationId = githubId(input.installationId);
+  const appSlug = input.appSlug;
+  if (!installationId || !appSlug || !/^[a-z0-9-]{1,100}$/.test(appSlug)) {
+    throw unprocessable("GitHub App installation credential is incomplete", {
+      code: "github_bad_response",
+    });
+  }
+  const login = githubAppBotLogin(appSlug);
+  const { data: bot } = await input.github(`/users/${encodeURIComponent(login)}`);
+  const userId = githubId(bot.id);
+  if (
+    !userId ||
+    typeof bot.login !== "string" ||
+    bot.login.toLowerCase() !== login.toLowerCase()
+  ) {
+    throw unprocessable("GitHub returned invalid account metadata", {
+      code: "github_bad_response",
+    });
+  }
+  const repositories = new Map<
+    string,
+    { id: string; fullName: string; installationId: string; private?: boolean }
+  >();
+  const owners = new Map<string, string | null>();
+  let selection: "all" | "selected" | null = null;
+  for (let page = 1; ; page += 1) {
+    const { data, hasNext } = await input.github(
+      `/installation/repositories?per_page=100&page=${page}`,
+    );
+    const batch = data.repositories;
+    if (
+      !Array.isArray(batch) ||
+      !batch.every(recordValue) ||
+      (hasNext && batch.length === 0)
+    ) {
+      throw unprocessable("GitHub returned invalid access metadata", {
+        code: "github_bad_response",
+      });
+    }
+    if (
+      data.repository_selection === "all" ||
+      data.repository_selection === "selected"
+    ) {
+      selection = data.repository_selection;
+    }
+    for (const repository of batch) {
+      const id = githubId(repository.id);
+      const fullName =
+        typeof repository.full_name === "string" ? repository.full_name : "";
+      if (
+        !id ||
+        !/^[A-Za-z0-9][A-Za-z0-9-]*\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(fullName)
+      ) {
+        throw unprocessable("GitHub returned invalid repository metadata", {
+          code: "github_bad_response",
+        });
+      }
+      repositories.set(id, {
+        id,
+        fullName,
+        installationId,
+        ...(typeof repository.private === "boolean"
+          ? { private: repository.private }
+          : {}),
+      });
+      const owner = recordValue(repository.owner) ? repository.owner : null;
+      const ownerLogin =
+        typeof owner?.login === "string" ? owner.login : fullName.split("/")[0]!;
+      owners.set(ownerLogin, typeof owner?.type === "string" ? owner.type : null);
+    }
+    if (!hasNext) break;
+  }
+  const installationUrl = `https://github.com/apps/${appSlug}/installations/new`;
+  if (repositories.size === 0) {
+    throw unprocessable(
+      "GitHub access is required. Grant the GitHub App at least one repository before refreshing access.",
+      {
+        code: "github_installation_required",
+        installationUrl,
+        managementUrl: "https://github.com/settings/installations",
+      },
+    );
+  }
+  const [onlyOwner] = owners.size === 1 ? [...owners.entries()] : [];
+  const managementUrl =
+    (onlyOwner &&
+      githubInstallationManagementUrl(
+        onlyOwner[1] === "Organization"
+          ? `https://github.com/organizations/${encodeURIComponent(onlyOwner[0])}/settings/installations/${installationId}`
+          : `https://github.com/settings/installations/${installationId}`,
+      )) ||
+    "https://github.com/settings/installations";
+  return {
+    userId,
+    login,
+    ...(typeof bot.avatar_url === "string" ? { avatarUrl: bot.avatar_url } : {}),
+    installationCount: 1,
+    repositoryCount: repositories.size,
+    repositorySelection: selection ?? "none",
+    installationIds: [installationId],
+    installationOwnerLogins: [...owners.keys()],
+    repositories: [...repositories.values()].sort((a, b) =>
+      a.fullName.localeCompare(b.fullName),
+    ),
+    installationUrl,
+    managementUrl,
+    appSlug,
+    accessRevision: randomUUID(),
+    lastAccessRefreshAt: input.accessRefreshStartedAt,
+    webhookHealth: "pending",
+    tokenKind: "installation",
   };
 }
 
@@ -11291,6 +11439,11 @@ export function toolAccessService(
     connectionId: string;
     grantId: string;
     forceRefresh?: boolean;
+    /**
+     * How close to expiry a managed token must be to refresh. Defaults to the
+     * grant's request window (see managedAccessTokenRefreshWindowMs).
+     */
+    refreshWindowMs?: number;
     actor?: ActorInfo;
     issueId?: string | null;
     heartbeatRunId?: string | null;
@@ -11324,7 +11477,11 @@ export function toolAccessService(
         (!Number.isFinite(refreshedAt) ||
           refreshedAt <= Date.now() - 30 * 24 * 60 * 60_000);
       const refreshDue =
-        Number.isFinite(expiresAt) && expiresAt <= Date.now() + 60 * 60_000;
+        Number.isFinite(expiresAt) &&
+        expiresAt <=
+          Date.now() +
+            (input.refreshWindowMs ??
+              managedAccessTokenRefreshWindowMs(initialGrant.providerTenant));
       // A GitHub App can deliberately issue a non-expiring ghu_ token. Its
       // continuity is checked against /user below; only an expiring token pair
       // enters this rotation path.
@@ -11952,6 +12109,7 @@ export function toolAccessService(
         accessToken,
         fetch,
         grant.providerTenant?.github?.appSlug,
+        { installationId: githubInstallationIdOf(grant.providerTenant) },
       );
     } catch (error) {
       const providerCode =
@@ -11973,6 +12131,7 @@ export function toolAccessService(
           accessToken,
           fetch,
           grant.providerTenant?.github?.appSlug,
+          { installationId: githubInstallationIdOf(grant.providerTenant) },
         );
       } catch (retryError) {
         const retryCode =
@@ -15268,6 +15427,9 @@ export function toolAccessService(
             credentials.accessToken,
             fetch,
             credentials.appSlug,
+            // A self-hosted broker's App installation token names its
+            // installation; its identity is the App's bot, not a person.
+            { installationId: credentials.installationId ?? null },
           )
         : null;
     const authorizingUserId =

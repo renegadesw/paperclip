@@ -16,6 +16,7 @@ import {
   GOOGLE_WORKSPACE_CONNECTOR_PROFILES,
   isGitHubConnectorProfileId,
   isGoogleWorkspaceConnectorProfileId,
+  selfHostedBrokerRelayPath,
   type GitHubConnectorProfileId,
   type GoogleWorkspaceConnectorProfileId,
 } from "@paperclipai/shared";
@@ -59,6 +60,12 @@ export type SealedConnectorCredentials = {
   provider: PaperclipCloudConnectorProvider;
   profile: string;
   appSlug?: string;
+  /**
+   * Set only by a self-hosted broker serving `github.code` as its GitHub App
+   * installation: the token is an installation (bot) token, which cannot
+   * discover its own installation or call user-only endpoints.
+   */
+  installationId?: string;
 };
 
 export type SealedGmailCredentials = SealedConnectorCredentials & { provider: "google" };
@@ -368,7 +375,20 @@ export function createPaperclipCloudConnector(input: {
         throw new PaperclipCloudConnectorError("Paperclip Cloud connector returned an invalid confirmation URL", "CONNECTOR_BAD_RESPONSE");
       }
       let authorizationUrl: URL | undefined;
+      let brokerRelayPath: string | undefined;
       if (response.authorizationUrl !== undefined) {
+        if (typeof response.authorizationUrl !== "string") {
+          throw new PaperclipCloudConnectorError("Paperclip Cloud connector returned an invalid provider URL", "CONNECTOR_BAD_RESPONSE");
+        }
+        // A self-hosted (loopback) broker may complete sign-in without a
+        // provider trip, e.g. a GitHub App installation identity: it returns
+        // a same-origin path its host serves beside the board. Cloud brokers
+        // never get this exception.
+        brokerRelayPath = isLoopback(expectedBroker.hostname)
+          ? selfHostedBrokerRelayPath(response.authorizationUrl)
+          : undefined;
+      }
+      if (response.authorizationUrl !== undefined && brokerRelayPath === undefined) {
         if (typeof response.authorizationUrl !== "string") {
           throw new PaperclipCloudConnectorError("Paperclip Cloud connector returned an invalid provider URL", "CONNECTOR_BAD_RESPONSE");
         }
@@ -389,7 +409,7 @@ export function createPaperclipCloudConnector(input: {
       }
       const handoff = parseCloudHandoff(response.handoff);
       return {
-        authorizationUrl: authorizationUrl?.toString() ?? confirmationUrl.toString(),
+        authorizationUrl: brokerRelayPath ?? authorizationUrl?.toString() ?? confirmationUrl.toString(),
         expiresAt: response.expiresAt,
         ...(handoff ? { handoff } : {}),
       };
@@ -608,6 +628,7 @@ function unseal(
       || typeof parsed.subject !== "string" || typeof parsed.companyId !== "string"
       || typeof parsed.instanceId !== "string" || typeof parsed.environment !== "string"
       || !(parsed.appSlug === undefined || (typeof parsed.appSlug === "string" && /^[a-z0-9-]{1,100}$/.test(parsed.appSlug)))
+      || !(parsed.installationId === undefined || (provider === "github" && typeof parsed.installationId === "string" && /^[1-9][0-9]{0,30}$/.test(parsed.installationId)))
       || parsed.provider !== provider || parsed.profile !== profile) {
       throw badEnvelope();
     }
