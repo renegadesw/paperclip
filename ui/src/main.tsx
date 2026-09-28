@@ -1,3 +1,5 @@
+// Must run before any module that calls crypto.randomUUID.
+import "./lib/secure-context-polyfills";
 import * as React from "react";
 import { StrictMode } from "react";
 import * as ReactDOM from "react-dom";
