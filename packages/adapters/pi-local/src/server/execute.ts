@@ -1043,7 +1043,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     // Handle instructions file and build system prompt extension
-    const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+    // Restricted profiles read only the release-owned file the profile policy
+    // admitted (its real path), never the raw configured value.
+    const instructionsFilePath = vectorProfilePolicy.restricted
+      ? vectorProfilePolicy.instructionsFilePath ?? ""
+      : asString(config.instructionsFilePath, "").trim();
     const resolvedInstructionsFilePath = instructionsFilePath
       ? path.resolve(cwd, instructionsFilePath)
       : "";
@@ -1102,8 +1106,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       (Object.keys(parseObject(context.vectorPersonaTurn)).length > 0 ||
         Object.keys(parseObject(context.vectorRoleTurn)).length > 0)
     ) {
-      // Restricted Vector profiles carry no instructions file; the admitted
-      // persona/role appended below is the agent's instructions.
+      // No instructions file (restricted agents without a release asset): the
+      // admitted persona/role appended below is the agent's instructions.
       plainConversationMessage = vectorPlainConversation.message;
       systemPromptExtension = plainConversationSystemBase("");
     } else {

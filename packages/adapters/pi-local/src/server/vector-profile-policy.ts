@@ -9,6 +9,11 @@ export type VectorPiProfilePolicy = {
   discoveryCliArgs: string[];
   useBundledPaperclipSkillsOnly: boolean;
   additionalToolNames: string[];
+  /**
+   * Restricted profiles only: the real path of the admitted, deployment-owned
+   * release instructions file. Execute reads this path, never the raw config.
+   */
+  instructionsFilePath?: string;
 };
 
 type PackagedExtension = {
@@ -183,6 +188,67 @@ function restrictedFlag(arg: string): string | null {
   return null;
 }
 
+const RELEASE_PI_COMMAND_SUFFIX = ["runtime", "bin", "pi"] as const;
+
+/**
+ * The release root the deployment pinned for this server: the Vector
+ * supervisor sets PAPERCLIP_VECTOR_PI_COMMAND to <release>/runtime/bin/pi.
+ * Any other deployment command identifies no release, so no instructions file
+ * is admissible.
+ */
+function deploymentReleaseRoot(deploymentCommand: string | undefined): string | null {
+  const command = deploymentCommand?.trim() ?? "";
+  if (!path.isAbsolute(command) || path.normalize(command) !== command) return null;
+  const segments = command.split(path.sep);
+  const suffix = segments.slice(-RELEASE_PI_COMMAND_SUFFIX.length);
+  if (suffix.length !== RELEASE_PI_COMMAND_SUFFIX.length
+      || suffix.some((segment, index) => segment !== RELEASE_PI_COMMAND_SUFFIX[index])) {
+    return null;
+  }
+  const root = segments.slice(0, -RELEASE_PI_COMMAND_SUFFIX.length).join(path.sep);
+  return root.length > 0 ? root : null;
+}
+
+/**
+ * Admit a restricted profile's instructions file only when it is a regular
+ * file whose real path lies inside the deployment-owned release assets for
+ * this profile: realpath(<release>/paperclip/profile-assets/<profile>)/...
+ * Both sides are resolved, so the provisioner's releases/current/... form is
+ * accepted while `..`, symlink escapes and other profiles' assets are not.
+ */
+async function admitReleaseInstructionsFile(
+  profile: string,
+  value: unknown,
+  deploymentCommand: string | undefined,
+): Promise<string> {
+  const reject = (reason: string): never => {
+    throw new Error(
+      `Vector profile "${profile}" forbids Pi runtime resource field "instructionsFilePath" (${reason}).`,
+    );
+  };
+  if (typeof value !== "string" || !path.isAbsolute(value.trim())) {
+    return reject("requires an absolute path to the deployment-owned release profile assets");
+  }
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(profile)) return reject("profile has no release asset directory");
+  const releaseRoot = deploymentReleaseRoot(deploymentCommand);
+  if (!releaseRoot) return reject("the deployment Pi command identifies no release root");
+
+  const assetsRoot = await fs.realpath(path.join(releaseRoot, "paperclip", "profile-assets", profile))
+    .catch(() => null);
+  if (!assetsRoot) return reject("the release has no profile asset directory for this profile");
+  const assetsStat = await fs.stat(assetsRoot).catch(() => null);
+  if (!assetsStat?.isDirectory()) return reject("the release has no profile asset directory for this profile");
+
+  const resolved = await fs.realpath(value.trim()).catch(() => null);
+  if (!resolved) return reject("the file does not exist");
+  if (!resolved.startsWith(`${assetsRoot}${path.sep}`)) {
+    return reject("the file is outside the deployment-owned release profile assets");
+  }
+  const stat = await fs.stat(resolved).catch(() => null);
+  if (!stat?.isFile()) return reject("not a regular file");
+  return resolved;
+}
+
 function validateRestrictedConfig(
   profile: string,
   config: Record<string, unknown>,
@@ -198,6 +264,8 @@ function validateRestrictedConfig(
     );
   }
   for (const field of RESTRICTED_CONFIG_FIELDS) {
+    // Admitted separately, only as a release-owned profile asset.
+    if (field === "instructionsFilePath") continue;
     if (hasConfiguredValue(config[field])) {
       throw new Error(
         `Vector profile "${profile}" forbids Pi runtime resource field "${field}".`,
@@ -369,6 +437,9 @@ export async function prepareVectorPiProfilePolicy(input: {
     input.deploymentCommand,
     input.agentConfiguredEnv,
   );
+  const instructionsFilePath = hasConfiguredValue(input.config.instructionsFilePath)
+    ? await admitReleaseInstructionsFile(profile, input.config.instructionsFilePath, input.deploymentCommand)
+    : undefined;
   const extensions = await verifyPackagedExtensions(input.packagedExtensionsJson, profile);
   const allowedTools = Array.from(new Set(extensions.flatMap((entry) => entry.tools)));
 
@@ -396,6 +467,7 @@ export async function prepareVectorPiProfilePolicy(input: {
     ],
     useBundledPaperclipSkillsOnly: true,
     additionalToolNames: [],
+    ...(instructionsFilePath ? { instructionsFilePath } : {}),
   };
 }
 

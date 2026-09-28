@@ -295,6 +295,103 @@ describe("Vector plain conversation turns", () => {
   });
 });
 
+describe("Vector restricted profiles with a release-owned instructions file", () => {
+  const RELEASE_INSTRUCTIONS = "# Standard Chat\n\nYou are the Vector standard chat agent.\n";
+  const STAGING_INSTRUCTIONS = "# Funky Scout\n\nRequire a Vector claim envelope.\n";
+
+  // The provisioner writes releases/current/...; the supervisor pins
+  // PAPERCLIP_VECTOR_PI_COMMAND=<release>/runtime/bin/pi.
+  async function installRelease() {
+    const release = path.join(harness.root, "releases", "r1");
+    const current = path.join(harness.root, "releases", "current");
+    const piCommand = path.join(current, "runtime", "bin", "pi");
+    await fs.mkdir(path.join(release, "runtime", "bin"), { recursive: true });
+    await writeRpcPiCommand(path.join(release, "runtime", "bin", "pi"), harness.argsDumpPath, harness.promptDumpPath);
+    const asset = async (profile: string, agent: string, body: string) => {
+      const file = path.join(release, "paperclip", "profile-assets", profile, agent, "AGENTS.md");
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, body, "utf8");
+      return {
+        provisioned: path.join(current, "paperclip", "profile-assets", profile, agent, "AGENTS.md"),
+        real: file,
+      };
+    };
+    await fs.symlink(release, current);
+    process.env.PAPERCLIP_VECTOR_PI_COMMAND = piCommand;
+    return {
+      piCommand,
+      standardChat: await asset("standard", "standard-chat", RELEASE_INSTRUCTIONS),
+      stagingScout: await asset("staging", "funky-scout", STAGING_INSTRUCTIONS),
+    };
+  }
+
+  it("launches a standard conversation turn with the release instructions as system prompt", async () => {
+    const release = await installRelease();
+    const turn = await runTurn({
+      profile: "standard",
+      config: { command: release.piCommand, instructionsFilePath: release.standardChat.provisioned },
+      context: {
+        conversationMode: true,
+        issueId: "issue-1",
+        vectorPersonaTurn: PERSONA,
+        paperclipTaskMarkdown: "## Task\nConversation policy that must not reach Pi.",
+        paperclipWake: conversationWake([userComment("comment-1", "What's our cash position today?")]),
+      },
+    });
+    expect(turn.prompt).toBe("What's our cash position today?");
+    expect(turn.rpcMessage).toBe("What's our cash position today?");
+    expect(turn.systemPrompt).toBe(
+      `${RELEASE_INSTRUCTIONS.trim()}\n\n${PERSONA_APPEND}\n\n${PERSONA.systemPrompt}`,
+    );
+    expect(turn.systemPrompt).not.toContain("The above agent instructions were loaded from");
+    expect(turn.commandNotes).toContain(`Loaded agent instructions from ${release.standardChat.real}`);
+  });
+
+  it("launches a staging workload run with the release instructions and the admitted charter", async () => {
+    const release = await installRelease();
+    const turn = await runTurn({
+      profile: "staging",
+      config: { command: release.piCommand, instructionsFilePath: release.stagingScout.provisioned },
+      context: {
+        issueId: "issue-3",
+        vectorWorkloadLaunch: {
+          schemaVersion: 1,
+          workloadKey: "current_scout",
+          taskId: "task-1",
+          systemPrompt: "Dynamic Vector charter.",
+        },
+        paperclipWake: conversationWake([userComment("comment-1", "Analyze the evidence envelope.")], {
+          reason: "issue_assigned",
+        }),
+      },
+    });
+    expect(turn.systemPrompt.startsWith(STAGING_INSTRUCTIONS)).toBe(true);
+    expect(turn.systemPrompt).toContain(`The above agent instructions were loaded from ${release.stagingScout.real}.`);
+    expect(turn.systemPrompt).toContain("Dynamic Vector charter.");
+    expect(turn.prompt).toContain("Analyze the evidence envelope.");
+  });
+
+  it("still refuses to launch with an instructions file outside the release assets", async () => {
+    const release = await installRelease();
+    process.env.PAPERCLIP_VECTOR_PROFILE = "standard";
+    await expect(execute({
+      runId: "run-restricted-outside",
+      agent: { id: "agent-1", companyId: "company-1", name: "Standard Chat", adapterType: "pi_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: release.piCommand,
+        cwd: harness.workspace,
+        model: "google/gemini-3-flash-preview",
+        executionMode: "rpc",
+        instructionsFilePath: harness.instructionsPath,
+      },
+      context: { conversationMode: true, issueId: "issue-1", vectorPersonaTurn: PERSONA },
+      authToken: "run-jwt-token",
+      onLog: async () => {},
+    })).rejects.toThrow('forbids Pi runtime resource field "instructionsFilePath"');
+  });
+});
+
 // Byte-identical guard: these runs must render exactly what 625c5858c did.
 // The fixture was generated against that commit (VECTOR_PLAIN_CONVO_WRITE_GOLDEN=1).
 const GOLDEN_CASES: Record<string, () => Parameters<typeof runTurn>[0]> = {

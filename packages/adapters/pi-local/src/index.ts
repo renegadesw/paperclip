@@ -22,7 +22,7 @@ Don't use when:
 
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
-- instructionsFilePath (string, optional): absolute path to a markdown instructions file appended to system prompt via --append-system-prompt
+- instructionsFilePath (string, optional): absolute path to a markdown instructions file appended to system prompt via --append-system-prompt (restricted Vector profiles admit only a regular file inside <release>/paperclip/profile-assets/<profile>/ of the release pinned by PAPERCLIP_VECTOR_PI_COMMAND)
 - promptTemplate (string, optional): user prompt template passed via -p flag
 - model (string, required): Pi model id in provider/model format (for example xai/grok-4)
 - thinking (string, optional): thinking level (off, minimal, low, medium, high, xhigh)
