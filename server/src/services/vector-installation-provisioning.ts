@@ -8,6 +8,7 @@ import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-pr
 import { resolveHomeAwarePath } from "../home-paths.js";
 import { agentService } from "./agents.js";
 import { companyService } from "./companies.js";
+import { instanceSettingsService } from "./instance-settings.js";
 import { VECTOR_SCHEDULE_KEYS } from "./vector-schedule-routine-dispatch.js";
 
 const UUID = z.string().uuid();
@@ -1297,6 +1298,12 @@ export async function provisionVectorInstallation(
     const receipt = await reconcileVectorInstallation(productionPort(transactionDb), input);
     const manifest = vectorInstallationManifestSchema.parse(input.manifest);
     await reconcileVectorWorkloadRoutines(transactionDb, manifest);
+    // Vector ingress turns are Agent Chat conversations; with the experimental
+    // flag off every NexusLink turn is refused (422). The release owns it.
+    const settings = instanceSettingsService(transactionDb);
+    if (!(await settings.getExperimental()).enableAgentChat) {
+      await settings.updateExperimental({ enableAgentChat: true });
+    }
     return receipt;
   });
 }

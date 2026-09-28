@@ -19,6 +19,7 @@ import {
 } from "./vector-installation-provisioning.js";
 import { syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";
 import { agentService } from "./agents.js";
+import { instanceSettingsService } from "./instance-settings.js";
 
 const roots: string[] = [];
 const embeddedPostgres = await getEmbeddedPostgresTestSupport();
@@ -656,8 +657,12 @@ describe("Vector installation provisioning", () => {
       expect(triggerRows).toHaveLength(8);
       expect(triggerRows.every((row) => row.enabled === false && row.nextRunAt === null)).toBe(true);
 
+      expect((await instanceSettingsService(db).getExperimental()).enableAgentChat).toBe(true);
+      // A board toggle-off is restored by the next install: ingress depends on it.
+      await instanceSettingsService(db).updateExperimental({ enableAgentChat: false });
       const rerun = await provisionVectorInstallation(db, input);
       expect(rerun).toEqual({ ...receipt, created: { company: false, ownership: false, agent: false }, agentsCreated: 0 });
+      expect((await instanceSettingsService(db).getExperimental()).enableAgentChat).toBe(true);
       expect((await provisionedRoutines(production.manifest.company.id)).triggerRows).toHaveLength(8);
     });
 
