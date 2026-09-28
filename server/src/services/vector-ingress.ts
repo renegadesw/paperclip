@@ -489,8 +489,8 @@ export function vectorIngressService(
     const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
     // Role turns are a Funky server surface (staging and production): the
     // turn must name the target agent's own provisioned role and carry no
-    // builtin tools. Engineering (FunkyDev, alias `pi`) and standard
-    // (standard-chat) never accept one.
+    // builtin tools. Engineering (the FunkyDev software org; FunkyDev's alias
+    // is `pi`) and standard (standard-chat) never accept one.
     if (
       provisioning.schemaVersion !== 1 ||
       provisioning.installationId !== input.installationId ||
@@ -523,6 +523,8 @@ export function vectorIngressService(
       repository.length > 201 ||
       !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
       repository.split("/").some((part) => part === "." || part === "..") ||
+      // NexusLink repository work reaches only FunkyDev, never another seat of
+      // the engineering org.
       agent.role !== "engineer" ||
       provisioning.schemaVersion !== 1 ||
       provisioning.installationId !== input.installationId ||
@@ -576,6 +578,9 @@ export function vectorIngressService(
     }
     const agent = await assertTargetAgent(input);
     const configured = eventPayloadRecord(agent.adapterConfig);
+    // Runtime selection is a NexusLink control of the primary agent only
+    // (FunkyDev on engineering); the org's other seats keep their seeded or
+    // board-owned model and thinking.
     if (
       (input.profileId === "standard"
         ? agent.role !== "standard-chat"
@@ -644,18 +649,33 @@ export function vectorIngressService(
     return { issue, ownerId };
   }
 
+  /**
+   * The engineering session alias of the target agent: `pi` for FunkyDev (the
+   * org's `engineer`), none for the other engineering seats or other profiles.
+   */
+  async function engineeringSessionAlias(scope: VectorIngressScope): Promise<"pi" | null> {
+    if (scope.profileId !== "engineering") return null;
+    const role = await db
+      .select({ role: agents.role })
+      .from(agents)
+      .where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)))
+      .then((rows) => rows[0]?.role ?? null);
+    return role === "engineer" ? "pi" : null;
+  }
+
   async function bindConversationOwner(
     scope: VectorIngressScope & VectorIngressOwnerScope,
     issueId: string,
   ) {
     const ownerSha256 = vectorIngressOwnerSha256(scope);
     const turn = scope as Partial<VectorIngressTurnInput>;
-    // FunkyDev has exactly one session alias. A NexusLink todo launch is an
-    // ordinary turn on the profile's single agent (`pi` on engineering,
+    // FunkyDev has exactly one session alias, `pi`. A NexusLink todo launch is
+    // an ordinary turn on the profile's primary agent (FunkyDev on engineering,
     // standard-chat on standard) whose opening message is the todo brief. The
     // todo binding is this durable externalSessionId mapping plus the
-    // run-scoped Vector tool authority minted for that todo.
-    const insertedRole = scope.profileId === "engineering" ? "pi" : null;
+    // run-scoped Vector tool authority minted for that todo. The other seats
+    // of the engineering org are not FunkyDev and never carry its alias.
+    const alias = await engineeringSessionAlias(scope);
     const requestedRepository = turn.repositoryContext?.repository ?? null;
     const inserted = await db
       .insert(vectorIngressConversations)
@@ -667,7 +687,7 @@ export function vectorIngressService(
         profileId: scope.profileId,
         ownerSha256,
         externalSessionId: scope.externalSessionId,
-        sessionRole: insertedRole,
+        sessionRole: alias,
         repository: requestedRepository,
       })
       .onConflictDoNothing()
@@ -691,7 +711,7 @@ export function vectorIngressService(
       });
     }
     if (
-      (scope.profileId === "engineering" && mapping.sessionRole !== null && mapping.sessionRole !== "pi") ||
+      (scope.profileId === "engineering" && mapping.sessionRole !== null && mapping.sessionRole !== alias) ||
       (inserted.length === 0 && requestedRepository !== null && mapping.repository !== requestedRepository)
     ) {
       throw conflict("Vector conversation role or repository binding does not match", {
@@ -846,7 +866,7 @@ export function vectorIngressService(
       legacyContextImported,
       model: mapping?.model ?? null,
       thinking: mapping?.thinking ?? null,
-      sessionRole: mapping?.sessionRole ?? (owned && input.profileId === "engineering" ? "pi" : null),
+      sessionRole: mapping?.sessionRole ?? (owned ? await engineeringSessionAlias(input) : null),
       repository: mapping?.repository ?? null,
       run: run
         ? {

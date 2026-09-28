@@ -335,6 +335,7 @@ const support = await getEmbeddedPostgresTestSupport();
     let standardAgentId: string;
     let retiredWorkerAgentId: string;
     let engineeringAgentId: string;
+    let engineeringSeatAgentId: string;
     let productionCompanyId: string;
     let productionAgentId: string;
     let heartbeat: VectorIngressHeartbeat;
@@ -351,6 +352,7 @@ const support = await getEmbeddedPostgresTestSupport();
       standardAgentId = randomUUID();
       retiredWorkerAgentId = randomUUID();
       engineeringAgentId = randomUUID();
+      engineeringSeatAgentId = randomUUID();
       productionCompanyId = randomUUID();
       productionAgentId = randomUUID();
       await db.insert(companies).values([
@@ -451,6 +453,24 @@ const support = await getEmbeddedPostgresTestSupport();
           companyId,
           name: "FunkyDev",
           role: "engineer",
+          status: "idle",
+          adapterType: "pi_local",
+          adapterConfig: { model: "router/Qwen3.8-Flash" },
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "t480-engineering",
+              profile: "engineering",
+            },
+          },
+        },
+        {
+          // Another seat of the engineering software org, reporting to FunkyDev.
+          id: engineeringSeatAgentId,
+          companyId,
+          name: "Backend Engineer",
+          role: "backend-engineer",
+          reportsTo: engineeringAgentId,
           status: "idle",
           adapterType: "pi_local",
           adapterConfig: { model: "router/Qwen3.8-Flash" },
@@ -1362,6 +1382,48 @@ const support = await getEmbeddedPostgresTestSupport();
         model: "Other-Model",
         thinking: "medium",
       })).resolves.toMatchObject({ model: "Other-Model", thinking: "medium" });
+    });
+
+    it("never gives another engineering seat FunkyDev's pi alias, repository work, or runtime selection", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const plain = {
+        companyId,
+        agentId: engineeringSeatAgentId,
+        externalSessionId: "engineering-seat-chat",
+        ownerId: "vector-user:engineer-1",
+        installationId: "t480-engineering",
+        profileId: "engineering",
+        clientRequestId: "engineering-seat-chat-1",
+        body: "Status of the backend queue?",
+      };
+      await expect(service.addTurn(plain)).resolves.toMatchObject({ replayed: false });
+      await expect(service.status(plain)).resolves.toMatchObject({ sessionRole: null, repository: null });
+      const stored = await db.select({ sessionRole: vectorIngressConversations.sessionRole })
+        .from(vectorIngressConversations)
+        .where(eq(vectorIngressConversations.externalSessionId, plain.externalSessionId))
+        .then((rows) => rows[0]);
+      expect(stored).toEqual({ sessionRole: null });
+      await expect(service.addTurn({ ...plain, clientRequestId: "engineering-seat-chat-2", body: "And now?" }))
+        .resolves.toMatchObject({ replayed: false });
+      // A seat conversation relabelled as FunkyDev's alias is never resumed.
+      await db.update(vectorIngressConversations)
+        .set({ sessionRole: "pi" })
+        .where(eq(vectorIngressConversations.externalSessionId, plain.externalSessionId));
+      await expect(service.addTurn({ ...plain, clientRequestId: "engineering-seat-chat-3" }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_ingress_session_binding_mismatch" } });
+
+      await expect(service.addTurn({
+        ...plain,
+        externalSessionId: "engineering-seat-todo",
+        clientRequestId: "engineering-seat-todo",
+        repositoryContext: { schemaVersion: 1 as const, repository: "renegadesw/vector" },
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_repository_contract_mismatch" } });
+      await expect(service.addTurn({
+        ...plain,
+        externalSessionId: "engineering-seat-runtime",
+        clientRequestId: "engineering-seat-runtime",
+        runtimeSelection: { model: "Qwen3.8-Flash", thinking: "high" as const },
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_runtime_selection_contract_mismatch" } });
     });
 
     it("fails standard persona turns closed on omission and provider widening", async () => {

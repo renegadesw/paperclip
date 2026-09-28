@@ -2,9 +2,18 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { agents as agentsTable, createDb, routineTriggers, routines, vectorInstallationOwnerships } from "@paperclipai/db";
+import {
+  agents as agentsTable,
+  createDb,
+  routineTriggers,
+  routines,
+  toolApplications,
+  toolConnectionInstalls,
+  toolConnections,
+  vectorInstallationOwnerships,
+} from "@paperclipai/db";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -1377,6 +1386,359 @@ describe("Vector installation provisioning", () => {
         expect(normalized.adapterConfig).toEqual({
           ...f.manifest.agent.adapterConfig, model: "router/Other-Model", thinking: "medium", instructionsFilePath: canonical,
         });
+      });
+    });
+  });
+
+  describe("engineering software org (FunkyDev roster with a reporting hierarchy)", () => {
+    // vector-os b0c991e contracts/PAPERCLIP_ENGINEERING_SEED.json (revision 9)
+    // and its parent's revision 8, copied verbatim.
+    const fixtureDir = path.join(path.dirname(new URL(import.meta.url).pathname), "../__tests__/fixtures");
+    const readSeed = async (name: string) => JSON.parse(await fs.readFile(path.join(fixtureDir, name), "utf8"));
+    const funkyDevId = "e5b45684-168d-51af-9bb4-e9a5d96f6329";
+
+    /** The provisioner's deterministic UUID recipe, restated as the contract Vector relies on. */
+    function deterministicUuid(identity: string) {
+      const hex = createHash("sha256").update(identity).digest("hex").slice(0, 32).split("");
+      hex[12] = "5";
+      hex[16] = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+      const value = hex.join("");
+      return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+    }
+
+    /**
+     * The real seed with each persona staged. The staged bodies stand in for
+     * vector-os's AGENTS.md files, so only the instruction digests change.
+     */
+    async function seedInput(name = "vector-engineering-seed-r9.json") {
+      const f = await fixture();
+      const manifest = await readSeed(name);
+      for (const agent of [manifest.agent, ...(manifest.additionalAgents ?? [])]) {
+        const body = `# ${agent.name}\n`;
+        const staged = path.join(f.stagedReleaseRoot, agent.instructions.path);
+        await fs.mkdir(path.dirname(staged), { recursive: true });
+        await fs.writeFile(staged, body);
+        agent.instructions.sha256 = createHash("sha256").update(body).digest("hex");
+      }
+      return { ...f, manifest, toolPolicy: manifest.toolPolicy, selectedProfile: "engineering", effectiveToolPolicy: manifest.toolPolicy };
+    }
+
+    const seats = (manifest: any) => [manifest.agent, ...manifest.additionalAgents];
+    const byRole = (manifest: any, role: string) => seats(manifest).find((agent: any) => agent.role === role);
+
+    function countingPort() {
+      const port = memoryPort();
+      const updates: Array<{ id: string; patch: unknown }> = [];
+      const update = port.updateAgent;
+      port.updateAgent = async (id, patch) => { updates.push({ id, patch: structuredClone(patch) }); return update(id, patch); };
+      return { port, updates };
+    }
+
+    it("accepts the vector-os revision 9 seed verbatim, with deterministic seat ids and managers declared first", async () => {
+      const seed = await readSeed("vector-engineering-seed-r9.json");
+      const parsed = vectorInstallationManifestSchema.parse(seed);
+      expect(parsed.manifestRevision).toBe(9);
+      expect(parsed.agent).toMatchObject({ id: funkyDevId, name: "FunkyDev", role: "engineer", reportsTo: null });
+      expect(parsed.additionalAgents).toHaveLength(10);
+      for (const agent of parsed.additionalAgents) {
+        expect(agent.id).toBe(deterministicUuid(`t480-engineering:paperclip-agent:${agent.role}`));
+      }
+      const reportsTo = Object.fromEntries(seats(parsed).map((agent: any) => [
+        agent.role, seats(parsed).find((manager: any) => manager.id === agent.reportsTo)?.role ?? null,
+      ]));
+      expect(reportsTo).toEqual({
+        "engineer": null,
+        "frontend-manager": "engineer",
+        "backend-manager": "engineer",
+        "database-manager": "engineer",
+        "infrastructure-manager": "engineer",
+        "frontend-engineer": "frontend-manager",
+        "backend-engineer": "backend-manager",
+        "database-engineer": "database-manager",
+        "infrastructure-engineer": "infrastructure-manager",
+        "product-qa": "engineer",
+        "platform-qa": "engineer",
+      });
+      // The revision 8 seed (FunkyDev alone, no reportsTo field) stays valid.
+      expect(vectorInstallationManifestSchema.parse(await readSeed("vector-engineering-seed-r8.json")).agent.reportsTo).toBeNull();
+    });
+
+    it("rejects forward, self, cyclic and unknown managers, a led-by-anyone-else org, and unmanaged seats", async () => {
+      const seed = await readSeed("vector-engineering-seed-r9.json");
+      const reject = (mutate: (manifest: any) => void, message: string) => {
+        const manifest = structuredClone(seed);
+        mutate(manifest);
+        const result = vectorInstallationManifestSchema.safeParse(manifest);
+        expect(result.success).toBe(false);
+        expect(result.error!.issues.map((issue) => issue.message)).toContain(message);
+      };
+      const earlier = "agent reportsTo must name an agent declared earlier in the manifest";
+      // An engineer declared before its manager.
+      reject((manifest) => {
+        const engineer = manifest.additionalAgents.splice(4, 1)[0];
+        manifest.additionalAgents.unshift(engineer);
+      }, earlier);
+      // Self reference.
+      reject((manifest) => { manifest.additionalAgents[0].reportsTo = manifest.additionalAgents[0].id; }, earlier);
+      // A two-seat cycle is always a forward reference for one of them.
+      reject((manifest) => { manifest.additionalAgents[0].reportsTo = manifest.additionalAgents[4].id; }, earlier);
+      // An id that no seat declares.
+      reject((manifest) => { manifest.additionalAgents[0].reportsTo = "0f5b7f4e-3a55-4d0b-9a0e-5b7c1d2e3f40"; }, earlier);
+      // FunkyDev leads and reports to no agent.
+      reject((manifest) => { manifest.agent.reportsTo = manifest.additionalAgents[0].id; }, earlier);
+      reject((manifest) => { manifest.agent.reportsTo = funkyDevId; }, earlier);
+      const led = "engineering installs are led by the FunkyDev engineer, reporting to no agent";
+      // The primary must be FunkyDev: another seat in first position is refused.
+      reject((manifest) => {
+        const manager = manifest.additionalAgents.shift();
+        manager.reportsTo = null;
+        manifest.additionalAgents.unshift({ ...manifest.agent, reportsTo: manager.id });
+        manifest.agent = manager;
+      }, led);
+      reject((manifest) => { manifest.agent.role = "frontend-manager"; manifest.additionalAgents[0].role = "engineer"; }, led);
+      reject((manifest) => {
+        manifest.additionalAgents[0].reportsTo = null;
+      }, "every engineering seat other than FunkyDev must report to an agent declared before it");
+      reject((manifest) => { manifest.additionalAgents[1].role = manifest.additionalAgents[0].role; }, "agent roles must be unique");
+      reject((manifest) => { manifest.additionalAgents[1].id = manifest.additionalAgents[0].id; }, "agent ids must be unique");
+      reject((manifest) => { manifest.additionalAgents[1].name = "FunkyDev"; }, "agent names must be unique");
+      // Seats never own Funky workloads.
+      const staging = await funkyServerFixture("staging");
+      reject((manifest) => {
+        manifest.workloads = [{ ...staging.manifest.workloads[0], agentId: manifest.additionalAgents[5].id }];
+      }, "engineering installs do not own Funky workload schedules");
+      reject((manifest) => { manifest.additionalAgents[0].reportsTo = "not-a-uuid"; }, "Invalid UUID");
+    });
+
+    it("applies the same earlier-declared rule to other profiles and leaves flat rosters untouched", async () => {
+      const { manifest } = await funkyServerFixture("staging");
+      const parsed = vectorInstallationManifestSchema.parse(manifest);
+      expect(seats(parsed).map((agent: any) => agent.reportsTo)).toEqual([null, null, null]);
+      const [scout, advisor] = manifest.additionalAgents as any[];
+      expect(vectorInstallationManifestSchema.safeParse({
+        ...manifest,
+        additionalAgents: [{ ...scout, reportsTo: manifest.agent.id }, { ...advisor, reportsTo: manifest.agent.id }],
+      }).success).toBe(true);
+      expect(vectorInstallationManifestSchema.safeParse({
+        ...manifest,
+        additionalAgents: [{ ...scout, reportsTo: advisor.id }, advisor],
+      }).success).toBe(false);
+      expect(vectorInstallationManifestSchema.safeParse({
+        ...manifest,
+        agent: { ...manifest.agent, reportsTo: scout.id },
+      }).success).toBe(false);
+    });
+
+    it("keeps the roster digest of flat standard and Funky server rosters exactly as before reportsTo existed", async () => {
+      // Pinned from the provisioner at acff475, before the field existed. A
+      // changed digest would fail every same-revision reinstall of a live
+      // install as metadata drift.
+      const f = await fixture();
+      const standardPort = memoryPort();
+      const standardPolicy = {
+        profile: "standard",
+        builtinTools: [],
+        extensions: [f.toolPolicy.extensions[1], f.toolPolicy.extensions[2]],
+      };
+      const standard = await reconcileVectorInstallation(standardPort, {
+        ...f,
+        manifest: { ...f.manifest, profile: "standard", installationId: "standard-stecke1", agent: { ...f.manifest.agent, name: "Standard Chat", role: "standard-chat" }, toolPolicy: standardPolicy },
+        selectedProfile: "standard",
+        effectiveToolPolicy: standardPolicy,
+      });
+      expect(standard.rosterCatalogSha256).toBe("5501ec0ed99d2ac65f96f50d3f2dae17763bb7da71bb9ac6f4efae91a3f97e91");
+      const funky = await funkyServerFixture("staging");
+      const stagingPort = memoryPort();
+      const staging = await reconcileVectorInstallation(stagingPort, {
+        ...funky.f,
+        manifest: funky.manifest,
+        selectedProfile: "staging",
+        effectiveToolPolicy: funky.restrictedPolicy,
+      });
+      expect(staging.rosterCatalogSha256).toBe("5af68a2d7e2a89d2497026818e55ce572161db32320d79a0f834e7e8b1dd9007");
+      // reportsTo is not a declared field of a flat roster: nothing is written,
+      // and a board edit of it is neither asserted nor reverted.
+      for (const agent of [...standardPort.agents, ...stagingPort.agents]) expect(agent).not.toHaveProperty("reportsTo");
+      const scout = stagingPort.agents[1];
+      scout.reportsTo = stagingPort.agents[0].id;
+      await expect(reconcileVectorInstallation(stagingPort, {
+        ...funky.f,
+        manifest: funky.manifest,
+        selectedProfile: "staging",
+        effectiveToolPolicy: funky.restrictedPolicy,
+      })).resolves.toEqual({ ...staging, created: { company: false, ownership: false, agent: false }, agentsCreated: 0 });
+      expect(scout.reportsTo).toBe(stagingPort.agents[0].id);
+    });
+
+    it("creates the eleven-seat org in manifest order with its hierarchy, then reruns as a no-op", async () => {
+      const input = await seedInput();
+      const { port, updates } = countingPort();
+      const created: string[] = [];
+      const create = port.createAgent;
+      port.createAgent = async (companyId, agent) => {
+        // Every manager already exists when a report is created.
+        if (agent.reportsTo) expect(port.agents.some((row) => row.id === agent.reportsTo)).toBe(true);
+        created.push(agent.id);
+        return create(companyId, agent);
+      };
+      const receipt = await reconcileVectorInstallation(port, input);
+      const ids = seats(input.manifest).map((agent: any) => agent.id);
+      expect(receipt).toMatchObject({
+        manifestRevision: 9,
+        agentId: funkyDevId,
+        agentIds: ids,
+        agentsCreated: 11,
+        created: { company: true, ownership: true, agent: true },
+      });
+      expect(created).toEqual(ids);
+      for (const desired of seats(input.manifest)) {
+        const row = port.agents.find((agent) => agent.id === desired.id);
+        expect(row).toMatchObject({ name: desired.name, role: desired.role, reportsTo: desired.reportsTo });
+        expect(row.adapterConfig).toEqual({
+          ...desired.adapterConfig,
+          instructionsFilePath: path.join(input.activeReleaseRoot, desired.instructions.path),
+        });
+        expect(row.metadata.vectorProvisioning).toMatchObject({ manifestRevision: 9, rosterCatalogSha256: receipt.rosterCatalogSha256 });
+        expect(row.metadata.vectorWorkloads.keys).toEqual([]);
+      }
+      const rerun = await reconcileVectorInstallation(port, input);
+      expect(rerun).toEqual({ ...receipt, created: { company: false, ownership: false, agent: false }, agentsCreated: 0 });
+      expect(updates).toEqual([]);
+      expect(port.agents).toHaveLength(11);
+    });
+
+    it("fails closed when a seat is re-parented on the board at the same revision", async () => {
+      const input = await seedInput();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, input);
+      const engineer = port.agents.find((agent) => agent.id === byRole(input.manifest, "backend-engineer").id);
+      engineer.reportsTo = byRole(input.manifest, "frontend-manager").id;
+      await expect(reconcileVectorInstallation(port, input)).rejects.toThrow("immutable field agent.reportsTo differs");
+    });
+
+    it("upgrades a revision 8 FunkyDev install to the revision 9 org, keeping FunkyDev's identity and operator-owned model and thinking", async () => {
+      const r8 = await seedInput("vector-engineering-seed-r8.json");
+      const { port, updates } = countingPort();
+      const installed = await reconcileVectorInstallation(port, r8);
+      expect(installed).toMatchObject({ manifestRevision: 8, agentIds: [funkyDevId], agentsCreated: 1 });
+      // Operator-owned board edits on the live FunkyDev.
+      const funkyDev = port.agents[0];
+      funkyDev.adapterConfig = { ...funkyDev.adapterConfig, model: "router/Other-Model", thinking: "medium" };
+
+      const r9 = await seedInput();
+      const upgraded = await reconcileVectorInstallation(port, r9);
+      const ids = seats(r9.manifest).map((agent: any) => agent.id);
+      expect(upgraded).toMatchObject({
+        manifestRevision: 9,
+        agentId: funkyDevId,
+        agentIds: ids,
+        agentsCreated: 10,
+        created: { company: false, ownership: false, agent: true },
+      });
+      expect(upgraded.agentIds[0]).toBe(funkyDevId);
+      const after = port.agents.find((agent) => agent.id === funkyDevId);
+      expect(after).toMatchObject({ id: funkyDevId, name: "FunkyDev", role: "engineer", reportsTo: null });
+      expect(after.adapterConfig).toMatchObject({ model: "router/Other-Model", thinking: "medium" });
+      expect(after.metadata.vectorProvisioning.manifestRevision).toBe(9);
+      expect(updates.map((update) => update.id)).toEqual([funkyDevId]);
+      expect(updates[0]!.patch).toHaveProperty("reportsTo", null);
+      for (const desired of r9.manifest.additionalAgents) {
+        expect(port.agents.find((agent) => agent.id === desired.id)).toMatchObject({ reportsTo: desired.reportsTo });
+      }
+
+      updates.length = 0;
+      const rerun = await reconcileVectorInstallation(port, r9);
+      expect(rerun).toEqual({ ...upgraded, created: { company: false, ownership: false, agent: false }, agentsCreated: 0 });
+      expect(updates).toEqual([]);
+      expect(port.terminated).toEqual([]);
+    });
+
+    it("a later revision re-parents kept seats and retires dropped ones", async () => {
+      const r9 = await seedInput();
+      const port = memoryPort();
+      await reconcileVectorInstallation(port, r9);
+      const r10 = structuredClone(r9);
+      r10.manifest.manifestRevision = 10;
+      const platformQa = byRole(r10.manifest, "platform-qa");
+      r10.manifest.additionalAgents = r10.manifest.additionalAgents.filter((agent: any) => agent.role !== "platform-qa");
+      byRole(r10.manifest, "product-qa").reportsTo = byRole(r10.manifest, "backend-manager").id;
+      const receipt = await reconcileVectorInstallation(port, r10);
+      expect(receipt.agentIds).toHaveLength(10);
+      expect(port.terminated).toEqual([platformQa.id]);
+      expect(port.agents.find((agent) => agent.role === "product-qa").reportsTo).toBe(byRole(r10.manifest, "backend-manager").id);
+      await expect(reconcileVectorInstallation(port, r10)).resolves.toEqual({ ...receipt, created: { company: false, ownership: false, agent: false } });
+    });
+
+    (embeddedPostgres.supported ? describe : describe.skip)("through the production agent service", () => {
+      // Each case gets its own database: the seat ids are deterministic and
+      // agent ids are global.
+      let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
+      let db: ReturnType<typeof createDb>;
+
+      beforeEach(async () => {
+        database = await startEmbeddedPostgresTestDatabase("paperclip-vector-provision-org-");
+        db = createDb(database.connectionString);
+      }, 90_000);
+
+      afterEach(async () => {
+        await db?.$client.end({ timeout: 0 });
+        await database?.cleanup();
+        database = undefined;
+      });
+
+      const rows = (companyId: string) => db.select().from(agentsTable).where(eq(agentsTable.companyId, companyId));
+
+      it("creates the org in Postgres with deterministic ids and its hierarchy, and reruns idempotently", async () => {
+        const input = await seedInput();
+        const receipt = await provisionVectorInstallation(db, input);
+        expect(receipt).toMatchObject({ agentIds: seats(input.manifest).map((agent: any) => agent.id), agentsCreated: 11 });
+        const created = await rows(input.manifest.company.id);
+        expect(created).toHaveLength(11);
+        for (const desired of seats(input.manifest)) {
+          expect(created.find((row) => row.id === desired.id)).toMatchObject({ role: desired.role, reportsTo: desired.reportsTo });
+        }
+        const rerun = await provisionVectorInstallation(db, input);
+        expect(rerun).toEqual({ ...receipt, created: { company: false, ownership: false, agent: false }, agentsCreated: 0 });
+        const after = await rows(input.manifest.company.id);
+        for (const row of after) expect(row.updatedAt).toEqual(created.find((candidate) => candidate.id === row.id)!.updatedAt);
+      });
+
+      it("upgrades the live revision 8 FunkyDev to the revision 9 org, keeping its id, board model and thinking, and GitHub grant", async () => {
+        const r8 = await seedInput("vector-engineering-seed-r8.json");
+        await provisionVectorInstallation(db, r8);
+        const service = agentService(db);
+        await service.update(funkyDevId, {
+          adapterConfig: { ...(await service.getById(funkyDevId))!.adapterConfig as Record<string, unknown>, model: "router/Other-Model", thinking: "medium" },
+        });
+        // FunkyDev's GitHub access: a github.code connection installed on the agent.
+        const [application] = await db.insert(toolApplications).values({
+          companyId: r8.manifest.company.id, name: "GitHub", type: "mcp_http",
+        }).returning();
+        const [connection] = await db.insert(toolConnections).values({
+          companyId: r8.manifest.company.id, applicationId: application!.id, name: "github.code", uid: "github-code", transport: "mcp_remote",
+        }).returning();
+        const [grant] = await db.insert(toolConnectionInstalls).values({
+          companyId: r8.manifest.company.id, connectionId: connection!.id, targetType: "agent", targetId: funkyDevId,
+        }).returning();
+
+        const r9 = await seedInput();
+        const upgraded = await provisionVectorInstallation(db, r9);
+        expect(upgraded).toMatchObject({ manifestRevision: 9, agentId: funkyDevId, agentIds: seats(r9.manifest).map((agent: any) => agent.id), agentsCreated: 10 });
+        const org = await rows(r9.manifest.company.id);
+        expect(org).toHaveLength(11);
+        const funkyDev = org.find((row) => row.id === funkyDevId)!;
+        expect(funkyDev).toMatchObject({ name: "FunkyDev", role: "engineer", reportsTo: null });
+        expect(funkyDev.adapterConfig).toMatchObject({ model: "router/Other-Model", thinking: "medium" });
+        for (const desired of r9.manifest.additionalAgents) {
+          expect(org.find((row) => row.id === desired.id)).toMatchObject({ role: desired.role, reportsTo: desired.reportsTo, status: "idle" });
+        }
+        expect(await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.id, grant!.id))).toEqual([grant]);
+
+        const rerun = await provisionVectorInstallation(db, r9);
+        expect(rerun).toEqual({ ...upgraded, created: { company: false, ownership: false, agent: false }, agentsCreated: 0 });
+        const after = await rows(r9.manifest.company.id);
+        for (const row of after) expect(row.updatedAt).toEqual(org.find((candidate) => candidate.id === row.id)!.updatedAt);
+        await expect(provisionVectorInstallation(db, r8)).rejects.toThrow("downgrade refused");
       });
     });
   });

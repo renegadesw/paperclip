@@ -32,7 +32,10 @@ Pi built-ins or extensions.
 
 Roster shape is profile-closed rather than a shared superset:
 
-- `engineering` provisions exactly the FunkyDev engineer and no Funky workload catalog;
+- `engineering` provisions the FunkyDev software org and no Funky workload
+  catalog: FunkyDev (role `engineer`) is the primary agent and reports to no
+  agent; every other seat (for example department managers, their engineers,
+  and QA) must report to an agent declared before it;
 - `standard` provisions exactly the Standard Chat agent and no Funky workload catalog;
 - `staging` provisions exactly Funky analyst, Scout, and Advisor plus all seven
   current Vector workload contracts.
@@ -45,6 +48,25 @@ bridge contract. Its imported `vector_jobs` schedule must also remain disabled.
 The canonical catalog digest and each agent's assigned workload keys are stored
 in agent metadata, so an edited task/tool/schedule mapping is immutable drift
 instead of a silent behavioral change.
+
+Each agent may declare `reportsTo`, the id of its manager. It must name an
+agent declared earlier in the manifest, which rules out self-references,
+forward references, unknown ids, and cycles, and makes manifest order the
+creation order: a manager is always created (or re-pointed) before its reports.
+When the roster owns its hierarchy (always on engineering; on another profile
+once any agent declares a manager) `reportsTo` is a sealed agent field: it is
+set on create, rewritten on a revision upgrade, and a board edit of it is drift
+at the same revision. A flat roster that never declares it is unchanged: the
+field is neither written nor asserted, and its roster digest is identical to
+the one recorded before the field existed. A null `reportsTo` never enters the
+roster digest.
+
+A revision upgrade updates the kept agents in manifest order, creates the new
+ones, and terminates agents this installation provisioned under an older
+revision that the manifest no longer declares. Operator-owned adapterConfig
+keys and grants attached to an agent (such as FunkyDev's GitHub connection)
+are not provisioning fields and survive the upgrade. The receipt's `agentIds`
+lists the whole roster in manifest order; `agentId` is the primary agent.
 
 Reconciliation is intentionally strict:
 

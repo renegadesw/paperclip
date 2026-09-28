@@ -112,6 +112,10 @@ const vectorAgentManifestSchema = z.object({
   name: z.string().min(1),
   role: z.string().min(1),
   title: z.string().nullable(),
+  // The agent this one reports to. It must name an agent declared earlier in
+  // the manifest, so the declaration order is a valid creation order (managers
+  // before their reports) and the hierarchy is acyclic by construction.
+  reportsTo: UUID.nullable().default(null),
   capabilities: z.string().nullable(),
   adapterType: z.literal("pi_local"),
   adapterConfig: z.object({
@@ -389,6 +393,7 @@ export const vectorInstallationManifestSchema = z.object({
   const allAgents = [manifest.agent, ...manifest.additionalAgents];
   const agentIds = new Set<string>();
   const agentNames = new Set<string>();
+  const agentRoles = new Set<string>();
   for (const [index, agent] of allAgents.entries()) {
     const prefix = index === 0 ? ["agent"] : ["additionalAgents", index - 1];
     if (agentIds.has(agent.id)) {
@@ -397,8 +402,22 @@ export const vectorInstallationManifestSchema = z.object({
     if (agentNames.has(agent.name)) {
       ctx.addIssue({ code: "custom", path: [...prefix, "name"], message: "agent names must be unique" });
     }
+    if (agentRoles.has(agent.role)) {
+      ctx.addIssue({ code: "custom", path: [...prefix, "role"], message: "agent roles must be unique" });
+    }
+    // Only agents already declared are admissible managers. This rejects a
+    // self-reference, a forward reference, an unknown id, and therefore any
+    // cycle, and makes manifest order a valid creation order.
+    if (agent.reportsTo !== null && !agentIds.has(agent.reportsTo)) {
+      ctx.addIssue({
+        code: "custom",
+        path: [...prefix, "reportsTo"],
+        message: "agent reportsTo must name an agent declared earlier in the manifest",
+      });
+    }
     agentIds.add(agent.id);
     agentNames.add(agent.name);
+    agentRoles.add(agent.role);
     if (new Set(agent.mutableFields).size !== agent.mutableFields.length) {
       ctx.addIssue({ code: "custom", path: [...prefix, "mutableFields"], message: "agent.mutableFields must be unique" });
     }
@@ -434,8 +453,20 @@ export const vectorInstallationManifestSchema = z.object({
   }
   const roles = allAgents.map((agent) => agent.role).sort();
   if (manifest.profile === "engineering") {
-    if (allAgents.length !== 1 || manifest.agent.name !== "FunkyDev" || manifest.agent.role !== "engineer") {
-      ctx.addIssue({ code: "custom", path: ["agent"], message: "engineering installs provision exactly the FunkyDev engineer" });
+    // The FunkyDev software org: FunkyDev is the primary agent and leads it,
+    // reporting to no agent (the operator sits on the board); every other seat
+    // reports to an agent declared before it.
+    if (manifest.agent.name !== "FunkyDev" || manifest.agent.role !== "engineer" || manifest.agent.reportsTo !== null) {
+      ctx.addIssue({ code: "custom", path: ["agent"], message: "engineering installs are led by the FunkyDev engineer, reporting to no agent" });
+    }
+    for (const [index, agent] of manifest.additionalAgents.entries()) {
+      if (agent.reportsTo === null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["additionalAgents", index, "reportsTo"],
+          message: "every engineering seat other than FunkyDev must report to an agent declared before it",
+        });
+      }
     }
     if (manifest.workloads.length !== 0) {
       ctx.addIssue({ code: "custom", path: ["workloads"], message: "engineering installs do not own Funky workload schedules" });
@@ -631,6 +662,7 @@ type AgentRecord = {
   budgetMonthlyCents: number;
   permissions: Record<string, unknown>;
   metadata: Record<string, unknown> | null;
+  reportsTo?: string | null;
   status?: string;
 };
 
@@ -703,6 +735,18 @@ function assertImmutableFields(
   for (const key of Object.keys(expectedRecord)) {
     if (!mutable.has(key)) assertEqual(`${kind}.${key}`, actualRecord[key], expectedRecord[key]);
   }
+}
+
+/**
+ * Whether the release owns the reporting hierarchy. The engineering org always
+ * does; any other roster does once it declares a manager. A flat roster that
+ * never declares one leaves reportsTo out of its declared fields, so a board
+ * edit of it is neither asserted nor overwritten, exactly as before the field
+ * existed.
+ */
+function manifestOwnsReportingHierarchy(manifest: VectorInstallationManifest): boolean {
+  return manifest.profile === "engineering"
+    || [manifest.agent, ...manifest.additionalAgents].some((agent) => agent.reportsTo !== null);
 }
 
 /**
@@ -889,11 +933,14 @@ async function resolveManifest(input: VectorProvisioningInput) {
     }
   }
 
+  // A null reportsTo is left out so a flat roster that never declared the
+  // field keeps the roster digest it was provisioned with.
   const rosterAgents = [manifest.agent, ...manifest.additionalAgents].map(({
     mutableFields: _mutableFields,
     operatorOwnedAdapterConfigKeys: _operatorOwnedAdapterConfigKeys,
+    reportsTo,
     ...agent
-  }) => agent);
+  }) => (reportsTo === null ? agent : { ...agent, reportsTo }));
   return {
     manifest,
     workloadCatalogSha256: createHash("sha256").update(stableJson({
@@ -979,6 +1026,10 @@ export async function reconcileVectorInstallation(
   }
   const resolvedAgentIds: string[] = [];
   let agentsCreated = 0;
+  const ownsReportingHierarchy = manifestOwnsReportingHierarchy(manifest);
+  // Manifest order is creation order: the schema admits a manager only when it
+  // is declared earlier, so every manager exists (and carries its own declared
+  // reportsTo) before a report is created or re-pointed at it.
   for (const desired of [manifest.agent, ...manifest.additionalAgents]) {
     const workloadKeys = manifest.workloads.filter((workload) => workload.agentId === desired.id).map((workload) => workload.key).sort();
     const agentExpected = {
@@ -986,6 +1037,7 @@ export async function reconcileVectorInstallation(
       name: desired.name,
       role: desired.role,
       title: desired.title,
+      ...(ownsReportingHierarchy ? { reportsTo: desired.reportsTo } : {}),
       capabilities: desired.capabilities,
       adapterType: desired.adapterType,
       adapterConfig: {
