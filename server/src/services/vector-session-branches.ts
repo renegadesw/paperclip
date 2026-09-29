@@ -24,7 +24,7 @@ import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { conflict, notFound } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import type { VectorIngressOwnerScope } from "./vector-ingress.js";
-import { vectorIngressOwnerSha256 } from "./vector-ingress-owner.js";
+import { vectorIngressOwnerSha256, type VectorIngressOwnerBinding } from "./vector-ingress-owner.js";
 
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
 // A fork performs a read/list control call and then the mutating fork call.
@@ -53,6 +53,7 @@ type OwnedConversation = {
   conversationId: string;
   issueId: string;
   generation: number;
+  ownerBinding: VectorIngressOwnerBinding;
 };
 
 type ClaimedControl = OwnedConversation & {
@@ -127,6 +128,8 @@ export function vectorSessionBranchService(
         conversationId: vectorIngressConversations.id,
         issueId: issues.id,
         generation: issues.conversationSessionGeneration,
+        ownerSha256: vectorIngressConversations.ownerSha256,
+        externalSessionId: vectorIngressConversations.externalSessionId,
       })
       .from(vectorIngressConversations)
       .innerJoin(issues, and(
@@ -153,6 +156,9 @@ export function vectorSessionBranchService(
       conversationId: row.conversationId,
       issueId: row.issueId,
       generation: row.generation,
+      // Echo the stored binding, not the request, so Vector can refuse a
+      // reply that resolved some other owner's conversation.
+      ownerBinding: { ownerSha256: row.ownerSha256, externalSessionId: row.externalSessionId },
     };
   }
 
@@ -369,6 +375,7 @@ export function vectorSessionBranchService(
         eq(vectorIngressBranches.sessionGeneration, claimed.generation),
       )).orderBy(asc(vectorIngressBranches.createdAt), asc(vectorIngressBranches.id));
       return {
+        ownerBinding: claimed.ownerBinding,
         sessionGeneration: claimed.generation,
         activeBranchId: active.id,
         points: mapped.flatMap((point) => pointText.has(point.entryId)
@@ -515,7 +522,7 @@ export function vectorSessionBranchService(
         issueId: claimed.issueId,
         details: { branchId: created.id, parentBranchId: parent.id, sessionGeneration: claimed.generation },
       });
-      return { branchId: created.id, parentBranchId: parent.id, forked: true, text: forkedState.forked.text };
+      return { ownerBinding: claimed.ownerBinding, branchId: created.id, parentBranchId: parent.id, forked: true, text: forkedState.forked.text };
     } finally {
       await release(input, claimed);
     }
@@ -597,7 +604,7 @@ export function vectorSessionBranchService(
         issueId: claimed.issueId,
         details: { branchId: target.id, sessionGeneration: claimed.generation },
       });
-      return { branchId: target.id, switched: true };
+      return { ownerBinding: claimed.ownerBinding, branchId: target.id, switched: true };
     } finally {
       await release(input, claimed);
     }

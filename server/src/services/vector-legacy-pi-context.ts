@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import {
   agentTaskSessions,
   agents,
@@ -139,6 +139,22 @@ export function vectorLegacyPiContextImporter(db: Db, options: {
         eq(issues.id, input.issueId), eq(issues.companyId, input.companyId), eq(issues.conversationAgentId, input.agentId),
       )).for("update");
       if (!locked) throw notFound("Vector conversation import target not found");
+      // One retained legacy session belongs to exactly one owner. Serialize on
+      // the legacy identity so two owners cannot race the same session into
+      // separate conversations, then refuse any claim by a second owner.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([
+        "vector-legacy-pi-context", input.companyId, input.agentId, input.legacyService, input.legacyPiSessionId,
+      ])}, 0))`);
+      const claimedByOther = await tx.select({ id: agentTaskSessions.id }).from(agentTaskSessions).where(and(
+        eq(agentTaskSessions.companyId, input.companyId), eq(agentTaskSessions.agentId, input.agentId),
+        eq(agentTaskSessions.adapterType, "pi_local"),
+        sql`${agentTaskSessions.sessionParamsJson}->'vectorLegacyPiContext'->>'legacyService' = ${input.legacyService}`,
+        sql`${agentTaskSessions.sessionParamsJson}->'vectorLegacyPiContext'->>'legacyPiSessionId' = ${input.legacyPiSessionId}`,
+        ne(sql`${agentTaskSessions.sessionParamsJson}->'vectorLegacyPiContext'->>'ownerSha256'`, vectorLegacyOwnerSha256(input)),
+      )).limit(1).then((rows) => rows.length > 0);
+      if (claimedByOther) {
+        throw conflict("Vector legacy context belongs to a different owner", { code: "vector_legacy_context_owner_mismatch" });
+      }
       const existing = await tx.select().from(agentTaskSessions).where(and(
         eq(agentTaskSessions.companyId, input.companyId), eq(agentTaskSessions.agentId, input.agentId),
         eq(agentTaskSessions.adapterType, "pi_local"), eq(agentTaskSessions.taskKey, input.issueId),

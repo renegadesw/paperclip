@@ -157,9 +157,23 @@ function normalizeProfile(profile: string | undefined): string {
   return profile?.trim().toLowerCase() ?? "";
 }
 
-export function vectorPiProfileIsRestricted(profile: string | undefined): boolean {
+/**
+ * Only the engineering profile holds Pi's builtins. Inside a Vector
+ * installation a missing profile fails closed: it is treated as restricted
+ * rather than as upstream's unrestricted default.
+ */
+export function vectorPiProfileIsRestricted(
+  profile: string | undefined,
+  options: { vectorInstallation?: boolean } = {},
+): boolean {
   const normalized = normalizeProfile(profile);
-  return normalized.length > 0 && normalized !== "engineering";
+  if (normalized.length === 0) return options.vectorInstallation === true;
+  return normalized !== "engineering";
+}
+
+/** A Vector installation always carries its installation or company identity. */
+export function isVectorPiInstallation(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.PAPERCLIP_VECTOR_INSTALLATION_ID?.trim() || env.PAPERCLIP_VECTOR_COMPANY_ID?.trim());
 }
 
 function hasConfiguredValue(value: unknown): boolean {
@@ -412,9 +426,11 @@ export async function prepareVectorPiProfilePolicy(input: {
   deploymentCommand?: string;
   /** The agent's stored adapterConfig.env, as opposed to the controller-merged runtime env. */
   agentConfiguredEnv?: Record<string, unknown>;
+  /** True inside a Vector installation, where a missing profile fails closed. */
+  vectorInstallation?: boolean;
 }): Promise<VectorPiProfilePolicy> {
   const profile = normalizeProfile(input.profile);
-  const restricted = vectorPiProfileIsRestricted(profile);
+  const restricted = vectorPiProfileIsRestricted(profile, { vectorInstallation: input.vectorInstallation });
   if (!restricted) {
     const engineeringExtensions = profile === "engineering"
       ? await verifyPackagedExtensions(input.packagedExtensionsJson, profile)

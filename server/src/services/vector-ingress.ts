@@ -54,7 +54,8 @@ import {
   type VectorSessionBranchService,
 } from "./vector-session-branches.js";
 
-export { vectorIngressOwnerSha256 } from "./vector-ingress-owner.js";
+export { vectorIngressOwnerSha256, type VectorIngressOwnerBinding } from "./vector-ingress-owner.js";
+import type { VectorIngressOwnerBinding } from "./vector-ingress-owner.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
@@ -168,6 +169,8 @@ export interface VectorIngressLegacyPiContextInput extends VectorIngressOwnerSco
   externalSessionId: string;
   legacyService: "nexuslink-chat" | "funky";
   legacyPiSessionId: string;
+  /** Owner of the retained legacy session as read from its own row, not the caller. */
+  legacyOwnerId: string;
 }
 
 export interface VectorIngressHeartbeat {
@@ -335,6 +338,7 @@ export interface VectorIngressTurnResult {
   replayed: boolean;
   turnId: number;
   baseCursor: number;
+  ownerBinding: VectorIngressOwnerBinding | null;
 }
 
 /**
@@ -383,6 +387,12 @@ function hasCompleteOwnerScope(
     });
   }
   return complete;
+}
+
+function ownerBindingOf(
+  mapping: { ownerSha256: string; externalSessionId: string } | null | undefined,
+): VectorIngressOwnerBinding | null {
+  return mapping ? { ownerSha256: mapping.ownerSha256, externalSessionId: mapping.externalSessionId } : null;
 }
 
 export function vectorIngressService(
@@ -778,7 +788,7 @@ export function vectorIngressService(
 
   async function importLegacyPiContext(
     input: VectorIngressLegacyPiContextInput,
-  ): Promise<VectorLegacyPiContextImportResult> {
+  ): Promise<VectorLegacyPiContextImportResult & { ownerBinding: VectorIngressOwnerBinding | null }> {
     const expectedService =
       input.profileId === "engineering" || input.profileId === "standard"
         ? "nexuslink-chat"
@@ -795,8 +805,19 @@ export function vectorIngressService(
         code: "vector_legacy_context_unavailable",
       });
     }
+    // The retained session must belong to the caller. Vector OS reports the
+    // session row's own owner separately from the authenticated caller, so a
+    // lookup that lost its owner filter is refused here instead of importing
+    // another owner's provider context.
+    if (!input.legacyOwnerId?.trim() || input.legacyOwnerId.trim() !== input.ownerId.trim()) {
+      throw conflict("Vector legacy context belongs to a different owner", {
+        code: "vector_legacy_context_owner_mismatch",
+      });
+    }
     const { issue } = await resolveConversation(input);
-    return options.legacyContextImporter.importContext({ ...input, issueId: issue.id });
+    const mapping = await bindConversationOwner(input, issue.id);
+    const imported = await options.legacyContextImporter.importContext({ ...input, issueId: issue.id });
+    return { ...imported, ownerBinding: ownerBindingOf(mapping) };
   }
 
   async function configureRuntime(
@@ -819,7 +840,7 @@ export function vectorIngressService(
       thinking: vectorIngressConversations.thinking,
     });
     if (!updated) throw notFound("Vector conversation not found");
-    return { companyId: input.companyId, agentId: input.agentId, issueId: issue.id, ...updated };
+    return { companyId: input.companyId, agentId: input.agentId, issueId: issue.id, ...updated, ownerBinding: ownerBindingOf(mapping) };
   }
 
   async function latestConversationRun(
@@ -868,6 +889,7 @@ export function vectorIngressService(
       thinking: mapping?.thinking ?? null,
       sessionRole: mapping?.sessionRole ?? (owned ? await engineeringSessionAlias(input) : null),
       repository: mapping?.repository ?? null,
+      ownerBinding: ownerBindingOf(mapping),
       run: run
         ? {
             id: run.id,
@@ -984,6 +1006,7 @@ export function vectorIngressService(
     const rows = await db
       .select({
         externalSessionId: vectorIngressConversations.externalSessionId,
+        ownerSha256: vectorIngressConversations.ownerSha256,
         mappingCreatedAt: vectorIngressConversations.createdAt,
         issueId: issues.id,
         issueIdentifier: issues.identifier,
@@ -1043,6 +1066,7 @@ export function vectorIngressService(
         );
         return {
           externalSessionId: row.externalSessionId,
+          ownerBinding: ownerBindingOf(row),
           createdAt: row.issueCreatedAt,
           updatedAt: row.issueUpdatedAt,
           sessionGeneration: row.sessionGeneration,
@@ -1323,6 +1347,7 @@ export function vectorIngressService(
       companyId: input.companyId,
       agentId: input.agentId,
       externalSessionId: input.externalSessionId,
+      ownerBinding: ownerBindingOf(mapping),
       events: page.map((event) => ({
         eventType: event.eventType,
         message: event.message,
@@ -1775,11 +1800,15 @@ export function vectorIngressService(
       replayed,
       turnId: acceptedTurn?.turnId ?? 0,
       baseCursor: acceptedTurn?.baseCursor ?? baseCursor,
+      ownerBinding: ownerBindingOf(mapping),
     } satisfies VectorIngressTurnResult;
   }
 
   async function cancel(input: VectorIngressCancelInput) {
-    const { issue } = await requireConversation(input);
+    const { issue, mapping } = hasCompleteOwnerScope(input)
+      ? await requireOwnedConversation(input)
+      : { ...(await requireConversation(input)), mapping: null };
+    const ownerBinding = ownerBindingOf(mapping);
     const activeRuns = await db
       .select()
       .from(heartbeatRuns)
@@ -1813,6 +1842,7 @@ export function vectorIngressService(
         runId: null,
         cancelled: false,
         status: null,
+        ownerBinding,
       };
     }
 
@@ -1852,6 +1882,7 @@ export function vectorIngressService(
       runId: selected.id,
       cancelled: cancelled?.status === "cancelled",
       status: cancelled?.status ?? selected.status,
+      ownerBinding,
     };
   }
 

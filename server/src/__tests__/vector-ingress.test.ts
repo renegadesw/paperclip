@@ -29,6 +29,7 @@ import {
 } from "../routes/vector-ingress.js";
 import {
   vectorConversationOwnerId,
+  vectorIngressOwnerSha256,
   vectorIngressService,
   type VectorIngressHeartbeat,
   type VectorIngressProviderAuthority,
@@ -1709,6 +1710,73 @@ const support = await getEmbeddedPostgresTestSupport();
       await expect(
         service.status({ ...scope, agentId: otherAgentId }),
       ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it("binds status, events, cancel, branches, and legacy import to the exact owner", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
+      const personaContext = {
+        schemaVersion: 1 as const, personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const, systemPrompt: "Be a calm, precise collaborator.",
+      };
+      const shared = { companyId, agentId, installationId: "stecke1-standard", profileId: "standard", externalSessionId: "cross-owner-thread" };
+      const ownerA = { ...shared, ownerId: "cross-owner-a" };
+      const ownerB = { ...shared, ownerId: "cross-owner-b" };
+      const bindingOf = (owner: typeof ownerA) => ({
+        ownerSha256: vectorIngressOwnerSha256(owner),
+        externalSessionId: owner.externalSessionId,
+      });
+
+      const turnA = await service.addTurn({ ...ownerA, clientRequestId: "cross-owner-a-1", body: "Owner A only", personaContext });
+      expect(turnA.ownerBinding).toEqual(bindingOf(ownerA));
+      expect((await service.status(ownerA)).ownerBinding).toEqual(bindingOf(ownerA));
+      expect((await service.events(ownerA)).ownerBinding).toEqual(bindingOf(ownerA));
+
+      // Owner B names the same external session: A's conversation stays invisible.
+      await expect(service.status(ownerB)).rejects.toMatchObject({ status: 404 });
+      await expect(service.events(ownerB)).rejects.toMatchObject({ status: 404 });
+      await expect(service.events({ ...ownerB, turnId: turnA.turnId })).rejects.toMatchObject({ status: 404 });
+      await expect(service.cancel(ownerB)).rejects.toMatchObject({ status: 404 });
+      await expect(service.cancel({ ...ownerB, runId: turnA.runId! })).rejects.toMatchObject({ status: 404 });
+      expect(
+        await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, turnA.runId!)).then((rows) => rows[0]?.status),
+      ).toBe("queued");
+      for (const call of [
+        () => service.listBranches(ownerB),
+        () => service.forkBranch({ ...ownerB, entryId: "entry-1" }),
+        () => service.switchBranch({ ...ownerB, branchId: "11111111-1111-4111-8111-111111111111" }),
+      ]) {
+        await expect(call()).rejects.toMatchObject({ status: 404 });
+      }
+      // A reaches its own branch control, which refuses only because A's run
+      // is still queued.
+      await expect(service.listBranches(ownerA)).rejects.toMatchObject({
+        status: 409, details: { code: "vector_branch_turn_active" },
+      });
+
+      // B's turn on the same session ID opens B's own conversation, and its
+      // idempotency key never replays A's turn.
+      const turnB = await service.addTurn({ ...ownerB, clientRequestId: "cross-owner-a-1", body: "Owner B only", personaContext });
+      expect(turnB.replayed).toBe(false);
+      expect(turnB.issueId).not.toBe(turnA.issueId);
+      expect(turnB.ownerBinding).toEqual(bindingOf(ownerB));
+      expect((await service.status(ownerB)).issueId).toBe(turnB.issueId);
+      expect((await service.cancel(ownerA)).ownerBinding).toEqual(bindingOf(ownerA));
+      expect(
+        await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, turnB.runId!)).then((rows) => rows[0]?.status),
+      ).toBe("queued");
+
+      // A legacy session whose row names another owner is refused before import.
+      const importContext = vi.fn();
+      const importing = vectorIngressService(db, { heartbeat, legacyContextImporter: { importContext } });
+      await expect(importing.importLegacyPiContext({
+        ...ownerA, legacyService: "nexuslink-chat", legacyPiSessionId: "legacy-cross-owner",
+        legacyOwnerId: ownerB.ownerId,
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_legacy_context_owner_mismatch" } });
+      expect(importContext).not.toHaveBeenCalled();
     });
 
     it("inventories only one owner and paginates without exposing internal IDs", async () => {

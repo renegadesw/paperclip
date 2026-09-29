@@ -60,6 +60,7 @@ import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { buildPiBuiltinToolArgs } from "./tools.js";
 import {
   isPaperclipControllerShellEnvKey,
+  isVectorPiInstallation,
   prepareVectorPiProfilePolicy,
   vectorPiPolicyToolNames,
   withPaperclipConnectorTools,
@@ -608,6 +609,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     command,
     deploymentCommand: deploymentPiCommand,
     agentConfiguredEnv: parseObject(parseObject(agent.adapterConfig).env),
+    vectorInstallation: isVectorPiInstallation(),
   });
 
   // Parse model into provider and model id

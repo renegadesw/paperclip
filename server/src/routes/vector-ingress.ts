@@ -186,6 +186,7 @@ const legacyPiContextSchema = ownerScopeSchema.extend({
   externalSessionId: boundedOpaqueId("externalSessionId", 512),
   legacyService: z.enum(["nexuslink-chat", "funky"]),
   legacyPiSessionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/),
+  legacyOwnerId: boundedOpaqueId("legacyOwnerId", 512),
 }).strict();
 
 const cancelSchema = z.object({

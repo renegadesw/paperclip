@@ -8,6 +8,17 @@ export interface VectorIngressOwnerIdentity {
   profileId: string;
 }
 
+/**
+ * The durable owner binding of one Vector conversation, echoed on every
+ * ingress reply. Values come from the stored mapping, never from the request,
+ * so Vector OS can recompute the digest from its own authenticated owner and
+ * refuse a reply that resolved a different owner's conversation.
+ */
+export interface VectorIngressOwnerBinding {
+  ownerSha256: string;
+  externalSessionId: string;
+}
+
 export function vectorIngressOwnerSha256(input: VectorIngressOwnerIdentity): string {
   return createHash("sha256")
     .update("paperclip-vector-ingress-owner/v1\0")

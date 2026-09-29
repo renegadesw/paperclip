@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   FUNKYDEV_CAPABILITY_INVENTORY,
+  isVectorPiInstallation,
   prepareVectorPiProfilePolicy,
   vectorPiProfileIsRestricted,
 } from "./vector-profile-policy.js";
@@ -31,6 +32,27 @@ describe("Vector Pi profile isolation", () => {
       expect(vectorPiProfileIsRestricted(profile)).toBe(false);
     },
   );
+
+  it.each([undefined, "", "  "])(
+    "fails closed for a missing profile %s inside a Vector installation",
+    (profile) => {
+      expect(vectorPiProfileIsRestricted(profile, { vectorInstallation: true })).toBe(true);
+      expect(vectorPiProfileIsRestricted("engineering", { vectorInstallation: true })).toBe(false);
+    },
+  );
+
+  it("detects a Vector installation from its installation or company identity", () => {
+    expect(isVectorPiInstallation({})).toBe(false);
+    expect(isVectorPiInstallation({ PAPERCLIP_VECTOR_INSTALLATION_ID: "stecke1-standard" })).toBe(true);
+    expect(isVectorPiInstallation({ PAPERCLIP_VECTOR_COMPANY_ID: "company" })).toBe(true);
+    expect(isVectorPiInstallation({ PAPERCLIP_VECTOR_INSTALLATION_ID: "  " })).toBe(false);
+  });
+
+  it("restricts a missing profile to no tools when preparing a Vector installation's policy", async () => {
+    const policy = await prepareVectorPiProfilePolicy({ profile: "", config: {}, vectorInstallation: true });
+    expect(policy.restricted).toBe(true);
+    expect(policy.cliArgs).toContain("--no-tools");
+  });
 
   it("disables ambient resources and all tools while preserving an explicit skill seam", async () => {
     const policy = await prepareVectorPiProfilePolicy({

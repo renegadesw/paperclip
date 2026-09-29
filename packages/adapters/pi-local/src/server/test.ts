@@ -22,7 +22,7 @@ import {
 import { discoverPiModelsCached } from "./models.js";
 import { parsePiJsonl } from "./parse.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
-import { prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
+import { isVectorPiInstallation, prepareVectorPiProfilePolicy } from "./vector-profile-policy.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
@@ -101,6 +101,7 @@ export async function testEnvironment(
       packagedExtensionsJson: process.env.PAPERCLIP_VECTOR_PI_PACKAGED_EXTENSIONS,
       command,
       deploymentCommand: deploymentPiCommand,
+      vectorInstallation: isVectorPiInstallation(),
     });
   } catch (error) {
     checks.push({

@@ -80,4 +80,25 @@ describeDb("Vector legacy Pi context importer", () => {
     await fs.appendFile(source, `${JSON.stringify({ type: "message", role: "assistant", content: "changed" })}\n`);
     await expect(importer.importContext(input)).rejects.toMatchObject({ status: 409, details: { code: "vector_legacy_context_conflict" } });
   });
+
+  it("never imports one retained legacy session into a second owner's conversation", async () => {
+    // Runs after the first test imported legacyPiSessionId for ownerId.
+    const otherOwnerId = "another-user:org";
+    const otherIssueId = randomUUID();
+    const otherSessionId = "legacy/chat/thread 2";
+    await db.insert(issues).values({ id: otherIssueId, companyId, title: "Other owner's conversation", status: "backlog", assigneeAgentId: agentId, conversationAgentId: agentId, conversationUserId: "vector:other-owner", conversationState: "waiting" });
+    await db.insert(vectorIngressConversations).values({
+      companyId, agentId, issueId: otherIssueId, installationId, profileId,
+      ownerSha256: vectorLegacyOwnerSha256({ companyId, agentId, installationId, profileId, ownerId: otherOwnerId }),
+      externalSessionId: otherSessionId,
+    });
+    const stage = vi.fn();
+    const importer = vectorLegacyPiContextImporter(db, { sourceRoot, sessionsRoot, ingressSecret: secret, stage });
+    await expect(importer.importContext({
+      companyId, agentId, issueId: otherIssueId, ownerId: otherOwnerId, installationId, profileId,
+      externalSessionId: otherSessionId, legacyService: "nexuslink-chat", legacyPiSessionId,
+    })).rejects.toMatchObject({ status: 409, details: { code: "vector_legacy_context_owner_mismatch" } });
+    expect(stage).not.toHaveBeenCalled();
+    expect(await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.taskKey, otherIssueId))).toHaveLength(0);
+  });
 });
