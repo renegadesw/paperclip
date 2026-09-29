@@ -1,3 +1,4 @@
+import { localBoardUserId } from "../local-board-identity.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -18,6 +19,7 @@ import {
   type VectorIngressService,
 } from "../services/vector-ingress.js";
 import type { VectorRuntimeScope } from "../services/vector-runtime-scope.js";
+import { VectorToolAuthorityBridge } from "../services/vector-tool-authority.js";
 
 const VECTOR_INGRESS_SECRET_ENV = "PAPERCLIP_VECTOR_INGRESS_SECRET";
 const VECTOR_INGRESS_MAX_SKEW_ENV =
@@ -72,6 +74,60 @@ function requireCompleteOwnerScope(
 
 const scopeSchema = z.object(scopeShape).superRefine(requireCompleteOwnerScope);
 
+const vectorWorkloadLaunchSchema = z.object({
+  schemaVersion: z.literal(1),
+  workloadKey: boundedOpaqueId("workloadKey", 96),
+  queue: z.enum(["research", "tasks"]),
+  taskId: boundedOpaqueId("taskId", 256),
+  attempt: z.number().int().positive(),
+  leaseTokenSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  role: boundedOpaqueId("role", 128),
+  model: z.string().trim().max(256),
+  tools: z.array(boundedOpaqueId("tool", 128)).max(32),
+  noBuiltinTools: z.boolean(),
+  systemPrompt: z.string().min(1).max(750_000),
+  metadata: z.record(
+    z.string().trim().min(1).max(128),
+    z.string().max(4096),
+  ).refine((value) => Object.keys(value).length <= 64, "metadata has too many entries"),
+}).strict();
+
+const vectorRoleTurnSchema = z.object({
+  schemaVersion: z.literal(1),
+  role: boundedOpaqueId("role", 128),
+  model: z.string().trim().max(256),
+  noBuiltinTools: z.boolean(),
+  systemPrompt: z.string().min(1).max(750_000),
+  metadata: z.record(
+    z.string().trim().min(1).max(128),
+    z.string().max(4096),
+  ).refine((value) => Object.keys(value).length <= 64, "metadata has too many entries"),
+}).strict();
+
+const vectorPersonaTurnSchema = z.object({
+  schemaVersion: z.literal(1),
+  // Vector persona IDs are fixed catalog identifiers (…-000000000023), not
+  // RFC 4122 UUIDs; z.uuid() rejects their version nibble, so accept any
+  // 8-4-4-4-12 hex GUID like the shared validators do.
+  personaId: z.string().guid(),
+  personaName: boundedOpaqueId("personaName", 128),
+  personaVersion: z.string().regex(/^[a-f0-9]{12}$/),
+  model: z.string().trim().min(1).max(256),
+  noBuiltinTools: z.literal(true),
+  systemPrompt: z.string().min(1).max(750_000),
+}).strict();
+
+const vectorRepositoryContextSchema = z.object({
+  schemaVersion: z.literal(1),
+  repository: z.string().min(3).max(201).refine(
+    (value) => {
+      if (value.trim() !== value || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) return false;
+      return value.split("/").every((part) => part !== "." && part !== "..");
+    },
+    "repository must be an exact owner/name identifier",
+  ),
+}).strict();
+
 const ownerScopeSchema = z.object({
   companyId: z.string().uuid(),
   agentId: z.string().uuid(),
@@ -84,13 +140,57 @@ const turnSchema = z.object({
   ...scopeShape,
   clientRequestId: z.string().trim().min(1).max(255),
   body: z.string().min(1).max(1_000_000),
+  voiceActive: z.boolean().optional(),
   attachmentIds: z.array(z.string().uuid()).max(20).optional(),
-}).superRefine(requireCompleteOwnerScope);
+  images: z.array(z.object({
+    type: z.literal("image"),
+    data: z.string().min(1).max(9_786_712).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    mimeType: z.enum(["image/jpeg", "image/png", "image/gif", "image/webp"]),
+  }).strict()).max(8).optional(),
+  authorityHandle: z.string().trim().min(1).max(1024).optional(),
+  authorityTools: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/)).min(1).max(64).optional(),
+  providerAuthorityHandle: z.string().trim().min(1).max(1024).optional(),
+  launchContext: vectorWorkloadLaunchSchema.optional(),
+  roleContext: vectorRoleTurnSchema.optional(),
+  personaContext: vectorPersonaTurnSchema.optional(),
+  repositoryContext: vectorRepositoryContextSchema.optional(),
+  baseCursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  runtimeSelection: z.object({
+    model: boundedOpaqueId("model", 256).refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)),
+    thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
+  }).strict().optional(),
+}).superRefine((value, ctx) => {
+  requireCompleteOwnerScope(value, ctx);
+  if ([value.launchContext, value.roleContext, value.personaContext].filter(Boolean).length > 1) {
+    ctx.addIssue({ code: "custom", message: "launchContext, roleContext, and personaContext are mutually exclusive" });
+  }
+  if (Boolean(value.authorityHandle) !== Boolean(value.authorityTools)) {
+    ctx.addIssue({ code: "custom", message: "authorityHandle and authorityTools must be supplied together" });
+  }
+  if (value.launchContext?.tools.length &&
+      JSON.stringify([...new Set(value.launchContext.tools)].sort()) !==
+        JSON.stringify([...(value.authorityTools ?? [])].sort())) {
+    ctx.addIssue({ code: "custom", message: "workload authorityTools must exactly match launchContext.tools" });
+  }
+});
+
+const toolCallbackSchema = z.object({
+  requestId: z.string().uuid(),
+  tool: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/),
+  arguments: z.unknown(),
+}).strict();
 
 const resetSchema = z.object({
   ...scopeShape,
   clientRequestId: z.string().trim().min(1).max(255),
 }).superRefine(requireCompleteOwnerScope);
+
+const legacyPiContextSchema = ownerScopeSchema.extend({
+  externalSessionId: boundedOpaqueId("externalSessionId", 512),
+  legacyService: z.enum(["nexuslink-chat", "funky"]),
+  legacyPiSessionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/),
+  legacyOwnerId: boundedOpaqueId("legacyOwnerId", 512),
+}).strict();
 
 const cancelSchema = z.object({
   ...scopeShape,
@@ -99,8 +199,15 @@ const cancelSchema = z.object({
 
 const eventsSchema = z.object({
   ...scopeShape,
-  afterSeq: z.number().int().min(0).optional(),
+  afterSeq: z.number().int().min(-1).optional(),
   limit: z.number().int().min(1).max(1000).optional(),
+  turnId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).superRefine(requireCompleteOwnerScope);
+
+const runtimeSelectionSchema = z.object({
+  ...scopeShape,
+  model: boundedOpaqueId("model", 256).refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)),
+  thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]),
 }).superRefine(requireCompleteOwnerScope);
 
 const inventorySchema = ownerScopeSchema.extend({
@@ -113,6 +220,18 @@ const transcriptSchema = ownerScopeSchema.extend({
   cursor: z.string().trim().min(1).max(2048).optional(),
   limit: z.number().int().min(1).max(500).optional(),
 });
+
+const branchScopeSchema = ownerScopeSchema.extend({
+  externalSessionId: boundedOpaqueId("externalSessionId", 512),
+}).strict();
+
+const forkBranchSchema = branchScopeSchema.extend({
+  entryId: boundedOpaqueId("entryId", 256),
+}).strict();
+
+const switchBranchSchema = branchScopeSchema.extend({
+  branchId: z.string().uuid(),
+}).strict();
 
 const cursorPositionSchema = z.object({
   at: z.string().datetime({ offset: true }),
@@ -256,7 +375,7 @@ export function resolveVectorIngressAuthConfig(
     secret,
     maxClockSkewSeconds,
     responsibleUserId:
-      env[VECTOR_INGRESS_RESPONSIBLE_USER_ENV]?.trim() || "local-board",
+      env[VECTOR_INGRESS_RESPONSIBLE_USER_ENV]?.trim() || localBoardUserId(env),
     scope,
   };
 }
@@ -370,12 +489,31 @@ export function vectorIngressRoutes(
   options: {
     auth: VectorIngressAuthConfig;
     service?: VectorIngressService;
+    toolAuthority?: VectorToolAuthorityBridge;
     now?: () => number;
   },
 ) {
   const router = Router();
   const service = options.service ?? vectorIngressService(db);
   const cursors = createVectorIngressCursorCodec(options.auth.secret);
+  if (options.toolAuthority) {
+    router.post("/tools/callback", async (req, res) => {
+      if (!isLoopbackRemoteAddress(req.socket.remoteAddress)) {
+        throw unauthorized("Vector tool callback requires a direct loopback peer");
+      }
+      const authorization = req.header("authorization") ?? "";
+      const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(authorization);
+      if (!match) throw unauthorized("Vector tool callback token is required");
+      const input = toolCallbackSchema.parse(req.body);
+      const result = await options.toolAuthority!.call({
+        bearerToken: match[1],
+        requestId: input.requestId,
+        tool: input.tool,
+        arguments: input.arguments,
+      });
+      res.status(result.status).type(result.contentType).send(result.body);
+    });
+  }
   router.use(vectorIngressAuth(options.auth, options.now));
 
   router.post("/turns", async (req, res) => {
@@ -388,6 +526,12 @@ export function vectorIngressRoutes(
     const input = resetSchema.parse(req.body);
     const result = await service.reset(input);
     res.status(result.replayed ? 200 : 202).json(result);
+  });
+
+  router.post("/sessions/import-legacy-pi-context", async (req, res) => {
+    const input = legacyPiContextSchema.parse(req.body);
+    const result = await service.importLegacyPiContext(input);
+    res.status(result.replayed ? 200 : 201).json(result);
   });
 
   router.post("/sessions/cancel", async (req, res) => {
@@ -403,6 +547,23 @@ export function vectorIngressRoutes(
   router.post("/sessions/events", async (req, res) => {
     const input = eventsSchema.parse(req.body);
     res.json(await service.events(input));
+  });
+
+  router.post("/sessions/runtime", async (req, res) => {
+    const input = runtimeSelectionSchema.parse(req.body);
+    res.json(await service.configureRuntime(input));
+  });
+
+  router.post("/sessions/branches/list", async (req, res) => {
+    res.json(await service.listBranches(branchScopeSchema.parse(req.body)));
+  });
+
+  router.post("/sessions/branches/fork", async (req, res) => {
+    res.status(201).json(await service.forkBranch(forkBranchSchema.parse(req.body)));
+  });
+
+  router.post("/sessions/branches/switch", async (req, res) => {
+    res.json(await service.switchBranch(switchBranchSchema.parse(req.body)));
   });
 
   router.post("/sessions/list", async (req, res) => {

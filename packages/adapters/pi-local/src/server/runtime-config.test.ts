@@ -22,6 +22,49 @@ async function readModelsJson(agentConfigDir: string): Promise<Record<string, un
 }
 
 describe("preparePiRuntimeConfig", () => {
+  it("writes redeemed Vector provider authority only to a private managed config", async () => {
+    const prepared = await preparePiRuntimeConfig({
+      env: { PAPERCLIP_PI_PROVIDERS: JSON.stringify({ attacker: { apiKey: "wrong" } }) },
+      forceManagedAgentDir: true,
+      vectorProviderAuthority: {
+        providerId: "router",
+        baseUrl: "http://127.0.0.1:1250",
+        api: "anthropic-messages",
+        apiKey: "header.payload.signature",
+        models: [{
+          id: "Qwen3.8-Flash",
+          name: "Qwen3.8-Flash",
+          contextWindow: 131072,
+          maxTokens: 32768,
+          reasoning: true,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }],
+      },
+    });
+    const agentConfigDir = prepared.agentConfigDir!;
+    cleanupPaths.add(agentConfigDir);
+    expect(prepared.env).not.toHaveProperty("VECTOR_ROUTER_TOKEN");
+    expect(JSON.stringify(prepared.env)).not.toContain("header.payload.signature");
+    expect((await fs.stat(agentConfigDir)).mode & 0o777).toBe(0o700);
+    expect((await fs.stat(path.join(agentConfigDir, "models.json"))).mode & 0o777).toBe(0o600);
+    expect(await readModelsJson(agentConfigDir)).toEqual({
+      providers: {
+        router: {
+          baseUrl: "http://127.0.0.1:1250",
+          api: "anthropic-messages",
+          apiKey: "header.payload.signature",
+          models: expect.any(Array),
+        },
+      },
+    });
+    expect(prepared.notes.join(" ")).not.toContain("header.payload.signature");
+    expect(prepared.notes.join(" ")).not.toContain("attacker");
+    await prepared.cleanup();
+    cleanupPaths.delete(agentConfigDir);
+    await expect(fs.access(agentConfigDir)).rejects.toThrow();
+  });
+
   it("is a no-op when PAPERCLIP_PI_PROVIDERS is unset", async () => {
     const prepared = await preparePiRuntimeConfig({ env: { FOO: "bar" } });
 

@@ -247,6 +247,11 @@ export interface ConnectionGrant {
       lastAccessRefreshAt?: string;
       lastWebhookAt?: string;
       webhookHealth?: "pending" | "healthy" | "unhealthy";
+      /**
+       * "installation": the credential is a GitHub App installation token and
+       * this identity is the App's bot account. Absent: a user token.
+       */
+      tokenKind?: "installation";
     };
   } | null;
   credentialSecretRefs: ToolCredentialSecretRef[];

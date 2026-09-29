@@ -1,3 +1,4 @@
+import { localBoardUserId } from "../local-board-identity.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
@@ -56,6 +57,7 @@ function pruneCloudTenantWriteDebounce(
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { forbidden, unauthorized, unprocessable } from "../errors.js";
+import { VECTOR_TOOL_CALLBACK_PATH } from "../services/vector-tool-authority.js";
 
 export { isCloudManagedInstance } from "../services/cloud-instance.js";
 
@@ -221,7 +223,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       opts.deploymentMode === "local_trusted"
         ? {
             type: "board",
-            userId: "local-board",
+            userId: localBoardUserId(),
             userName: "Local Board",
             userEmail: null,
             isInstanceAdmin: true,
@@ -242,6 +244,18 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     // the normal actor authentication path below.
     if (hasBearerCredentials && publicMcpGatewayProtocolPath.test(req.path)) {
       if (runIdHeader) req.actor.runId = runIdHeader;
+      next();
+      return;
+    }
+
+    // The Vector tool callback carries a run-scoped capability bearer minted
+    // by VectorToolAuthorityBridge, which the callback route verifies against
+    // its live grants (plus a direct-loopback-peer check). It is neither a
+    // board key nor an agent JWT; interpreting it here rejected every Pi tool
+    // call with "Agent token did not verify" before the route ever ran. The
+    // request gets no actor, and only the exact POST path is exempt.
+    if (hasBearerCredentials && req.method === "POST" && req.path === VECTOR_TOOL_CALLBACK_PATH) {
+      req.actor = { type: "none", source: "none" };
       next();
       return;
     }

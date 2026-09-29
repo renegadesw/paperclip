@@ -19,6 +19,7 @@ import { agentsApi } from "../api/agents";
 import { routinesApi } from "../api/routines";
 import { sidebarPreferencesApi } from "../api/sidebarPreferences";
 import { queryKeys } from "../lib/queryKeys";
+import { navigateTopLevel } from "../lib/browserNavigation";
 import { getAgentOrderStorageKey, writeAgentOrder } from "../lib/agent-order";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { Button } from "@/components/ui/button";
@@ -1687,7 +1688,7 @@ export function CompanyImport() {
               data-testid="import-expired-open-company"
               // Force a fresh dashboard load so newly imported agents are
               // immediately visible (same reason as the full-outcome CTA).
-              onClick={() => window.location.assign(importOutcome.dashboardPath!)}
+              onClick={() => navigateTopLevel(importOutcome.dashboardPath!)}
             >
               Open organization dashboard
             </Button>
@@ -1805,7 +1806,7 @@ export function CompanyImport() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => window.location.assign(dashboardPath)}
+            onClick={() => navigateTopLevel(dashboardPath)}
           >
             Go to dashboard
           </Button>

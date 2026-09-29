@@ -3,6 +3,7 @@
 // OTEL_EXPORTER_OTLP_ENDPOINT is set). startServer() awaits
 // instrumentationReady before opening DB connections or constructing the
 // HTTP server, so trace coverage does not depend on incidental timing.
+import { localBoardUserId } from "./local-board-identity.js";
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
 import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
 import { waitForPendingRunFailureReports } from "./services/run-failure-report.js";
@@ -32,6 +33,7 @@ import {
   assertMigrationsCurrent,
   applyPendingMigrations,
   acquireVectorRuntimeOwnership,
+  assertVectorRuntimeIsolation,
   createEmbeddedPostgresLogBuffer,
   databaseClientOptionsFromEnv,
   prepareEmbeddedPostgresNativeRuntime,
@@ -94,6 +96,8 @@ import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.j
 import { createSecretProposalsService } from "./services/secret-proposals.js";
 import { environmentRuntimeService } from "./services/environment-runtime.js";
 import { createDbAdapterAuthSessionStore } from "./services/device-login-service.js";
+import { vectorWorkloadRoutineDispatcherFromEnv } from "./services/vector-workload-routine-dispatch.js";
+import { vectorScheduleRoutineDispatcherFromEnv } from "./services/vector-schedule-routine-dispatch.js";
 import {
   createDeviceLoginReaper,
   createProductionLoginSessionReaperRuntime,
@@ -363,8 +367,9 @@ async function startServerWithDatabaseTeardown(
     }
   }
 
-  const LOCAL_BOARD_USER_ID = "local-board";
-  const LOCAL_BOARD_USER_EMAIL = "local@paperclip.local";
+  const LOCAL_BOARD_USER_ID = localBoardUserId();
+  const LOCAL_BOARD_USER_EMAIL = LOCAL_BOARD_USER_ID === "local-board" ? "local@paperclip.local"
+    : `${LOCAL_BOARD_USER_ID.replace(":", "-")}@paperclip.local`;
   const LOCAL_BOARD_USER_NAME = "Board";
   
   async function ensureLocalTrustedBoardPrincipal(db: any): Promise<void> {
@@ -442,6 +447,12 @@ async function startServerWithDatabaseTeardown(
     );
   }
   if (config.databaseUrl) {
+    if (vectorRuntimeScope) {
+      if (config.databaseMigrationUrl) {
+        throw new Error("Vector runtime must not receive DATABASE_MIGRATION_URL; migrations run offline in the installer");
+      }
+      await assertVectorRuntimeIsolation(config.databaseUrl, vectorRuntimeScope);
+    }
     const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
     migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
 
@@ -449,21 +460,22 @@ async function startServerWithDatabaseTeardown(
       // Advisory locks require a session-capable direct connection. A runtime
       // URL may point at a transaction-mode pooler, while the migration URL is
       // already required to be direct in that topology.
-      vectorRuntimeOwnership = await acquireVectorRuntimeOwnership(migrationUrl);
+      vectorRuntimeOwnership = await acquireVectorRuntimeOwnership(config.databaseUrl, vectorRuntimeScope!);
       startupDatabase.close = () => vectorRuntimeOwnership?.release() ?? Promise.resolve();
       void vectorRuntimeOwnership.lost.then((error) => {
         logger.fatal({ err: error }, "vector-embedded runtime ownership lost; stopping server");
         process.kill(process.pid, "SIGTERM");
       });
-      logger.info("Acquired vector-embedded singleton runtime ownership");
+      logger.info("Acquired vector-embedded installation runtime ownership");
     }
 
     const databaseClientOptions = {
       ...databaseClientOptionsFromEnv(),
       deploymentProfile: config.databaseDeploymentProfile,
+      ...(vectorRuntimeScope ? { vectorRuntimeScope } : {}),
     };
     db = createDb(config.databaseUrl, databaseClientOptions);
-    pluginMigrationDb = config.databaseMigrationUrl
+    pluginMigrationDb = !vectorRuntimeScope && config.databaseMigrationUrl
       ? createDb(config.databaseMigrationUrl, databaseClientOptions)
       : db;
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
@@ -1366,7 +1378,11 @@ async function startServerWithDatabaseTeardown(
       heartbeat.drainActiveRunExecutions();
     prepareHotRestartShutdown = heartbeat.prepareHotRestartShutdown;
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
-    const routines = routineService(db as any, { pluginWorkerManager });
+    const routines = routineService(db as any, {
+      pluginWorkerManager,
+      vectorWorkloadDispatcher: vectorWorkloadRoutineDispatcherFromEnv(process.env),
+      vectorScheduleDispatcher: vectorScheduleRoutineDispatcherFromEnv(process.env),
+    });
     const statusCards = statusCardService(db as any);
     const issues = issueService(db as any);
     const mergedPullRequestConfirmations = issueThreadInteractionService(db as any, {

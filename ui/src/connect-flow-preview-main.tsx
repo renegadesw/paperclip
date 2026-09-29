@@ -1,5 +1,6 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { paperclipPath } from "./lib/base-path";
 import { MotionConfig, motion } from "motion/react";
 import { isValidBrowserCode } from "@paperclipai/shared";
 import {
@@ -73,7 +74,7 @@ const MODEL_SOURCES: ModelSource[] = [
   {
     id: "claude_local",
     label: "Claude",
-    icon: <img src="/brands/claude-color.svg" alt="" className="size-full" />,
+    icon: <img src={paperclipPath("/brands/claude-color.svg")} alt="" className="size-full" />,
   },
   { id: "codex_local", label: "OpenAI", icon: <OpenAiBlossom className="size-full" /> },
 ];

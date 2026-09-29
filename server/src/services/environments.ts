@@ -944,7 +944,7 @@ export function environmentService(db: Db) {
             updatedAt: now,
           })
           .onConflictDoNothing({
-            target: [environments.driver],
+            target: [environments.vectorInstallationId, environments.driver],
             where: sql`${environments.driver} = 'local'`,
           })
           .returning()

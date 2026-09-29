@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import express from "express";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
@@ -28,11 +29,17 @@ import {
 } from "../routes/vector-ingress.js";
 import {
   vectorConversationOwnerId,
+  vectorIngressOwnerSha256,
   vectorIngressService,
   type VectorIngressHeartbeat,
+  type VectorIngressProviderAuthority,
+  type VectorIngressToolAuthority,
 } from "../services/vector-ingress.js";
 import type { VectorRuntimeScope } from "../services/vector-runtime-scope.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { VectorToolAuthorityBridge } from "../services/vector-tool-authority.js";
+import type { StorageService } from "../storage/index.js";
+import { hydrateVectorIngressImages } from "../services/vector-ingress-image-hydration.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -120,6 +127,9 @@ describe("Vector ingress service authentication", () => {
       hasMore: false,
       nextPosition: null,
     });
+    const listBranches = vi.fn().mockResolvedValue({ points: [], branches: [] });
+    const forkBranch = vi.fn().mockResolvedValue({ forked: true, text: "prompt" });
+    const switchBranch = vi.fn().mockResolvedValue({ switched: true });
     const app = express();
     app.use(
       express.json({
@@ -145,6 +155,9 @@ describe("Vector ingress service authentication", () => {
           events: vi.fn(),
           inventory,
           transcript,
+          listBranches,
+          forkBranch,
+          switchBranch,
         } as never,
         now: () => 1_700_000_000_000,
       }),
@@ -160,11 +173,43 @@ describe("Vector ingress service authentication", () => {
 
     await signedPost(app, path, body).expect(201);
     expect(addTurn).toHaveBeenCalledExactlyOnceWith(body);
+    const imageBody = {
+      ...body,
+      clientRequestId: "request-image",
+      images: [{ type: "image", data: "/9j/AA==", mimeType: "image/jpeg" }],
+    };
+    await signedPost(app, path, imageBody).expect(201);
+    expect(addTurn).toHaveBeenLastCalledWith(imageBody);
+    // Standard persona IDs are fixed catalog GUIDs, not RFC 4122 UUIDs; the
+    // route must admit them (every Standard turn was a 400 when it did not).
+    const personaBody = {
+      ...body,
+      clientRequestId: "request-persona",
+      ownerId: "owner-a", installationId: runtimeScope.installationId, profileId: runtimeScope.profile,
+      personaContext: {
+        schemaVersion: 1, personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Friend", personaVersion: "50d14aba01ef", model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true, systemPrompt: "Be a friend.",
+      },
+      runtimeSelection: { model: "Qwen3.8-Flash", thinking: "off" },
+    };
+    await signedPost(app, path, personaBody).expect(201);
+    expect(addTurn).toHaveBeenLastCalledWith(personaBody);
+    await signedPost(app, path, {
+      ...imageBody,
+      clientRequestId: "request-image-invalid",
+      images: [{ type: "image", data: "%%%", mimeType: "image/jpeg" }],
+    }).expect(400);
+    await signedPost(app, path, {
+      ...body,
+      clientRequestId: "request-repository-invalid",
+      repositoryContext: { schemaVersion: 1, repository: "../escape" },
+    }).expect(400);
     await signedPost(app, path, { ...body, externalSessionId: " padded" }).expect(
       400,
     );
     await signedPost(app, path, { ...body, ownerId: "owner-only" }).expect(400);
-    expect(addTurn).toHaveBeenCalledTimes(1);
+    expect(addTurn).toHaveBeenCalledTimes(3);
     await request(app).post(path).send(body).expect(401);
     await signedPost(app, path, body, "1699999000").expect(401);
     await request(app)
@@ -201,6 +246,32 @@ describe("Vector ingress service authentication", () => {
     await signedPost(app, transcriptPath, transcriptBody).expect(200);
     expect(transcript).toHaveBeenCalledExactlyOnceWith(transcriptBody);
 
+    const branchBody = {
+      companyId: runtimeScope.companyId,
+      agentId: runtimeScope.allowedAgentIds[0],
+      ownerId: "authenticated-owner",
+      installationId: runtimeScope.installationId,
+      profileId: runtimeScope.profile,
+      externalSessionId: "client-session",
+    };
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/list", branchBody).expect(200);
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/fork", {
+      ...branchBody, entryId: "prompt-entry",
+    }).expect(201);
+    const branchId = randomUUID();
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/switch", {
+      ...branchBody, branchId,
+    }).expect(200);
+    expect(listBranches).toHaveBeenCalledExactlyOnceWith(branchBody);
+    expect(forkBranch).toHaveBeenCalledExactlyOnceWith({ ...branchBody, entryId: "prompt-entry" });
+    expect(switchBranch).toHaveBeenCalledExactlyOnceWith({ ...branchBody, branchId });
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/fork", {
+      ...branchBody, entryId: " prompt-entry",
+    }).expect(400);
+    await signedPost(app, "/api/internal/vector/v1/sessions/branches/switch", {
+      ...branchBody, branchId: "/managed/pi/source.jsonl",
+    }).expect(400);
+
     await signedPost(app, path, { ...body, companyId: randomUUID() }).expect(401);
     await signedPost(app, path, { ...body, agentId: randomUUID() }).expect(401);
     await signedPost(app, inventoryPath, {
@@ -211,7 +282,7 @@ describe("Vector ingress service authentication", () => {
       ...runtimeScope,
       installationId: "stecke1-standard",
     }).expect(401);
-    expect(addTurn).toHaveBeenCalledTimes(1);
+    expect(addTurn).toHaveBeenCalledTimes(3);
     expect(inventory).toHaveBeenCalledTimes(1);
   });
 
@@ -277,6 +348,12 @@ const support = await getEmbeddedPostgresTestSupport();
     let otherCompanyId: string;
     let agentId: string;
     let otherAgentId: string;
+    let standardAgentId: string;
+    let retiredWorkerAgentId: string;
+    let engineeringAgentId: string;
+    let engineeringSeatAgentId: string;
+    let productionCompanyId: string;
+    let productionAgentId: string;
     let heartbeat: VectorIngressHeartbeat;
 
     beforeAll(async () => {
@@ -288,6 +365,12 @@ const support = await getEmbeddedPostgresTestSupport();
       otherCompanyId = randomUUID();
       agentId = randomUUID();
       otherAgentId = randomUUID();
+      standardAgentId = randomUUID();
+      retiredWorkerAgentId = randomUUID();
+      engineeringAgentId = randomUUID();
+      engineeringSeatAgentId = randomUUID();
+      productionCompanyId = randomUUID();
+      productionAgentId = randomUUID();
       await db.insert(companies).values([
         {
           id: companyId,
@@ -301,15 +384,43 @@ const support = await getEmbeddedPostgresTestSupport();
           issuePrefix: "OTH",
           requireBoardApprovalForNewAgents: false,
         },
+        {
+          // prod1 runs the same Funky server roster as stg1 under its own
+          // installation identity and company.
+          id: productionCompanyId,
+          name: "Vector Production",
+          issuePrefix: "VPR",
+          requireBoardApprovalForNewAgents: false,
+        },
       ]);
       await db.insert(agents).values([
         {
           id: agentId,
           companyId,
           name: "Funky",
-          role: "assistant",
+          role: "funky-scout",
           status: "idle",
           adapterType: "process",
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "stg1-staging",
+              profile: "staging",
+            },
+            vectorWorkloads: {
+              schemaVersion: 1,
+              keys: ["current_scout"],
+              contracts: [{
+                key: "current_scout",
+                kind: "research_task",
+                executionShape: "single_shot",
+                role: "funky-scout",
+                toolSurface: [],
+                modelPolicy: null,
+                runtimeAuthority: "vector_lease_triple",
+              }],
+            },
+          },
         },
         {
           id: otherAgentId,
@@ -318,6 +429,89 @@ const support = await getEmbeddedPostgresTestSupport();
           role: "assistant",
           status: "idle",
           adapterType: "process",
+        },
+        {
+          id: standardAgentId,
+          companyId,
+          name: "Standard Chat",
+          role: "standard-chat",
+          status: "idle",
+          adapterType: "pi_local",
+          adapterConfig: { model: "router/Qwen3.8-Flash" },
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "stecke1-standard",
+              profile: "standard",
+            },
+          },
+        },
+        {
+          // A roster member dropped by a newer Standard manifest revision is
+          // retired (terminated) by provisioning and must never be selected.
+          id: retiredWorkerAgentId,
+          companyId,
+          name: "Implementation Worker",
+          role: "implementation-worker",
+          status: "terminated",
+          adapterType: "pi_local",
+          adapterConfig: { model: "router/Qwen3.8-Flash" },
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "stecke1-standard",
+              profile: "standard",
+            },
+          },
+        },
+        {
+          id: engineeringAgentId,
+          companyId,
+          name: "FunkyDev",
+          role: "engineer",
+          status: "idle",
+          adapterType: "pi_local",
+          adapterConfig: { model: "router/Qwen3.8-Flash" },
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "t480-engineering",
+              profile: "engineering",
+            },
+          },
+        },
+        {
+          // Another seat of the engineering software org, reporting to FunkyDev.
+          id: engineeringSeatAgentId,
+          companyId,
+          name: "Backend Engineer",
+          role: "backend-engineer",
+          reportsTo: engineeringAgentId,
+          status: "idle",
+          adapterType: "pi_local",
+          adapterConfig: { model: "router/Qwen3.8-Flash" },
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "t480-engineering",
+              profile: "engineering",
+            },
+          },
+        },
+        {
+          id: productionAgentId,
+          companyId: productionCompanyId,
+          name: "Funky Scout",
+          role: "funky-scout",
+          status: "idle",
+          adapterType: "process",
+          metadata: {
+            vectorProvisioning: {
+              schemaVersion: 1,
+              installationId: "vector-os-production",
+              profile: "production",
+            },
+          },
         },
       ]);
       await instanceSettingsService(db).updateExperimental({
@@ -490,6 +684,799 @@ const support = await getEmbeddedPostgresTestSupport();
       await expect(
         service.addTurn({ ...input, attachmentIds: [attachment.id] }),
       ).rejects.toMatchObject({ status: 409 });
+    });
+
+    it("stores image turns once, binds ownership, and projects metadata without bytes", async () => {
+      const objects = new Map<string, Buffer>();
+      let puts = 0;
+      const storage = {
+        provider: "local_disk",
+        async putFile(input: { companyId: string; namespace: string; originalFilename: string | null; contentType: string; body: Buffer }) {
+          puts += 1;
+          const objectKey = `${input.companyId}/${input.namespace}/${puts}`;
+          objects.set(objectKey, input.body);
+          return {
+            provider: "local_disk", objectKey, contentType: input.contentType,
+            byteSize: input.body.length,
+            sha256: (await import("node:crypto")).createHash("sha256").update(input.body).digest("hex"),
+            originalFilename: input.originalFilename,
+          };
+        },
+        async getObject(readCompanyId: string, objectKey: string) {
+          if (!objectKey.startsWith(`${readCompanyId}/`)) throw new Error("foreign company");
+          return { stream: Readable.from([objects.get(objectKey)!]) };
+        },
+        async headObject() { return { exists: true }; },
+        async deleteObject() {},
+      } as StorageService;
+      const service = vectorIngressService(db, { heartbeat, storage });
+      const input = {
+        companyId,
+        agentId,
+        ownerId: "image-owner",
+        installationId: "stg1-staging",
+        profileId: "staging",
+        externalSessionId: "image-thread",
+        clientRequestId: "image-turn-1",
+        body: "Describe this image",
+        images: [{ type: "image" as const, data: "/9j/AA==", mimeType: "image/jpeg" as const }],
+      };
+      const first = await service.addTurn(input);
+      const replay = await service.addTurn(input);
+      expect(replay).toMatchObject({ commentId: first.commentId, replayed: true });
+      expect(puts).toBe(1);
+      const attachments = await db
+        .select({
+          id: issueAttachments.id,
+          companyId: issueAttachments.companyId,
+          issueId: issueAttachments.issueId,
+          commentId: issueAttachments.issueCommentId,
+          contentType: assets.contentType,
+          byteSize: assets.byteSize,
+        })
+        .from(issueAttachments)
+        .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
+        .where(eq(issueAttachments.issueCommentId, first.commentId));
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]).toMatchObject({ companyId, issueId: first.issueId, commentId: first.commentId, contentType: "image/jpeg", byteSize: 4 });
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, first.runId!));
+      expect(run?.contextSnapshot).toMatchObject({ vectorIngressImageAttachmentIds: [attachments[0]!.id] });
+      expect(JSON.stringify(run?.contextSnapshot)).not.toContain("/9j/AA==");
+      await expect(hydrateVectorIngressImages({
+        db, storage, companyId, issueId: first.issueId, commentId: first.commentId,
+        attachmentIds: [attachments[0]!.id],
+      })).resolves.toEqual(input.images);
+      await expect(hydrateVectorIngressImages({
+        db, storage, companyId, issueId: first.issueId, commentId: randomUUID(),
+        attachmentIds: [attachments[0]!.id],
+      })).rejects.toThrow(/ownership mismatch/);
+
+      const transcript = await service.transcript({
+        companyId, agentId, ownerId: input.ownerId, installationId: input.installationId,
+        profileId: input.profileId, externalSessionId: input.externalSessionId,
+      });
+      const userTurn = transcript.events.find((event) => event.eventType === "user_turn");
+      expect(userTurn?.payload).toMatchObject({
+        text: input.body,
+        images: [{ attachmentId: attachments[0]!.id, mimeType: "image/jpeg", byteSize: 4 }],
+      });
+      expect(JSON.stringify(userTurn)).not.toContain("/9j/AA==");
+
+      await expect(service.addTurn({ ...input, images: [{ ...input.images[0], data: "/9j/AQ==" }] }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_ingress_idempotency_conflict" } });
+    });
+
+    it("persists only pending authority scope before wakeup and confirms the created run", async () => {
+      const commentMarker = {
+        version: 1 as const,
+        handleSha256: "a".repeat(64),
+        sessionScope: "session-scope",
+        commentId: "filled-by-register",
+      };
+      const registerPending = vi.fn((input: { commentId: string }) => ({
+        ...commentMarker,
+        commentId: input.commentId,
+      }));
+      const bindRun = vi.fn().mockResolvedValue(undefined);
+      const toolAuthority = { registerPending, bindRun } as unknown as VectorIngressToolAuthority;
+      const service = vectorIngressService(db, { heartbeat, toolAuthority });
+      const result = await service.addTurn({
+        companyId,
+        agentId,
+        externalSessionId: "authority-thread",
+        clientRequestId: "authority-turn",
+        body: "Use my memory",
+        authorityHandle: "opaque-vector-handle",
+        authorityTools: ["memory_search"],
+      });
+      expect(registerPending).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        commentId: result.commentId,
+        authorityHandle: "opaque-vector-handle",
+        allowedTools: ["memory_search"],
+      }));
+      expect(bindRun).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        runId: result.runId,
+        authorityHandle: "opaque-vector-handle",
+      }));
+      const context = await db.select({ value: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, result.runId!))
+        .then((rows) => rows[0]?.value);
+      expect(context?.vectorToolAuthorityPending).toEqual({
+        ...commentMarker,
+        commentId: result.commentId,
+      });
+      expect(JSON.stringify(context)).not.toContain("opaque-vector-handle");
+    });
+
+    it("persists only a provider marker and never the opaque provider handle", async () => {
+      const commentMarker = {
+        version: 1 as const,
+        handleSha256: "b".repeat(64),
+        sessionScope: "provider-session-scope",
+        commentId: "filled-by-register",
+      };
+      const registerPending = vi.fn((input: { commentId: string }) => ({
+        ...commentMarker,
+        commentId: input.commentId,
+      }));
+      const bindRun = vi.fn().mockResolvedValue(undefined);
+      const providerAuthority = { registerPending, bindRun } as unknown as VectorIngressProviderAuthority;
+      const service = vectorIngressService(db, { heartbeat, providerAuthority });
+      const result = await service.addTurn({
+        companyId,
+        agentId,
+        externalSessionId: "provider-authority-thread",
+        clientRequestId: "provider-authority-turn",
+        body: "Use the delegated model route",
+        providerAuthorityHandle: "opaque-provider-authority-handle",
+      });
+      expect(registerPending).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        commentId: result.commentId,
+        authorityHandle: "opaque-provider-authority-handle",
+      }));
+      expect(bindRun).toHaveBeenCalledWith(expect.objectContaining({
+        companyId,
+        agentId,
+        issueId: result.issueId,
+        runId: result.runId,
+        authorityHandle: "opaque-provider-authority-handle",
+      }));
+      const context = await db.select({ value: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, result.runId!))
+        .then((rows) => rows[0]?.value);
+      expect(context?.vectorProviderAuthorityPending).toEqual({
+        ...commentMarker,
+        commentId: result.commentId,
+      });
+      expect(JSON.stringify(context)).not.toContain("opaque-provider-authority-handle");
+    });
+
+    it("replays one client request only with the same authority handle", async () => {
+      const toolAuthority = new VectorToolAuthorityBridge(db, {
+        endpoint: new URL("http://127.0.0.1:32160/inbound/paperclip/v1/tools/call"),
+        callbackUrl: new URL("http://127.0.0.1:3100/api/internal/vector/v1/tools/callback"),
+        installationId: "test-installation",
+        profile: "standard",
+        secret: "vector-tool-authority-test-secret-32-plus",
+        allowedTools: ["memory_search"],
+        ttlSeconds: 3600,
+      }, vi.fn());
+      const service = vectorIngressService(db, { heartbeat, toolAuthority });
+      const input = {
+        companyId,
+        agentId,
+        externalSessionId: "authority-replay-thread",
+        clientRequestId: "authority-replay-turn",
+        body: "Search memory once",
+        authorityHandle: "opaque-authority-replay-handle",
+        authorityTools: ["memory_search"],
+      };
+      const first = await service.addTurn(input);
+      await expect(service.addTurn(input)).resolves.toMatchObject({
+        issueId: first.issueId,
+        commentId: first.commentId,
+        runId: first.runId,
+        replayed: true,
+      });
+      await expect(service.addTurn({
+        ...input,
+        authorityHandle: "different-authority-handle",
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_tool_authority_scope_conflict" },
+      });
+    });
+
+    it("admits exact provisioned workload context and binds it to the queued run", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const launchContext = {
+        schemaVersion: 1 as const,
+        workloadKey: "current_scout",
+        queue: "research" as const,
+        taskId: "research-task-1",
+        attempt: 2,
+        leaseTokenSha256: "a".repeat(64),
+        role: "funky-scout",
+        model: "",
+        tools: [] as string[],
+        noBuiltinTools: true,
+        systemPrompt: "Use the current Vector charter and cite every claim.",
+        metadata: { task_id: "research-task-1", attempt: "2", run_kind: "current_scout" },
+      };
+      const input = {
+        companyId,
+        agentId,
+        externalSessionId: "workload-current-1",
+        ownerId: "vector-workload:research-task-1",
+        installationId: "stg1-staging",
+        profileId: "staging",
+        clientRequestId: "research-task-1-attempt-2",
+        body: "Analyze the database-provided evidence envelope.",
+        launchContext,
+      };
+      const turn = await service.addTurn(input);
+      const commentBody = await db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(eq(issueComments.id, turn.commentId))
+        .then((rows) => rows[0]?.body);
+      expect(commentBody).toContain("[VECTOR_WORKLOAD_LAUNCH_V1]");
+      expect(commentBody).toContain(launchContext.systemPrompt);
+      const runContext = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorWorkloadLaunch).toEqual(launchContext);
+
+      await expect(service.addTurn({
+        ...input,
+        externalSessionId: "workload-current-escalated",
+        clientRequestId: "research-task-1-escalated",
+        launchContext: { ...launchContext, tools: ["bash"] },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_workload_contract_mismatch" },
+      });
+    });
+
+    it("admits a trusted staging role turn and rejects role escalation", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const roleContext = {
+        schemaVersion: 1 as const,
+        role: "funky-scout",
+        model: "",
+        noBuiltinTools: true as const,
+        systemPrompt: "Use the current Vector analyst charter.",
+        metadata: { persona_version: "persona-v1", run_kind: "title" },
+      };
+      const input = {
+        companyId,
+        agentId,
+        externalSessionId: "trusted-role-session",
+        ownerId: "vector-user:user-1",
+        installationId: "stg1-staging",
+        profileId: "staging",
+        clientRequestId: "trusted-role-turn-1",
+        body: "Name this conversation.",
+        roleContext,
+      };
+      const turn = await service.addTurn(input);
+      const runContext = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toEqual(roleContext);
+
+      await expect(service.addTurn({
+        ...input,
+        externalSessionId: "trusted-role-escalated",
+        clientRequestId: "trusted-role-turn-escalated",
+        roleContext: { ...roleContext, role: "funky-advisor" },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_role_contract_mismatch" },
+      });
+      await expect(service.addTurn({
+        ...input,
+        externalSessionId: "trusted-role-tool-widening",
+        clientRequestId: "trusted-role-turn-tool-widening",
+        roleContext: { ...roleContext, noBuiltinTools: false },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_role_contract_mismatch" },
+      });
+    });
+
+    it("admits a trusted production role turn exactly as staging and keeps installations apart", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const roleContext = {
+        schemaVersion: 1 as const,
+        role: "funky-scout",
+        model: "",
+        noBuiltinTools: true as const,
+        systemPrompt: "Use the current Vector analyst charter.",
+        metadata: { persona_version: "persona-v1", run_kind: "title" },
+      };
+      const input = {
+        companyId: productionCompanyId,
+        agentId: productionAgentId,
+        externalSessionId: "trusted-production-role-session",
+        ownerId: "vector-user:user-1",
+        installationId: "vector-os-production",
+        profileId: "production",
+        clientRequestId: "trusted-production-role-turn-1",
+        body: "Name this conversation.",
+        roleContext,
+      };
+      const turn = await service.addTurn(input);
+      const runContext = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toEqual(roleContext);
+
+      for (const [label, patch] of [
+        ["role escalation", { roleContext: { ...roleContext, role: "funky-advisor" } }],
+        ["builtin tool widening", { roleContext: { ...roleContext, noBuiltinTools: false } }],
+        // A staging-scoped turn can never drive the production agent.
+        ["staging scope on a production agent", { installationId: "stg1-staging", profileId: "staging" }],
+        ["production profile on another installation", { installationId: "stg1-staging" }],
+      ] as const) {
+        await expect(service.addTurn({
+          ...input,
+          ...patch,
+          externalSessionId: `trusted-production-role-${label}`,
+          clientRequestId: `trusted-production-role-turn-${label}`,
+        } as typeof input)).rejects.toMatchObject({
+          status: 409,
+          details: { code: "vector_role_contract_mismatch" },
+        });
+      }
+      // A production-scoped turn can never drive the staging agent either.
+      await expect(service.addTurn({
+        ...input,
+        companyId,
+        agentId,
+        externalSessionId: "trusted-production-role-on-staging",
+        clientRequestId: "trusted-production-role-on-staging",
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_role_contract_mismatch" },
+      });
+    });
+
+    it.each([
+      ["staging", "funky", "vector_legacy_context_unavailable"],
+      ["production", "funky", "vector_legacy_context_unavailable"],
+      ["production", "nexuslink-chat", "vector_legacy_context_profile_mismatch"],
+      ["staging", "nexuslink-chat", "vector_legacy_context_profile_mismatch"],
+      ["standard", "nexuslink-chat", "vector_legacy_context_unavailable"],
+      ["standard", "funky", "vector_legacy_context_profile_mismatch"],
+      ["engineering", "funky", "vector_legacy_context_profile_mismatch"],
+      ["demo", "funky", "vector_legacy_context_profile_mismatch"],
+    ] as const)("maps the %s profile's %s legacy service to %s", async (profileId, legacyService, code) => {
+      // Without an importer, an eligible profile/service pair passes the
+      // mapping and stops at the missing importer; an ineligible pair stops
+      // at the mapping.
+      const service = vectorIngressService(db, { heartbeat });
+      await expect(service.importLegacyPiContext({
+        companyId: productionCompanyId,
+        agentId: productionAgentId,
+        ownerId: "vector-user:user-1",
+        installationId: "vector-os-production",
+        profileId,
+        externalSessionId: "legacy-mapping-thread",
+        legacyService,
+        legacyPiSessionId: "legacy-mapping-session",
+      })).rejects.toMatchObject({ status: 409, details: { code } });
+    });
+
+    it("persists an admitted standard persona without copying its prompt into comments", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const personaContext = {
+        schemaVersion: 1 as const,
+        personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Sage",
+        personaVersion: "abcdef012345",
+        model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const,
+        systemPrompt: "Be a calm, precise collaborator.",
+      };
+      const base = {
+        companyId,
+        agentId: standardAgentId,
+        externalSessionId: "standard-persona-session",
+        ownerId: "vector-user:user-1",
+        installationId: "stecke1-standard",
+        profileId: "standard",
+      };
+      const first = await service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-1",
+        body: "Hello there.",
+        voiceActive: true,
+        personaContext,
+      });
+      expect(first.turnId).toBeGreaterThan(0);
+      expect(first.baseCursor).toBe(0);
+      const replay = await service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-1",
+        body: "Hello there.",
+        voiceActive: true,
+        personaContext,
+        baseCursor: 99,
+      });
+      expect(replay.replayed).toBe(true);
+      expect(replay.turnId).toBe(first.turnId);
+      expect(replay.baseCursor).toBe(first.baseCursor);
+      const targeted = await service.events({ ...base, turnId: first.turnId, afterSeq: first.baseCursor });
+      expect(targeted.turnId).toBe(first.turnId);
+      expect(targeted.run?.id).toBe(first.runId);
+      await expect(service.events({ ...base, ownerId: "vector-user:user-2", turnId: first.turnId }))
+        .rejects.toMatchObject({ status: 404 });
+      const firstRun = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, first.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(firstRun.vectorPersonaTurn).toEqual(personaContext);
+      expect(firstRun.vectorRuntimeSelection).toEqual({ model: "Qwen3.8-Flash", thinking: "medium" });
+      expect(firstRun.vectorVoiceActive).toBe(true);
+      const firstComment = await db
+        .select({ body: issueComments.body })
+        .from(issueComments)
+        .where(eq(issueComments.id, first.commentId))
+        .then((rows) => rows[0]?.body);
+      expect(firstComment).toBe("Hello there.");
+      expect(firstComment).not.toContain(personaContext.systemPrompt);
+
+      const second = await service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-2",
+        body: "Continue.",
+      });
+      const secondRun = await db
+        .select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, second.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(secondRun.vectorPersonaTurn).toEqual(personaContext);
+      expect(secondRun.vectorVoiceActive).toBe(false);
+
+      const configured = await service.configureRuntime({
+        ...base, model: "Other-Model", thinking: "high",
+      });
+      expect(configured).toMatchObject({ model: "Other-Model", thinking: "high" });
+      const third = await service.addTurn({
+        ...base, clientRequestId: "standard-persona-turn-runtime", body: "Use it.",
+      });
+      const thirdRun = await db.select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, third.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(thirdRun.vectorRuntimeSelection).toEqual({ model: "Other-Model", thinking: "high" });
+
+      await expect(service.addTurn({
+        ...base,
+        clientRequestId: "standard-persona-turn-3",
+        body: "Switch persona.",
+        personaContext: { ...personaContext, personaName: "Different" },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_persona_continuity_mismatch" },
+      });
+    });
+
+    it("runs a standard todo launch as an ordinary standard-chat turn bound to that todo", async () => {
+      const todoTools = ["todo_add", "todo_list", "todo_mark_done", "todo_update"];
+      const toolAuthority = new VectorToolAuthorityBridge(db, {
+        endpoint: new URL("http://127.0.0.1:32160/inbound/paperclip/v1/tools/call"),
+        callbackUrl: new URL("http://127.0.0.1:3100/api/internal/vector/v1/tools/callback"),
+        installationId: "stecke1-standard",
+        profile: "standard",
+        secret: "vector-tool-authority-test-secret-32-plus",
+        allowedTools: ["ask_user", "memory_forget", "memory_save", "memory_search", ...todoTools, "speak"],
+        ttlSeconds: 3600,
+      }, vi.fn());
+      const service = vectorIngressService(db, { heartbeat, toolAuthority });
+      const personaContext = {
+        schemaVersion: 1 as const,
+        personaId: "00000000-0000-0000-0000-000000000024",
+        personaName: "Sage",
+        personaVersion: "abcdef012346",
+        model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const,
+        systemPrompt: "Be a calm, precise collaborator.",
+      };
+      const launch = {
+        companyId,
+        agentId: standardAgentId,
+        externalSessionId: "todo-d757f88d-7062-4e72-939e-f6230cfcad7a-7d19e3e8f8b157f7fbc63f7dc789832a",
+        ownerId: "vector-user:user-3",
+        installationId: "stecke1-standard",
+        profileId: "standard",
+        clientRequestId: "todo-launch-d757f88d-7062-4e72-939e-f6230cfcad7a",
+        body: "Todo brief: draft the requested answer.",
+        personaContext,
+        authorityHandle: "opaque-todo-d757f88d-authority",
+        authorityTools: todoTools,
+      };
+      const turn = await service.addTurn(launch);
+      expect(turn.runId).toBeTruthy();
+      const runContext = await db.select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toBeUndefined();
+      expect(runContext.vectorPersonaTurn).toEqual(personaContext);
+      expect(JSON.stringify(runContext)).not.toContain(launch.authorityHandle);
+      const commentBody = await db.select({ body: issueComments.body })
+        .from(issueComments).where(eq(issueComments.id, turn.commentId))
+        .then((rows) => rows[0]?.body);
+      expect(commentBody).toBe(launch.body);
+
+      // Idempotent: the same launch replays; a different todo authority on it is refused.
+      await expect(service.addTurn(launch)).resolves.toMatchObject({
+        issueId: turn.issueId, commentId: turn.commentId, runId: turn.runId, replayed: true,
+      });
+      await expect(service.addTurn({ ...launch, authorityHandle: "opaque-other-todo-authority" }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_tool_authority_scope_conflict" } });
+
+      // Durable binding: the todo session keeps one conversation and its persona.
+      const mappings = await db.select().from(vectorIngressConversations)
+        .where(eq(vectorIngressConversations.externalSessionId, launch.externalSessionId));
+      expect(mappings).toHaveLength(1);
+      expect(mappings[0]).toMatchObject({
+        issueId: turn.issueId, agentId: standardAgentId, profileId: "standard", sessionRole: null,
+      });
+      const { personaContext: _persona, authorityHandle: _handle, authorityTools: _tools, ...scope } = launch;
+      await expect(service.status(scope)).resolves.toMatchObject({ issueId: turn.issueId, sessionRole: null });
+    });
+
+    it("rejects every todo role turn on standard and never selects a retired agent", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const retiredRoleContext = {
+        schemaVersion: 1 as const,
+        role: "implementation-worker",
+        model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const,
+        systemPrompt: "You are executing one authenticated NexusLink todo brief.",
+        metadata: {
+          todo_id: "b757f88d-7062-4e72-939e-f6230cfcad7a",
+          launch_mode: "scoped",
+          launch_digest: "8d19e3e8f8b157f7fbc63f7dc789832a",
+        },
+      };
+      const base = {
+        companyId,
+        agentId: standardAgentId,
+        externalSessionId: "todo-b757f88d-7062-4e72-939e-f6230cfcad7a-8d19e3e8f8b157f7fbc63f7dc789832a",
+        ownerId: "vector-user:user-1",
+        installationId: "stecke1-standard",
+        profileId: "standard",
+        clientRequestId: "todo-launch-b757f88d-7062-4e72-939e-f6230cfcad7a",
+        body: "Prepare the requested answer.",
+        runtimeSelection: { model: "Qwen3.8-Flash", thinking: "medium" as const },
+      };
+      // A role other than the agent's own role is rejected.
+      await expect(service.addTurn({ ...base, roleContext: retiredRoleContext }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_role_contract_mismatch" } });
+      // Even the agent's own role: standard has no role-turn (todo) surface.
+      await expect(service.addTurn({
+        ...base,
+        clientRequestId: "todo-launch-own-role",
+        roleContext: { ...retiredRoleContext, role: "standard-chat" },
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_role_contract_mismatch" } });
+      // Without a persona the standard turn is refused rather than run as a worker.
+      await expect(service.addTurn({ ...base, clientRequestId: "todo-launch-no-persona" }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_persona_required" } });
+
+      const retired = {
+        ...base,
+        agentId: retiredWorkerAgentId,
+        externalSessionId: "retired-worker-session",
+        clientRequestId: "retired-worker-turn",
+      };
+      await expect(service.addTurn(retired))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_ingress_agent_unavailable" } });
+      await expect(service.addTurn({ ...retired, roleContext: retiredRoleContext }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_ingress_agent_unavailable" } });
+      await expect(service.configureRuntime({
+        companyId,
+        agentId: retiredWorkerAgentId,
+        externalSessionId: retired.externalSessionId,
+        ownerId: retired.ownerId,
+        installationId: retired.installationId,
+        profileId: retired.profileId,
+        model: "Other-Model",
+        thinking: "medium",
+      })).rejects.toMatchObject({ status: 409 });
+    });
+
+    it("runs an engineering todo launch as an ordinary FunkyDev pi turn", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const plain = {
+        companyId,
+        agentId: engineeringAgentId,
+        externalSessionId: "engineering-browser-chat",
+        ownerId: "vector-user:engineer-1",
+        installationId: "t480-engineering",
+        profileId: "engineering",
+        clientRequestId: "engineering-browser-chat-1",
+        body: "Keep the configured FunkyDev runtime.",
+      };
+      await expect(service.addTurn(plain)).resolves.toMatchObject({ replayed: false });
+      await expect(service.status(plain)).resolves.toMatchObject({ sessionRole: "pi", repository: null });
+      const base = {
+        companyId,
+        agentId: engineeringAgentId,
+        externalSessionId: "todo-c757f88d-7062-4e72-939e-f6230cfcad7a-9d19e3e8f8b157f7fbc63f7dc789832a",
+        ownerId: "vector-user:engineer-1",
+        installationId: "t480-engineering",
+        profileId: "engineering",
+        clientRequestId: "engineering-todo-launch",
+        body: "Todo brief: implement the bounded change.",
+        repositoryContext: { schemaVersion: 1 as const, repository: "renegadesw/vector" },
+        runtimeSelection: { model: "Qwen3.8-Flash", thinking: "high" as const },
+      };
+      const turn = await service.addTurn(base);
+      const runContext = await db.select({ context: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, turn.runId!))
+        .then((rows) => rows[0]?.context as Record<string, unknown>);
+      expect(runContext.vectorRoleTurn).toBeUndefined();
+      expect(runContext.vectorRuntimeSelection).toEqual(base.runtimeSelection);
+      const commentBody = await db.select({ body: issueComments.body })
+        .from(issueComments).where(eq(issueComments.id, turn.commentId))
+        .then((rows) => rows[0]?.body);
+      expect(commentBody).toBe(base.body);
+      await expect(service.status(base)).resolves.toMatchObject({
+        sessionRole: "pi",
+        repository: "renegadesw/vector",
+      });
+      await expect(service.addTurn({
+        ...base,
+        clientRequestId: "engineering-todo-repository-drift",
+        repositoryContext: { schemaVersion: 1, repository: "renegadesw/other" },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_ingress_session_binding_mismatch" },
+      });
+
+      const retiredAlias = {
+        schemaVersion: 1 as const,
+        role: "implementation-worker",
+        model: "router/Qwen3.8-Flash",
+        noBuiltinTools: false,
+        systemPrompt: "You are executing one authenticated NexusLink todo brief.",
+        metadata: {
+          todo_id: "c757f88d-7062-4e72-939e-f6230cfcad7a",
+          launch_mode: "scoped",
+          launch_digest: "9d19e3e8f8b157f7fbc63f7dc789832a",
+        },
+      };
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "engineering-retired-alias",
+        clientRequestId: "engineering-retired-alias",
+        roleContext: retiredAlias,
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_role_contract_mismatch" } });
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "engineering-own-role-context",
+        clientRequestId: "engineering-own-role-context",
+        roleContext: { ...retiredAlias, role: "engineer", noBuiltinTools: true },
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_role_contract_mismatch" } });
+
+      // A conversation bound to the retired alias before this change is never resumed.
+      await db.update(vectorIngressConversations)
+        .set({ sessionRole: "implementation-worker" })
+        .where(eq(vectorIngressConversations.externalSessionId, base.externalSessionId));
+      await expect(service.addTurn({ ...base, clientRequestId: "engineering-legacy-alias-resume" }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_ingress_session_binding_mismatch" } });
+      await db.update(vectorIngressConversations)
+        .set({ sessionRole: "pi" })
+        .where(eq(vectorIngressConversations.externalSessionId, base.externalSessionId));
+
+      await expect(service.configureRuntime({
+        companyId,
+        agentId: engineeringAgentId,
+        externalSessionId: base.externalSessionId,
+        ownerId: base.ownerId,
+        installationId: base.installationId,
+        profileId: base.profileId,
+        model: "Other-Model",
+        thinking: "medium",
+      })).resolves.toMatchObject({ model: "Other-Model", thinking: "medium" });
+    });
+
+    it("never gives another engineering seat FunkyDev's pi alias, repository work, or runtime selection", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const plain = {
+        companyId,
+        agentId: engineeringSeatAgentId,
+        externalSessionId: "engineering-seat-chat",
+        ownerId: "vector-user:engineer-1",
+        installationId: "t480-engineering",
+        profileId: "engineering",
+        clientRequestId: "engineering-seat-chat-1",
+        body: "Status of the backend queue?",
+      };
+      await expect(service.addTurn(plain)).resolves.toMatchObject({ replayed: false });
+      await expect(service.status(plain)).resolves.toMatchObject({ sessionRole: null, repository: null });
+      const stored = await db.select({ sessionRole: vectorIngressConversations.sessionRole })
+        .from(vectorIngressConversations)
+        .where(eq(vectorIngressConversations.externalSessionId, plain.externalSessionId))
+        .then((rows) => rows[0]);
+      expect(stored).toEqual({ sessionRole: null });
+      await expect(service.addTurn({ ...plain, clientRequestId: "engineering-seat-chat-2", body: "And now?" }))
+        .resolves.toMatchObject({ replayed: false });
+      // A seat conversation relabelled as FunkyDev's alias is never resumed.
+      await db.update(vectorIngressConversations)
+        .set({ sessionRole: "pi" })
+        .where(eq(vectorIngressConversations.externalSessionId, plain.externalSessionId));
+      await expect(service.addTurn({ ...plain, clientRequestId: "engineering-seat-chat-3" }))
+        .rejects.toMatchObject({ status: 409, details: { code: "vector_ingress_session_binding_mismatch" } });
+
+      await expect(service.addTurn({
+        ...plain,
+        externalSessionId: "engineering-seat-todo",
+        clientRequestId: "engineering-seat-todo",
+        repositoryContext: { schemaVersion: 1 as const, repository: "renegadesw/vector" },
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_repository_contract_mismatch" } });
+      await expect(service.addTurn({
+        ...plain,
+        externalSessionId: "engineering-seat-runtime",
+        clientRequestId: "engineering-seat-runtime",
+        runtimeSelection: { model: "Qwen3.8-Flash", thinking: "high" as const },
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_runtime_selection_contract_mismatch" } });
+    });
+
+    it("fails standard persona turns closed on omission and provider widening", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const base = {
+        companyId,
+        agentId: standardAgentId,
+        ownerId: "vector-user:user-2",
+        installationId: "stecke1-standard",
+        profileId: "standard",
+        body: "Hello.",
+      };
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "standard-persona-missing",
+        clientRequestId: "standard-persona-missing-1",
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_persona_required" },
+      });
+      await expect(service.addTurn({
+        ...base,
+        externalSessionId: "standard-persona-model-drift",
+        clientRequestId: "standard-persona-model-drift-1",
+        personaContext: {
+          schemaVersion: 1,
+          personaId: "00000000-0000-0000-0000-000000000023",
+          personaName: "Sage",
+          personaVersion: "abcdef012345",
+          model: "other/unapproved-model",
+          noBuiltinTools: true,
+          systemPrompt: "Be a calm, precise collaborator.",
+        },
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "vector_persona_contract_mismatch" },
+      });
     });
 
     it("binds existing same-issue attachments and rejects foreign issue attachments", async () => {
@@ -740,12 +1727,85 @@ const support = await getEmbeddedPostgresTestSupport();
       ).rejects.toMatchObject({ status: 404 });
     });
 
+    it("binds status, events, cancel, branches, and legacy import to the exact owner", async () => {
+      const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
+      const personaContext = {
+        schemaVersion: 1 as const, personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const, systemPrompt: "Be a calm, precise collaborator.",
+      };
+      const shared = { companyId, agentId, installationId: "stecke1-standard", profileId: "standard", externalSessionId: "cross-owner-thread" };
+      const ownerA = { ...shared, ownerId: "cross-owner-a" };
+      const ownerB = { ...shared, ownerId: "cross-owner-b" };
+      const bindingOf = (owner: typeof ownerA) => ({
+        ownerSha256: vectorIngressOwnerSha256(owner),
+        externalSessionId: owner.externalSessionId,
+      });
+
+      const turnA = await service.addTurn({ ...ownerA, clientRequestId: "cross-owner-a-1", body: "Owner A only", personaContext });
+      expect(turnA.ownerBinding).toEqual(bindingOf(ownerA));
+      expect((await service.status(ownerA)).ownerBinding).toEqual(bindingOf(ownerA));
+      expect((await service.events(ownerA)).ownerBinding).toEqual(bindingOf(ownerA));
+
+      // Owner B names the same external session: A's conversation stays invisible.
+      await expect(service.status(ownerB)).rejects.toMatchObject({ status: 404 });
+      await expect(service.events(ownerB)).rejects.toMatchObject({ status: 404 });
+      await expect(service.events({ ...ownerB, turnId: turnA.turnId })).rejects.toMatchObject({ status: 404 });
+      await expect(service.cancel(ownerB)).rejects.toMatchObject({ status: 404 });
+      await expect(service.cancel({ ...ownerB, runId: turnA.runId! })).rejects.toMatchObject({ status: 404 });
+      expect(
+        await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, turnA.runId!)).then((rows) => rows[0]?.status),
+      ).toBe("queued");
+      for (const call of [
+        () => service.listBranches(ownerB),
+        () => service.forkBranch({ ...ownerB, entryId: "entry-1" }),
+        () => service.switchBranch({ ...ownerB, branchId: "11111111-1111-4111-8111-111111111111" }),
+      ]) {
+        await expect(call()).rejects.toMatchObject({ status: 404 });
+      }
+      // A reaches its own branch control, which refuses only because A's run
+      // is still queued.
+      await expect(service.listBranches(ownerA)).rejects.toMatchObject({
+        status: 409, details: { code: "vector_branch_turn_active" },
+      });
+
+      // B's turn on the same session ID opens B's own conversation, and its
+      // idempotency key never replays A's turn.
+      const turnB = await service.addTurn({ ...ownerB, clientRequestId: "cross-owner-a-1", body: "Owner B only", personaContext });
+      expect(turnB.replayed).toBe(false);
+      expect(turnB.issueId).not.toBe(turnA.issueId);
+      expect(turnB.ownerBinding).toEqual(bindingOf(ownerB));
+      expect((await service.status(ownerB)).issueId).toBe(turnB.issueId);
+      expect((await service.cancel(ownerA)).ownerBinding).toEqual(bindingOf(ownerA));
+      expect(
+        await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, turnB.runId!)).then((rows) => rows[0]?.status),
+      ).toBe("queued");
+
+      // A legacy session whose row names another owner is refused before import.
+      const importContext = vi.fn();
+      const importing = vectorIngressService(db, { heartbeat, legacyContextImporter: { importContext } });
+      await expect(importing.importLegacyPiContext({
+        ...ownerA, legacyService: "nexuslink-chat", legacyPiSessionId: "legacy-cross-owner",
+        legacyOwnerId: ownerB.ownerId,
+      })).rejects.toMatchObject({ status: 409, details: { code: "vector_legacy_context_owner_mismatch" } });
+      expect(importContext).not.toHaveBeenCalled();
+    });
+
     it("inventories only one owner and paginates without exposing internal IDs", async () => {
       const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
+      const personaContext = {
+        schemaVersion: 1 as const, personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true as const, systemPrompt: "Be a calm, precise collaborator.",
+      };
       const ownerA = "authenticated-owner-a";
       const ownerB = "authenticated-owner-b";
       const ownerScope = {
-        installationId: "vector-installation",
+        installationId: "stecke1-standard",
         profileId: "standard",
       };
       const baseTime = new Date("2026-09-25T19:00:00.000Z");
@@ -763,6 +1823,7 @@ const support = await getEmbeddedPostgresTestSupport();
           externalSessionId,
           clientRequestId: `inventory-a-${index}`,
           body: `Owner A ${index}`,
+          personaContext,
         });
         await db
           .update(vectorIngressConversations)
@@ -778,6 +1839,7 @@ const support = await getEmbeddedPostgresTestSupport();
         externalSessionId: "client-a",
         clientRequestId: "inventory-b-0",
         body: "Owner B",
+        personaContext,
       });
       expect(ownerBTurn.issueId).not.toBe(ownerASessions[0]?.issueId);
 
@@ -852,11 +1914,12 @@ const support = await getEmbeddedPostgresTestSupport();
 
     it("replays ordered multi-turn and multi-run history without leaking internal events", async () => {
       const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
       const scope = {
         companyId,
         agentId,
         ownerId: "transcript-owner",
-        installationId: "vector-installation",
+        installationId: "stecke1-standard",
         profileId: "standard",
         externalSessionId: "transcript-thread",
       };
@@ -864,6 +1927,11 @@ const support = await getEmbeddedPostgresTestSupport();
         ...scope,
         clientRequestId: "transcript-1",
         body: "First question",
+        personaContext: {
+          schemaVersion: 1, personaId: "00000000-0000-0000-0000-000000000023",
+          personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+          noBuiltinTools: true, systemPrompt: "Be a calm, precise collaborator.",
+        },
       });
       const second = await service.addTurn({
         ...scope,
@@ -1076,11 +2144,12 @@ const support = await getEmbeddedPostgresTestSupport();
 
     it("does not synthesize a terminal event for an incomplete run", async () => {
       const service = vectorIngressService(db, { heartbeat });
+      const agentId = standardAgentId;
       const scope = {
         companyId,
         agentId,
         ownerId: "incomplete-owner",
-        installationId: "vector-installation",
+        installationId: "stecke1-standard",
         profileId: "standard",
         externalSessionId: "incomplete-thread",
       };
@@ -1088,6 +2157,11 @@ const support = await getEmbeddedPostgresTestSupport();
         ...scope,
         clientRequestId: "incomplete-1",
         body: "Still running",
+        personaContext: {
+          schemaVersion: 1, personaId: "00000000-0000-0000-0000-000000000023",
+          personaName: "Sage", personaVersion: "abcdef012345", model: "router/Qwen3.8-Flash",
+          noBuiltinTools: true, systemPrompt: "Be a calm, precise collaborator.",
+        },
       });
       const result = await service.transcript(scope);
       expect(result.events.map((event) => event.eventType)).toEqual(["user_turn"]);

@@ -307,7 +307,7 @@ describeEmbeddedPostgres("issue create onboarding first-task routes", () => {
       .insert(instanceSettings)
       .values({ singletonKey: "default", general: {}, experimental: { enableFirstTaskPlanProposal: true } })
       .onConflictDoUpdate({
-        target: [instanceSettings.singletonKey],
+        target: [instanceSettings.vectorInstallationId, instanceSettings.singletonKey],
         set: { experimental: { enableFirstTaskPlanProposal: true } },
       });
 

@@ -105,6 +105,9 @@ function createApp(db: any, deploymentMode: "authenticated" | "local_trusted" = 
   app.post("/mcp/gateways/:gatewayPublicId", (req, res) => {
     res.json({ reachedGatewayProtocol: true, actorType: req.actor.type });
   });
+  app.all("/api/internal/vector/v1/tools/callback", (req, res) => {
+    res.json({ reachedVectorToolCallback: true, actorType: req.actor.type });
+  });
   app.get("/companies/:companyId/protected", (req, res) => {
     assertCompanyAccess(req, req.params.companyId);
     res.json({ ok: true });
@@ -217,6 +220,33 @@ describe("agent auth middleware", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ reachedGatewayProtocol: true });
+  });
+
+  it.each(["authenticated", "local_trusted"] as const)(
+    "leaves the Vector tool callback bearer for the callback route to verify (%s)",
+    async (deploymentMode) => {
+      const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+
+      const res = await request(createApp(db, deploymentMode))
+        .post("/api/internal/vector/v1/tools/callback")
+        .set("Authorization", "Bearer run_scoped_vector_tool_capability_token")
+        .send({ requestId: randomUUID(), tool: "memory_search", arguments: {} });
+
+      expect(res.status).toBe(200);
+      // No actor at all, not even the implicit local board.
+      expect(res.body).toEqual({ reachedVectorToolCallback: true, actorType: "none" });
+    },
+  );
+
+  it("authenticates every other method on the Vector tool callback path", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+
+    const res = await request(createApp(db, "authenticated"))
+      .get("/api/internal/vector/v1/tools/callback")
+      .set("Authorization", "Bearer run_scoped_vector_tool_capability_token");
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toContain("Agent token did not verify");
   });
 
   it("does not bypass actor authentication for lookalike MCP gateway paths", async () => {

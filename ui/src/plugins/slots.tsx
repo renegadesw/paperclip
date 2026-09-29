@@ -41,6 +41,7 @@ import { pluginsApi, type PluginUiContribution } from "@/api/plugins";
 import { authApi } from "@/api/auth";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
+import { paperclipPath } from "@/lib/base-path";
 import {
   PluginBridgeContext,
   type PluginHostContext,
@@ -250,7 +251,7 @@ function buildPluginModuleKey(contribution: PluginUiContribution): string {
 
 function buildPluginUiUrl(contribution: PluginUiContribution): string {
   const cacheHint = encodeURIComponent(contribution.updatedAt ?? contribution.version ?? "0");
-  return `/_plugins/${encodeURIComponent(contribution.pluginId)}/ui/${contribution.uiEntryFile}?v=${cacheHint}`;
+  return `${paperclipPath(`/_plugins/${encodeURIComponent(contribution.pluginId)}/ui/${contribution.uiEntryFile}`)}?v=${cacheHint}`;
 }
 
 /**

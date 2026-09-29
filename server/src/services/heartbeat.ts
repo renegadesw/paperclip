@@ -49,11 +49,14 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import { agentService } from "./agents.js";
 import { normalizeLegacyRunnerProvider } from "@paperclipai/adapter-utils";
+import { readVectorLegacyPiContextMarker } from "@paperclipai/adapter-pi-local/server";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
+import { getStorageService, type StorageService } from "../storage/index.js";
+import { hydrateVectorIngressImages } from "./vector-ingress-image-hydration.js";
 import {
   and,
   asc,
@@ -161,6 +164,12 @@ import {
 } from "../instrumentation.js";
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
+import { prepareActiveVectorToolRuntimeAccess } from "./vector-tool-authority.js";
+import { prepareActiveVectorBoardRunAuthority } from "./vector-board-run-authority.js";
+import {
+  hasActiveVectorProviderAuthorityBridge,
+  prepareActiveVectorProviderRuntimeAccess,
+} from "./vector-provider-authority.js";
 import { logger } from "../middleware/logger.js";
 import {
   createGitRemoteAuthProvider,
@@ -9166,6 +9175,8 @@ export type HeartbeatEnvironmentRuntime = ReturnType<
 >;
 
 export interface HeartbeatServiceOptions {
+  /** Storage seam for bounded, ephemeral Vector image hydration. */
+  vectorImageStorage?: StorageService;
   /** Test seam before the atomic native runtime handoff. */
   beforeNativeRuntimeSelection?: (runId: string) => Promise<void>;
   /** Test seam immediately before the durable chat-control admission check. */
@@ -21055,6 +21066,15 @@ export function heartbeatService(
       const configuredModel =
         readConfiguredModelFromAdapterConfig(runtimeConfig);
       const wakeSessionResetReason = describeSessionResetReason(context);
+      const legacyContextRaw = taskSession?.sessionParamsJson?.vectorLegacyPiContext;
+      const legacyContextMarker = readVectorLegacyPiContextMarker(
+        taskSession?.sessionParamsJson ?? null,
+      );
+      if (legacyContextRaw !== undefined && !legacyContextMarker) {
+        throw conflict("Imported Vector legacy Pi context marker is invalid", {
+          code: "vector_legacy_context_invalid",
+        });
+      }
       const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
         hasTaskSession: taskSession != null,
         configuredModel,
@@ -21063,7 +21083,8 @@ export function heartbeatService(
         configMetadata: sessionConfigMetadata,
         wakeResetReason: wakeSessionResetReason,
         preserveLegacySessionWithoutConfigMetadata:
-          acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
+          (acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision) ||
+          legacyContextMarker !== null,
       });
       const resetTaskSession =
         shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;
@@ -23590,8 +23611,49 @@ export function heartbeatService(
         const runGoalControlRequestId = readNonEmptyString(
           context.goalControlRequestId,
         );
+        // A persisted pending marker means this run was admitted with Vector
+        // tools. Await the memory-only grant bind before either provider path
+        // can start; after restart the marker survives but the raw handle does
+        // not, so this throws and the run fails instead of silently losing its
+        // tool boundary.
         try {
+          const vectorProviderAuthorityRequired = hasActiveVectorProviderAuthorityBridge() &&
+            typeof runtimeConfig.model === "string" &&
+            runtimeConfig.model.startsWith("router/");
+          // A board-started run (task, assignment, routine Run now, board
+          // chat) has no Vector ingress handle. On the engineering operator
+          // host Vector OS may grant it run-scoped provider and tool
+          // authority; a refusal fails the run exactly as before.
+          await prepareActiveVectorBoardRunAuthority({
+            runId: run.id,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issueRef?.id ?? null,
+            toolPending: context.vectorToolAuthorityPending,
+            providerPending: context.vectorProviderAuthorityPending,
+            providerBound: context.vectorProviderAuthority,
+            required: vectorProviderAuthorityRequired,
+          });
+          const vectorToolAuthority = await prepareActiveVectorToolRuntimeAccess({
+            runId: run.id,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issueRef?.id ?? null,
+            pending: context.vectorToolAuthorityPending,
+          });
+          const vectorProviderAuthority = await prepareActiveVectorProviderRuntimeAccess({
+            runId: run.id,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issueRef?.id ?? null,
+            pending: context.vectorProviderAuthorityPending,
+            bound: context.vectorProviderAuthority,
+            required: vectorProviderAuthorityRequired,
+          });
           if (nativeRuntimeResolution.kind === "native") {
+            if (vectorToolAuthority || vectorProviderAuthority) {
+              throw new Error("Vector runtime authority requires an adapter runtime");
+            }
             if (!nativeExecution || !nativeRunnerInstanceId)
               throw new Error("native_runtime_selection_not_persisted");
             const expectedNativeMcpDigest =
@@ -23858,6 +23920,28 @@ export function heartbeatService(
                   }
                 : {}),
             };
+            const vectorImageAttachmentIds = Array.isArray(context.vectorIngressImageAttachmentIds)
+              ? context.vectorIngressImageAttachmentIds.filter((value): value is string => typeof value === "string")
+              : [];
+            if (vectorImageAttachmentIds.length > 0) {
+              // Runs may be claimed by the scheduler/recovery heartbeat rather
+              // than the ingress-local instance. Resolve the same configured
+              // storage authority at execution time unless a test seam was
+              // explicitly supplied.
+              const imageStorage = options.vectorImageStorage ?? getStorageService();
+              const imageCommentId = readNonEmptyString(context.wakeCommentId) ?? readNonEmptyString(context.commentId);
+              if (!issueRef || !imageCommentId) {
+                throw new Error("Vector image hydration authority is incomplete");
+              }
+              adapterContext.vectorIngressImages = await hydrateVectorIngressImages({
+                db,
+                storage: imageStorage,
+                companyId: agent.companyId,
+                issueId: issueRef.id,
+                commentId: imageCommentId,
+                attachmentIds: vectorImageAttachmentIds,
+              });
+            }
             const runtimeTools = createAdapterRuntimeToolAccess({
               agentId: agent.id,
               companyId: agent.companyId,
@@ -23932,6 +24016,8 @@ export function heartbeatService(
                       : undefined,
                     runtimeMcp,
                     runtimeTools,
+                    vectorToolAuthority: vectorToolAuthority ?? undefined,
+                    vectorProviderAuthority: vectorProviderAuthority ?? undefined,
                     onLog,
                     onMeta: onAdapterMeta,
                     onEvent: onAdapterEvent,

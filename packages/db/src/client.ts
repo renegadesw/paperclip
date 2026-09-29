@@ -159,6 +159,8 @@ export type MigrationState =
     };
 
 export interface DatabaseClientOptions {
+  /** Fixed Vector installation context, applied to every physical connection. */
+  vectorRuntimeScope?: { companyId: string; installationId: string };
   /**
    * Keeps the upstream standalone layout by default. The Vector deployment
    * profile places all unqualified Paperclip relations in the existing `llm`
@@ -286,6 +288,16 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
   if (options.connectTimeoutSeconds !== undefined) driverOptions.connect_timeout = options.connectTimeoutSeconds;
   if (options.maxLifetimeSeconds !== undefined) driverOptions.max_lifetime = options.maxLifetimeSeconds;
   const connection: Record<string, string> = {};
+  if (options.vectorRuntimeScope) {
+    const { companyId, installationId } = options.vectorRuntimeScope;
+    if (options.deploymentProfile !== "vector-embedded" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(companyId) ||
+        !/^[a-z][a-z0-9-]{1,63}$/.test(installationId)) {
+      throw new Error("Invalid vector-embedded database runtime scope");
+    }
+    connection["paperclip.company_id"] = companyId;
+    connection["paperclip.installation_id"] = installationId;
+  }
   if (options.applicationName !== undefined) {
     connection.application_name = options.applicationName;
   }

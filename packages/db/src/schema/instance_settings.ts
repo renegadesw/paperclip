@@ -1,9 +1,12 @@
 import { pgTable, uuid, text, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 import { environments } from "./environments.js";
+import { sql } from "drizzle-orm";
 
 export const instanceSettings = pgTable(
   "instance_settings",
   {
+    vectorInstallationId: text("vector_installation_id").notNull()
+      .default(sql`coalesce(current_setting('paperclip.installation_id', true), '')`),
     id: uuid("id").primaryKey().defaultRandom(),
     singletonKey: text("singleton_key").notNull().default("default"),
     defaultEnvironmentId: uuid("default_environment_id").references(() => environments.id, { onDelete: "set null" }),
@@ -13,6 +16,6 @@ export const instanceSettings = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    singletonKeyIdx: uniqueIndex("instance_settings_singleton_key_idx").on(table.singletonKey),
+    singletonKeyIdx: uniqueIndex("instance_settings_singleton_key_idx").on(table.vectorInstallationId, table.singletonKey),
   }),
 );

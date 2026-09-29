@@ -1542,6 +1542,7 @@ fn encode_plain_message(
     Ok(Message::Text(text.into()))
 }
 
+#[cfg(test)]
 fn receive_plain(
     socket: &mut (impl WebSocketMessages + ?Sized),
     max_frame_bytes: usize,

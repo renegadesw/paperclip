@@ -1,3 +1,5 @@
+import { paperclipApiPath } from "@/lib/base-path";
+
 /**
  * Per-task composer draft persistence, shared by the chat composers.
  *
@@ -160,7 +162,7 @@ function draftAttachments(value: unknown): ComposerDraftAttachment[] {
       typeof row.inline !== "boolean"
     )
       continue;
-    if (row.contentPath !== `/api/attachments/${row.attachmentId}/content`)
+    if (row.contentPath !== paperclipApiPath(`/attachments/${row.attachmentId}/content`))
       continue;
     if (
       row.size !== undefined &&

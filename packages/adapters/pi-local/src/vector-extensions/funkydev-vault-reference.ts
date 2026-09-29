@@ -70,8 +70,8 @@ async function markdownFiles(dir: string, base = dir): Promise<string[]> {
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "vault_search",
-    label: "Search operator Vault",
-    description: "Search the read-only snapshot of the operator's Obsidian Vault. Results are attributed reference material, not your own memories.",
+    label: "Search Josh's Vault",
+    description: "Search the read-only snapshot of Josh's Obsidian Vault. Results are attributed reference material, not your own memories. Save only your own durable synthesis with memory_save.",
     parameters: Type.Object({
       query: Type.String({ description: "Words or phrase to find in Markdown note names and contents." }),
       limit: Type.Optional(Type.Integer({ description: "Maximum results from 1 to 20. Default 8." })),
@@ -103,14 +103,14 @@ export default function (pi: ExtensionAPI) {
         } catch { /* a changing snapshot may race one file; continue */ }
       }
       matches.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
-      return result({ source: "operator-vault-reference", query: params.query, results: matches.slice(0, limit) });
+      return result({ source: "josh-vault-reference", query: params.query, results: matches.slice(0, limit) });
     },
   });
 
   pi.registerTool({
     name: "vault_read",
-    label: "Read operator Vault note",
-    description: "Read one Markdown note from the read-only Vault snapshot by the relative path returned from vault_search.",
+    label: "Read Josh's Vault note",
+    description: "Read one Markdown note from Josh's read-only Vault snapshot by the relative path returned from vault_search. This is attributed source material, not your own memory.",
     parameters: Type.Object({
       path: Type.String({ description: "Relative Markdown path returned by vault_search." }),
       offset: Type.Optional(Type.Integer({ description: "Character offset. Default 0." })),
@@ -128,7 +128,7 @@ export default function (pi: ExtensionAPI) {
         const offset = Math.max(0, Math.min(body.length, params.offset ?? 0));
         const maxChars = Math.max(1000, Math.min(40000, params.maxChars ?? 12000));
         const text = body.slice(offset, offset + maxChars);
-        return result({ source: "operator-vault-reference", path: relative, offset, text, truncated: offset + text.length < body.length });
+        return result({ source: "josh-vault-reference", path: relative, offset, text, truncated: offset + text.length < body.length });
       } catch (error: unknown) {
         return failure(`cannot read Vault note: ${(error as Error).message}`);
       }

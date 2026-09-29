@@ -9,6 +9,7 @@ import { AsciiArtAnimation } from "@/components/AsciiArtAnimation";
 import { PaperclipLoading } from "@/components/AnimatedPaperclipIcon";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { PaperclipLockup } from "../components/PaperclipLockup";
+import { paperclipApiPath } from "@/lib/base-path";
 
 type AuthMode = "sign_in" | "sign_up";
 
@@ -104,7 +105,7 @@ export function AuthPage() {
           <form
             className="mt-6 space-y-4"
             method="post"
-            action={mode === "sign_up" ? "/api/auth/sign-up/email" : "/api/auth/sign-in/email"}
+            action={paperclipApiPath(mode === "sign_up" ? "/auth/sign-up/email" : "/auth/sign-in/email")}
             onSubmit={(event) => {
               event.preventDefault();
               if (mutation.isPending) return;

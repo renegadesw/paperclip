@@ -70,7 +70,7 @@ describeEmbeddedPostgres("companyService", () => {
     await tempDb?.cleanup();
   });
 
-  it("retries generated issue prefixes when Drizzle wraps the unique constraint error", async () => {
+  it("retries generated issue prefixes without swallowing unrelated constraints", async () => {
     await db.insert(companies).values({
       name: "Aron Existing",
       issuePrefix: "ARO",
@@ -84,6 +84,17 @@ describeEmbeddedPostgres("companyService", () => {
 
     const rows = await db.select({ issuePrefix: companies.issuePrefix }).from(companies);
     expect(rows.map((row) => row.issuePrefix).sort()).toEqual(["ARO", "AROA"]);
+  });
+
+  it("allocates colliding installation prefixes inside an outer transaction", async () => {
+    await db.transaction(async (tx) => {
+      const service = companyService(tx as unknown as typeof db);
+      const first = await service.create({ name: "Vector Engineering" });
+      const second = await service.create({ name: "Vector Standard Chat" });
+      expect(first.issuePrefix).toBe("VEC");
+      expect(second.issuePrefix).toBe("VECA");
+    });
+    expect(await db.select({ id: companies.id }).from(companies)).toHaveLength(2);
   });
 
   it("does not auto-provision bundled built-in agents for a freshly created company", async () => {

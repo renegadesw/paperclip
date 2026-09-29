@@ -176,11 +176,28 @@ import { apiCompression } from "./middleware/api-compression.js";
 import { chatWebhookBodyParser } from "./middleware/chat-webhook-body.js";
 import { createChatWebhookDiagnostics } from "./services/chat-webhook-diagnostics.js";
 import { vectorIngressService } from "./services/vector-ingress.js";
+import { vectorLegacyPiContextImporter } from "./services/vector-legacy-pi-context.js";
 import {
   resolveVectorIngressAuthConfig,
   vectorIngressRoutes,
 } from "./routes/vector-ingress.js";
 import type { VectorRuntimeScope } from "./services/vector-runtime-scope.js";
+import {
+  resolveVectorToolAuthorityConfig,
+  setActiveVectorToolAuthorityBridge,
+  VectorToolAuthorityBridge,
+} from "./services/vector-tool-authority.js";
+import {
+  resolveVectorProviderAuthorityConfig,
+  setActiveVectorProviderAuthorityBridge,
+  VectorProviderAuthorityBridge,
+} from "./services/vector-provider-authority.js";
+import {
+  dbActiveBoardRun,
+  resolveVectorBoardRunAuthorityConfig,
+  setActiveVectorBoardRunAuthority,
+  VectorBoardRunAuthority,
+} from "./services/vector-board-run-authority.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -527,6 +544,10 @@ export async function createApp(
       verify: captureRawBody,
     }),
   );
+  app.use(
+    "/api/internal/vector/v1",
+    express.json({ limit: "16mb", verify: captureRawBody }),
+  );
   // Chat providers sign the exact request bytes. Capture every webhook media
   // type before the global JSON parser so JSON events and form-encoded action
   // callbacks are verified against the provider's original body.
@@ -583,12 +604,53 @@ export async function createApp(
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
   const connectionIntentHeartbeat = heartbeatService(db, {
     pluginWorkerManager: workerManager,
+    vectorImageStorage: opts.storageService,
   });
   const vectorIngressAuth = resolveVectorIngressAuthConfig(
     process.env,
     opts.vectorRuntimeScope ?? null,
   );
+  const vectorToolAuthorityConfig = resolveVectorToolAuthorityConfig(process.env);
+  const vectorProviderAuthorityConfig = resolveVectorProviderAuthorityConfig(process.env);
+  const vectorBoardRunAuthorityConfig = resolveVectorBoardRunAuthorityConfig(
+    process.env,
+    vectorProviderAuthorityConfig,
+  );
+  setActiveVectorToolAuthorityBridge(null);
+  setActiveVectorProviderAuthorityBridge(null);
+  setActiveVectorBoardRunAuthority(null);
+  if ((vectorToolAuthorityConfig || vectorProviderAuthorityConfig) && !vectorIngressAuth) {
+    throw new Error("Vector runtime authority requires signed Vector ingress");
+  }
   if (vectorIngressAuth) {
+    const vectorToolAuthority = vectorToolAuthorityConfig
+      ? new VectorToolAuthorityBridge(db, vectorToolAuthorityConfig)
+      : null;
+    const vectorProviderAuthority = vectorProviderAuthorityConfig
+      ? new VectorProviderAuthorityBridge(db, vectorProviderAuthorityConfig)
+      : null;
+    const vectorLegacySessionRoot =
+      process.env.PAPERCLIP_VECTOR_LEGACY_SESSION_ROOT?.trim() || null;
+    if (vectorLegacySessionRoot && !path.isAbsolute(vectorLegacySessionRoot)) {
+      throw new Error("PAPERCLIP_VECTOR_LEGACY_SESSION_ROOT must be absolute");
+    }
+    const vectorLegacyContextImporter = vectorLegacySessionRoot
+      ? vectorLegacyPiContextImporter(db, {
+          sourceRoot: vectorLegacySessionRoot,
+          ingressSecret: vectorIngressAuth.secret,
+        })
+      : null;
+    setActiveVectorToolAuthorityBridge(vectorToolAuthority);
+    setActiveVectorProviderAuthorityBridge(vectorProviderAuthority);
+    setActiveVectorBoardRunAuthority(
+      vectorBoardRunAuthorityConfig && vectorProviderAuthority
+        ? new VectorBoardRunAuthority(vectorBoardRunAuthorityConfig, {
+            activeRun: dbActiveBoardRun(db),
+            provider: vectorProviderAuthority,
+            tool: vectorToolAuthority,
+          })
+        : null,
+    );
     // This service-to-service boundary has its own exact-body HMAC and direct
     // loopback-peer check. Keep it outside the board mutation router: Vector OS
     // is neither a board session nor an agent API-key principal.
@@ -599,7 +661,12 @@ export async function createApp(
         service: vectorIngressService(db, {
           heartbeat: connectionIntentHeartbeat,
           responsibleUserId: vectorIngressAuth.responsibleUserId,
+          toolAuthority: vectorToolAuthority ?? undefined,
+          providerAuthority: vectorProviderAuthority ?? undefined,
+          legacyContextImporter: vectorLegacyContextImporter ?? undefined,
+          storage: opts.storageService,
         }),
+        toolAuthority: vectorToolAuthority ?? undefined,
       }),
     );
   }

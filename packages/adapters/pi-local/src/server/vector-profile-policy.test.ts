@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   FUNKYDEV_CAPABILITY_INVENTORY,
+  isVectorPiInstallation,
   prepareVectorPiProfilePolicy,
   vectorPiProfileIsRestricted,
 } from "./vector-profile-policy.js";
@@ -31,6 +32,27 @@ describe("Vector Pi profile isolation", () => {
       expect(vectorPiProfileIsRestricted(profile)).toBe(false);
     },
   );
+
+  it.each([undefined, "", "  "])(
+    "fails closed for a missing profile %s inside a Vector installation",
+    (profile) => {
+      expect(vectorPiProfileIsRestricted(profile, { vectorInstallation: true })).toBe(true);
+      expect(vectorPiProfileIsRestricted("engineering", { vectorInstallation: true })).toBe(false);
+    },
+  );
+
+  it("detects a Vector installation from its installation or company identity", () => {
+    expect(isVectorPiInstallation({})).toBe(false);
+    expect(isVectorPiInstallation({ PAPERCLIP_VECTOR_INSTALLATION_ID: "stecke1-standard" })).toBe(true);
+    expect(isVectorPiInstallation({ PAPERCLIP_VECTOR_COMPANY_ID: "company" })).toBe(true);
+    expect(isVectorPiInstallation({ PAPERCLIP_VECTOR_INSTALLATION_ID: "  " })).toBe(false);
+  });
+
+  it("restricts a missing profile to no tools when preparing a Vector installation's policy", async () => {
+    const policy = await prepareVectorPiProfilePolicy({ profile: "", config: {}, vectorInstallation: true });
+    expect(policy.restricted).toBe(true);
+    expect(policy.cliArgs).toContain("--no-tools");
+  });
 
   it("disables ambient resources and all tools while preserving an explicit skill seam", async () => {
     const policy = await prepareVectorPiProfilePolicy({
@@ -112,6 +134,136 @@ describe("Vector Pi profile isolation", () => {
       profile: "standard",
       config: { [field]: value },
     })).rejects.toThrow(`runtime resource field "${field}"`);
+  });
+
+  describe("release-owned instructions file", () => {
+    // Mirrors the Vector release layout: releases/<id>/runtime/bin/pi and
+    // releases/<id>/paperclip/profile-assets/<profile>/<agent>/AGENTS.md,
+    // with releases/current -> <id>.
+    async function releaseTree() {
+      const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-vector-release-")));
+      cleanupPaths.add(root);
+      const release = path.join(root, "releases", "r1");
+      const current = path.join(root, "releases", "current");
+      await fs.mkdir(path.join(release, "runtime", "bin"), { recursive: true });
+      await fs.writeFile(path.join(release, "runtime", "bin", "pi"), "#!/bin/sh\n");
+      for (const profile of ["standard", "staging"]) {
+        const dir = path.join(release, "paperclip", "profile-assets", profile, `${profile}-agent`);
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, "AGENTS.md"), `# ${profile}\n`);
+      }
+      await fs.symlink(release, current);
+      const outside = path.join(root, "outside.md");
+      await fs.writeFile(outside, "# not release-owned\n");
+      return {
+        root,
+        release,
+        current,
+        outside,
+        piCommand: (base: string) => path.join(base, "runtime", "bin", "pi"),
+        asset: (base: string, profile = "standard") =>
+          path.join(base, "paperclip", "profile-assets", profile, `${profile}-agent`, "AGENTS.md"),
+      };
+    }
+
+    async function prepare(profile: string, instructionsFilePath: unknown, deploymentCommand: string) {
+      return prepareVectorPiProfilePolicy({
+        profile,
+        config: { instructionsFilePath },
+        command: deploymentCommand,
+        deploymentCommand,
+      });
+    }
+
+    it("admits the release-owned profile asset and returns its real path", async () => {
+      const tree = await releaseTree();
+      const policy = await prepare("standard", tree.asset(tree.release), tree.piCommand(tree.release));
+      expect(policy.restricted).toBe(true);
+      expect(policy.instructionsFilePath).toBe(tree.asset(tree.release));
+      // Every other Pi resource stays disabled.
+      expect(policy.cliArgs).toEqual([
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--no-approve",
+        "--no-tools",
+      ]);
+    });
+
+    it.each([
+      ["provisioner writes current, deployment pins current", "current", "current"],
+      ["provisioner writes current, deployment pins the release", "current", "release"],
+      ["provisioner writes the release, deployment pins current", "release", "current"],
+    ] as const)("accepts the releases/current symlink form: %s", async (_label, assetBase, commandBase) => {
+      const tree = await releaseTree();
+      const policy = await prepare("staging", tree.asset(tree[assetBase], "staging"), tree.piCommand(tree[commandBase]));
+      expect(policy.instructionsFilePath).toBe(tree.asset(tree.release, "staging"));
+    });
+
+    it("rejects a file outside the release", async () => {
+      const tree = await releaseTree();
+      await expect(prepare("standard", tree.outside, tree.piCommand(tree.release)))
+        .rejects.toThrow(/forbids Pi runtime resource field "instructionsFilePath" \(the file is outside/);
+    });
+
+    it("rejects a `..` escape out of the profile assets", async () => {
+      const tree = await releaseTree();
+      const escape = `${path.join(tree.release, "paperclip", "profile-assets", "standard")}/../../../../../outside.md`;
+      await expect(prepare("standard", escape, tree.piCommand(tree.release)))
+        .rejects.toThrow("outside the deployment-owned release profile assets");
+    });
+
+    it("rejects a symlink inside the profile assets that escapes them", async () => {
+      const tree = await releaseTree();
+      const link = path.join(tree.release, "paperclip", "profile-assets", "standard", "standard-agent", "LINK.md");
+      await fs.symlink(tree.outside, link);
+      await expect(prepare("standard", link, tree.piCommand(tree.release)))
+        .rejects.toThrow("outside the deployment-owned release profile assets");
+    });
+
+    it("rejects a non-file inside the profile assets", async () => {
+      const tree = await releaseTree();
+      const dir = path.dirname(tree.asset(tree.release));
+      await expect(prepare("standard", dir, tree.piCommand(tree.release))).rejects.toThrow("not a regular file");
+    });
+
+    it("rejects another profile's release assets", async () => {
+      const tree = await releaseTree();
+      await expect(prepare("standard", tree.asset(tree.release, "staging"), tree.piCommand(tree.release)))
+        .rejects.toThrow("outside the deployment-owned release profile assets");
+    });
+
+    it("rejects a missing file, a relative path and a non-string value", async () => {
+      const tree = await releaseTree();
+      const command = tree.piCommand(tree.release);
+      await expect(prepare("standard", path.join(path.dirname(tree.asset(tree.release)), "MISSING.md"), command))
+        .rejects.toThrow("the file does not exist");
+      await expect(prepare("standard", "paperclip/profile-assets/standard/standard-agent/AGENTS.md", command))
+        .rejects.toThrow("requires an absolute path");
+      await expect(prepare("standard", ["/etc/passwd"], command)).rejects.toThrow("requires an absolute path");
+    });
+
+    it("rejects when the deployment Pi command identifies no release root", async () => {
+      const tree = await releaseTree();
+      const asset = tree.asset(tree.release);
+      await expect(prepareVectorPiProfilePolicy({ profile: "standard", config: { instructionsFilePath: asset } }))
+        .rejects.toThrow("identifies no release root");
+      const bare = path.join(tree.release, "pi");
+      await expect(prepare("standard", asset, bare)).rejects.toThrow("identifies no release root");
+    });
+
+    it("keeps every other restricted resource field rejected alongside an admitted file", async () => {
+      const tree = await releaseTree();
+      const command = tree.piCommand(tree.release);
+      await expect(prepareVectorPiProfilePolicy({
+        profile: "standard",
+        config: { instructionsFilePath: tree.asset(tree.release), skills: ["./evil-skill"] },
+        command,
+        deploymentCommand: command,
+      })).rejects.toThrow('runtime resource field "skills"');
+    });
   });
 
   it.each([
@@ -209,14 +361,16 @@ describe("Vector Pi profile isolation", () => {
     })).rejects.toThrow("forbids packaged Pi extensions with filesystem or shell authority");
   });
 
-  it("records callback-bound legacy tools as blocked rather than claiming name-only parity", () => {
+  it("records callback-bound tools by their implemented authority parity", () => {
     const statuses = new Map(FUNKYDEV_CAPABILITY_INVENTORY.map((entry) => [entry.capability, entry.status]));
     expect(statuses.get("vault-reference")).toBe("ported");
+    expect(statuses.get("voice-marker")).toBe("ported");
     expect(statuses.get("pi-builtins")).toBe("native");
-    expect(statuses.get("operator-question")).toBe("blocked");
-    expect(statuses.get("todos")).toBe("blocked");
-    expect(statuses.get("github-broker")).toBe("blocked");
-    expect(statuses.get("personal-memory")).toBe("blocked");
+    expect(statuses.get("operator-question")).toBe("ported");
+    expect(statuses.get("todos")).toBe("ported");
+    expect(statuses.get("github")).toBe("external");
+    expect(statuses.has("github-broker")).toBe(false);
+    expect(statuses.get("personal-memory")).toBe("ported");
     expect(statuses.get("vector-os-mcp")).toBe("blocked");
     expect(statuses.get("rctl")).toBe("external");
   });

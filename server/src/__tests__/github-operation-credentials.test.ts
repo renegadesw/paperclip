@@ -593,6 +593,71 @@ const support = await getEmbeddedPostgresTestSupport();
         env: {},
       });
     });
+    it("exports a GitHub App installation (bot) grant as the agent's dedicated identity", async () => {
+      const input = await seed();
+      await grant(input, "A");
+      const bot = await grant(input, "robot", true);
+      // A freshly minted installation token has just under an hour left; the
+      // export window (45 min) must not force a refresh on every operation.
+      await db
+        .update(connectionGrants)
+        .set({
+          providerTenant: {
+            name: "renegade-agents[bot]",
+            oauth: {
+              strategy: "paperclip_cloud_connector",
+              accessTokenExpiresAt: new Date(Date.now() + 55 * 60_000).toISOString(),
+              refreshedAt: new Date().toISOString(),
+              scopes: [],
+              tokenType: "bearer",
+            },
+            github: {
+              userId: "900001",
+              login: "renegade-agents[bot]",
+              installationCount: 1,
+              repositoryCount: 28,
+              repositorySelection: "all",
+              installationIds: ["155009613"],
+              installationOwnerLogins: ["renegadesw"],
+              appSlug: "renegade-agents",
+              tokenKind: "installation",
+            },
+          },
+        })
+        .where(eq(connectionGrants.id, bot.id));
+      const result = await resolveGitHubOperationCredentials(db, input);
+      expect(result).toMatchObject({
+        status: "available",
+        source: "dedicated",
+        login: "renegade-agents[bot]",
+        grantId: bot.id,
+        connectionId: bot.connectionId,
+      });
+      expect(result.env.GH_TOKEN).toBe("test-dedicated-token");
+      expect(result.env.GIT_AUTHOR_EMAIL).toBe(
+        "900001+renegade-agents[bot]@users.noreply.github.com",
+      );
+      const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+        agentId: input.agentId,
+        responsibleUserId: "A",
+        allowStandingDelegation: false,
+      });
+      expect(selection).toMatchObject({ configured: true, identitySource: "dedicated" });
+      expect(selection.grant?.id).toBe(bot.id);
+      const connections = await db
+        .select()
+        .from(toolConnections)
+        .where(eq(toolConnections.companyId, input.companyId));
+      const visible = await filterResolvedGitHubConnectionsForRun({
+        db,
+        companyId: input.companyId,
+        agentId: input.agentId,
+        responsibleUserId: "A",
+        connections,
+      });
+      // The run keeps the bot's hosted-MCP connection and drops the person's.
+      expect(visible.map((connection) => connection.id)).toEqual([bot.connectionId]);
+    });
     it("does not resolve the company default person's GitHub", async () => {
       const input = await seed();
       await grant(input, "A");

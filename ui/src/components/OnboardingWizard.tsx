@@ -82,6 +82,7 @@ import {
 } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { cn } from "../lib/utils";
+import { paperclipPath } from "@/lib/base-path";
 import {
   extractModelName,
   extractProviderIdWithFallback
@@ -266,7 +267,7 @@ function ModelSourceMark({
   if (Inline) return <Inline className="size-full" />;
   const brand = MODEL_SOURCE_BRAND_MARKS[type];
   if (!brand) return <Fallback className="size-full" />;
-  return <img src={brand} alt="" className="size-full" />;
+  return <img src={paperclipPath(brand)} alt="" className="size-full" />;
 }
 
 // Exported so tests write/read the exact key the component uses, instead of

@@ -273,6 +273,12 @@ export interface PreparedAdapterExecutionTargetRuntime {
 export interface AdapterExecutionTargetProcessOptions {
   cwd: string;
   env: Record<string, string>;
+  /**
+   * Local execution only. Set false when the caller has already projected a
+   * closed child environment and inheriting the server process would widen
+   * that security boundary.
+   */
+  inheritProcessEnv?: boolean;
   stdin?: string;
   timeoutSec: number;
   graceSec: number;
@@ -914,6 +920,7 @@ export async function runAdapterExecutionTargetProcess(
   return await runChildProcess(runId, command, args, {
     cwd: options.cwd,
     env,
+    inheritProcessEnv: options.inheritProcessEnv,
     stdin: options.stdin,
     timeoutSec: options.timeoutSec,
     graceSec: options.graceSec,

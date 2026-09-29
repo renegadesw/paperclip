@@ -1,6 +1,10 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
+#[cfg(any(target_os = "macos", test))]
+use std::fs;
+use std::fs::File;
+#[cfg(target_os = "macos")]
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -706,8 +710,8 @@ impl SupervisedProcess {
     ) -> Result<Self, LocalRunnerError> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let mut inherited = launch.inherited_command()?;
-            let mut result = Self::spawn_command(
+            let inherited = launch.inherited_command()?;
+            let result = Self::spawn_command(
                 &inherited.program,
                 &inherited.args,
                 shutdown_grace,
@@ -719,12 +723,21 @@ impl SupervisedProcess {
                 None,
             );
             #[cfg(target_os = "macos")]
-            if let Ok(process) = result.as_mut() {
-                process._temporary_executables =
-                    std::mem::take(&mut inherited.temporary_executables);
+            {
+                let mut inherited = inherited;
+                let mut result = result;
+                if let Ok(process) = result.as_mut() {
+                    process._temporary_executables =
+                        std::mem::take(&mut inherited.temporary_executables);
+                }
+                drop(inherited);
+                result
             }
-            drop(inherited);
-            result
+            #[cfg(target_os = "linux")]
+            {
+                drop(inherited);
+                result
+            }
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {

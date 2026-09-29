@@ -9,6 +9,11 @@ export type VectorPiProfilePolicy = {
   discoveryCliArgs: string[];
   useBundledPaperclipSkillsOnly: boolean;
   additionalToolNames: string[];
+  /**
+   * Restricted profiles only: the real path of the admitted, deployment-owned
+   * release instructions file. Execute reads this path, never the raw config.
+   */
+  instructionsFilePath?: string;
 };
 
 type PackagedExtension = {
@@ -16,6 +21,7 @@ type PackagedExtension = {
   path: string;
   sha256: string;
   tools: string[];
+  delivery: "local" | "callback";
   permissions: {
     filesystem: boolean;
     shell: boolean;
@@ -32,7 +38,8 @@ export type FunkyDevCapability = {
 };
 
 /**
- * Audited against vector-os/agents' pinative source on 2026-09-25.
+ * Audited against vector-os/agents' pinative source on 2026-09-26; the
+ * model-facing definitions are pinned by funkydev-legacy-tool-parity.test.ts.
  *
  * Keep blocked entries visible.  A matching tool name is not parity when its
  * run-scoped identity, callback, or frontend consumer still belongs to the
@@ -52,32 +59,32 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
   {
     capability: "operator-question",
     tools: ["ask_user"],
-    status: "blocked",
-    dependency: "Paperclip must route Pi extension_ui_request/response over the Vector chat continuation contract.",
+    status: "ported",
+    dependency: "Uses the run-scoped Vector callback authority and durable llm.paperclip_questions continuation state.",
   },
   {
     capability: "todos",
     tools: ["todo_add", "todo_list", "todo_update", "todo_mark_done"],
-    status: "blocked",
-    dependency: "The current tools call legacy /v1/todos endpoints with a legacy session token.",
+    status: "ported",
+    dependency: "Uses the run-scoped Vector callback authority and durable llm.paperclip_todos state.",
   },
   {
-    capability: "github-broker",
-    tools: ["github_read", "github_manage", "github_api", "github_repo"],
-    status: "blocked",
-    dependency: "The current tools call legacy GitHub broker endpoints and require a run-scoped repository/actor capability.",
+    capability: "github",
+    tools: [],
+    status: "external",
+    dependency: "Paperclip's github.code connector: hosted GitHub MCP tools and run-scoped git/gh launchers, granted to the agent on the board. Vector's legacy github_* tools and gh shim are retired.",
   },
   {
     capability: "personal-memory",
     tools: ["memory_save", "memory_search", "memory_forget"],
-    status: "blocked",
-    dependency: "The current tools call legacy /v1/memories endpoints and require run-scoped user authority.",
+    status: "ported",
+    dependency: "Uses the run-scoped Vector callback authority and canonical owner-scoped personal memory store.",
   },
   {
     capability: "voice-marker",
     tools: ["speak"],
-    status: "blocked",
-    dependency: "The extension is local, but Vector chat clients still need the Paperclip tool event projected onto their existing speak frame contract.",
+    status: "ported",
+    dependency: "Requires the matching sealed Vector OS speak asset and tool-frame gateway; device playback remains rollout acceptance.",
   },
   {
     capability: "rctl",
@@ -124,13 +131,49 @@ const RESTRICTED_LONG_FLAGS = [
   "--use-theme",
 ] as const;
 
+/**
+ * Shell and Git environment the Paperclip controller itself injects into every
+ * run (prepareGitHubExecutionEnvironment and prepareGitHubOperationLaunchers):
+ * the managed git/gh launchers on PATH, the GitHub broker URL/token, and Git
+ * hardening. It is not agent configuration. Engineering forwards it to Pi's
+ * bash; restricted profiles have no shell, ignore it here, and strip it.
+ */
+const PAPERCLIP_CONTROLLER_SHELL_ENV_KEY =
+  /^(PATH|ZDOTDIR|BASH_ENV|GH_CONFIG_DIR|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|SSH_AUTH_SOCK|SSH_ASKPASS|GIT_[A-Z0-9_]+|PAPERCLIP_GITHUB_[A-Z0-9_]+|PAPERCLIP_GIT_[A-Z0-9_]+|PAPERCLIP_RUNNER_NETWORK_[A-Z0-9_]+)$/;
+
+export function isPaperclipControllerShellEnvKey(key: string): boolean {
+  return PAPERCLIP_CONTROLLER_SHELL_ENV_KEY.test(key);
+}
+
+// The controller's per-run scratch and temp directories (paperclipScratch).
+const PAPERCLIP_CONTROLLER_SCRATCH_ENV_KEY =
+  /^(TMPDIR|TEMP|TMP|PAPERCLIP_TMPDIR|PAPERCLIP_SCRATCH_DIR|PAPERCLIP_RUN_SCRATCH_DIR|PAPERCLIP_TASK_SCRATCH_DIR)$/;
+
+function isPaperclipControllerEnvKey(key: string): boolean {
+  return PAPERCLIP_CONTROLLER_SHELL_ENV_KEY.test(key) || PAPERCLIP_CONTROLLER_SCRATCH_ENV_KEY.test(key);
+}
+
 function normalizeProfile(profile: string | undefined): string {
   return profile?.trim().toLowerCase() ?? "";
 }
 
-export function vectorPiProfileIsRestricted(profile: string | undefined): boolean {
+/**
+ * Only the engineering profile holds Pi's builtins. Inside a Vector
+ * installation a missing profile fails closed: it is treated as restricted
+ * rather than as upstream's unrestricted default.
+ */
+export function vectorPiProfileIsRestricted(
+  profile: string | undefined,
+  options: { vectorInstallation?: boolean } = {},
+): boolean {
   const normalized = normalizeProfile(profile);
-  return normalized.length > 0 && normalized !== "engineering";
+  if (normalized.length === 0) return options.vectorInstallation === true;
+  return normalized !== "engineering";
+}
+
+/** A Vector installation always carries its installation or company identity. */
+export function isVectorPiInstallation(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.PAPERCLIP_VECTOR_INSTALLATION_ID?.trim() || env.PAPERCLIP_VECTOR_COMPANY_ID?.trim());
 }
 
 function hasConfiguredValue(value: unknown): boolean {
@@ -159,12 +202,74 @@ function restrictedFlag(arg: string): string | null {
   return null;
 }
 
+const RELEASE_PI_COMMAND_SUFFIX = ["runtime", "bin", "pi"] as const;
+
+/**
+ * The release root the deployment pinned for this server: the Vector
+ * supervisor sets PAPERCLIP_VECTOR_PI_COMMAND to <release>/runtime/bin/pi.
+ * Any other deployment command identifies no release, so no instructions file
+ * is admissible.
+ */
+function deploymentReleaseRoot(deploymentCommand: string | undefined): string | null {
+  const command = deploymentCommand?.trim() ?? "";
+  if (!path.isAbsolute(command) || path.normalize(command) !== command) return null;
+  const segments = command.split(path.sep);
+  const suffix = segments.slice(-RELEASE_PI_COMMAND_SUFFIX.length);
+  if (suffix.length !== RELEASE_PI_COMMAND_SUFFIX.length
+      || suffix.some((segment, index) => segment !== RELEASE_PI_COMMAND_SUFFIX[index])) {
+    return null;
+  }
+  const root = segments.slice(0, -RELEASE_PI_COMMAND_SUFFIX.length).join(path.sep);
+  return root.length > 0 ? root : null;
+}
+
+/**
+ * Admit a restricted profile's instructions file only when it is a regular
+ * file whose real path lies inside the deployment-owned release assets for
+ * this profile: realpath(<release>/paperclip/profile-assets/<profile>)/...
+ * Both sides are resolved, so the provisioner's releases/current/... form is
+ * accepted while `..`, symlink escapes and other profiles' assets are not.
+ */
+async function admitReleaseInstructionsFile(
+  profile: string,
+  value: unknown,
+  deploymentCommand: string | undefined,
+): Promise<string> {
+  const reject = (reason: string): never => {
+    throw new Error(
+      `Vector profile "${profile}" forbids Pi runtime resource field "instructionsFilePath" (${reason}).`,
+    );
+  };
+  if (typeof value !== "string" || !path.isAbsolute(value.trim())) {
+    return reject("requires an absolute path to the deployment-owned release profile assets");
+  }
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(profile)) return reject("profile has no release asset directory");
+  const releaseRoot = deploymentReleaseRoot(deploymentCommand);
+  if (!releaseRoot) return reject("the deployment Pi command identifies no release root");
+
+  const assetsRoot = await fs.realpath(path.join(releaseRoot, "paperclip", "profile-assets", profile))
+    .catch(() => null);
+  if (!assetsRoot) return reject("the release has no profile asset directory for this profile");
+  const assetsStat = await fs.stat(assetsRoot).catch(() => null);
+  if (!assetsStat?.isDirectory()) return reject("the release has no profile asset directory for this profile");
+
+  const resolved = await fs.realpath(value.trim()).catch(() => null);
+  if (!resolved) return reject("the file does not exist");
+  if (!resolved.startsWith(`${assetsRoot}${path.sep}`)) {
+    return reject("the file is outside the deployment-owned release profile assets");
+  }
+  const stat = await fs.stat(resolved).catch(() => null);
+  if (!stat?.isFile()) return reject("not a regular file");
+  return resolved;
+}
+
 function validateRestrictedConfig(
   profile: string,
   config: Record<string, unknown>,
   extraArgs: readonly string[],
   command: string,
   deploymentCommand: string | undefined,
+  agentConfiguredEnv: Record<string, unknown> | undefined,
 ): void {
   const allowedCommand = deploymentCommand?.trim() || "pi";
   if (command !== allowedCommand) {
@@ -173,6 +278,8 @@ function validateRestrictedConfig(
     );
   }
   for (const field of RESTRICTED_CONFIG_FIELDS) {
+    // Admitted separately, only as a release-owned profile asset.
+    if (field === "instructionsFilePath") continue;
     if (hasConfiguredValue(config[field])) {
       throw new Error(
         `Vector profile "${profile}" forbids Pi runtime resource field "${field}".`,
@@ -180,11 +287,20 @@ function validateRestrictedConfig(
     }
   }
 
+  // With the agent's own configured env in hand, every key the agent set is
+  // rejected, and the runtime config may additionally carry only
+  // controller-owned run env. Without it, any env is rejected.
   const env = normalizedEnv(config);
-  const envNames = Object.keys(env);
+  const agentNames = agentConfiguredEnv ? Object.keys(agentConfiguredEnv) : null;
+  const envNames = agentNames === null
+    ? Object.keys(env)
+    : Array.from(new Set([
+      ...agentNames,
+      ...Object.keys(env).filter((name) => !agentNames.includes(name) && !isPaperclipControllerEnvKey(name)),
+    ]));
   if (envNames.length > 0) {
     throw new Error(
-      `Vector profile "${profile}" forbids mutable agent env; move required values to the deployment process environment.`,
+      `Vector profile "${profile}" forbids mutable agent env (${envNames.sort().join(", ")}); move required values to the deployment process environment.`,
     );
   }
 
@@ -225,6 +341,7 @@ function parsePackagedExtensions(raw: string | undefined, activeProfile: string)
     const tools = Array.isArray(record.tools)
       ? record.tools.map((tool) => typeof tool === "string" ? tool.trim() : "")
       : [];
+    const delivery = record.delivery === undefined ? "local" : record.delivery;
     const permissions = typeof record.permissions === "object" && record.permissions !== null && !Array.isArray(record.permissions)
       ? record.permissions as Record<string, unknown>
       : {};
@@ -244,6 +361,11 @@ function parsePackagedExtensions(raw: string | undefined, activeProfile: string)
     if (tools.some((tool) => !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(tool))) {
       throw new Error(`Packaged Pi extension entry ${index} contains an invalid tool name.`);
     }
+    if (delivery !== "local" && delivery !== "callback") {
+      throw new Error(
+        `Packaged Pi extension entry ${index} requires delivery "local" or "callback".`,
+      );
+    }
     if (typeof permissions.filesystem !== "boolean" || typeof permissions.shell !== "boolean") {
       throw new Error(
         `Packaged Pi extension entry ${index} must explicitly declare boolean filesystem and shell permissions.`,
@@ -259,6 +381,7 @@ function parsePackagedExtensions(raw: string | undefined, activeProfile: string)
       path: path.resolve(extensionPath),
       sha256,
       tools: Array.from(new Set(tools)),
+      delivery,
       permissions: {
         filesystem: permissions.filesystem,
         shell: permissions.shell,
@@ -301,9 +424,13 @@ export async function prepareVectorPiProfilePolicy(input: {
   packagedExtensionsJson?: string;
   command?: string;
   deploymentCommand?: string;
+  /** The agent's stored adapterConfig.env, as opposed to the controller-merged runtime env. */
+  agentConfiguredEnv?: Record<string, unknown>;
+  /** True inside a Vector installation, where a missing profile fails closed. */
+  vectorInstallation?: boolean;
 }): Promise<VectorPiProfilePolicy> {
   const profile = normalizeProfile(input.profile);
-  const restricted = vectorPiProfileIsRestricted(profile);
+  const restricted = vectorPiProfileIsRestricted(profile, { vectorInstallation: input.vectorInstallation });
   if (!restricted) {
     const engineeringExtensions = profile === "engineering"
       ? await verifyPackagedExtensions(input.packagedExtensionsJson, profile)
@@ -324,7 +451,11 @@ export async function prepareVectorPiProfilePolicy(input: {
     input.extraArgs ?? [],
     input.command?.trim() || "pi",
     input.deploymentCommand,
+    input.agentConfiguredEnv,
   );
+  const instructionsFilePath = hasConfiguredValue(input.config.instructionsFilePath)
+    ? await admitReleaseInstructionsFile(profile, input.config.instructionsFilePath, input.deploymentCommand)
+    : undefined;
   const extensions = await verifyPackagedExtensions(input.packagedExtensionsJson, profile);
   const allowedTools = Array.from(new Set(extensions.flatMap((entry) => entry.tools)));
 
@@ -352,5 +483,52 @@ export async function prepareVectorPiProfilePolicy(input: {
     ],
     useBundledPaperclipSkillsOnly: true,
     additionalToolNames: [],
+    ...(instructionsFilePath ? { instructionsFilePath } : {}),
   };
+}
+
+/** Tool names a profile policy already admits (Pi built-ins excluded). */
+export function vectorPiPolicyToolNames(policy: VectorPiProfilePolicy): string[] {
+  const names = [...policy.additionalToolNames];
+  const toolsIndex = policy.cliArgs.indexOf("--tools");
+  if (toolsIndex >= 0 && policy.cliArgs[toolsIndex + 1]) {
+    names.push(...policy.cliArgs[toolsIndex + 1]!.split(",").map((name) => name.trim()).filter(Boolean));
+  }
+  return Array.from(new Set(names));
+}
+
+/**
+ * Admit the run's Paperclip connector tools on any profile. The connector
+ * extension is adapter-owned and registers only tools the Paperclip gateway
+ * listed for this run's grants; it adds no Pi built-in and no filesystem or
+ * shell authority, so restricted profiles stay restricted.
+ */
+export function withPaperclipConnectorTools(
+  policy: VectorPiProfilePolicy,
+  extensionPath: string,
+  toolNames: readonly string[],
+): VectorPiProfilePolicy {
+  const names = Array.from(new Set(toolNames.map((name) => name.trim()).filter(Boolean)));
+  if (names.length === 0) return policy;
+  if (!policy.restricted) {
+    return {
+      ...policy,
+      cliArgs: [...policy.cliArgs, "--extension", extensionPath],
+      additionalToolNames: Array.from(new Set([...policy.additionalToolNames, ...names])),
+    };
+  }
+  const cliArgs = [...policy.cliArgs];
+  const toolsIndex = cliArgs.indexOf("--tools");
+  if (toolsIndex >= 0) {
+    cliArgs[toolsIndex + 1] = Array.from(new Set([
+      ...(cliArgs[toolsIndex + 1] ?? "").split(",").filter(Boolean),
+      ...names,
+    ])).join(",");
+  } else {
+    const noTools = cliArgs.indexOf("--no-tools");
+    if (noTools >= 0) cliArgs.splice(noTools, 1, "--tools", names.join(","));
+    else cliArgs.push("--tools", names.join(","));
+  }
+  cliArgs.push("--extension", extensionPath);
+  return { ...policy, cliArgs };
 }

@@ -1,3 +1,5 @@
+import { paperclipPath, paperclipUiBasePath } from "./base-path";
+
 /**
  * Registers `/sw.js` and keeps the installed worker fresh on a long-lived tab.
  *
@@ -84,7 +86,9 @@ export function startServiceWorkerUpdates(
   const intervalId = setInterval(checkForUpdates, updateIntervalMs);
 
   void container
-    .register("/sw.js")
+    .register(paperclipPath("/sw.js"), {
+      scope: `${paperclipUiBasePath || ""}/`,
+    })
     .then((reg) => {
       registration = reg;
     })

@@ -22,7 +22,7 @@ Don't use when:
 
 Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
-- instructionsFilePath (string, optional): absolute path to a markdown instructions file appended to system prompt via --append-system-prompt
+- instructionsFilePath (string, optional): absolute path to a markdown instructions file appended to system prompt via --append-system-prompt (restricted Vector profiles admit only a regular file inside <release>/paperclip/profile-assets/<profile>/ of the release pinned by PAPERCLIP_VECTOR_PI_COMMAND)
 - promptTemplate (string, optional): user prompt template passed via -p flag
 - model (string, required): Pi model id in provider/model format (for example xai/grok-4)
 - thinking (string, optional): thinking level (off, minimal, low, medium, high, xhigh)
@@ -44,4 +44,5 @@ Notes:
 - Restricted profiles reject mutable runtime-loading config, env, command wrappers, and extra arguments. They run with a sterile managed Pi agent directory and explicitly mount only Paperclip's bundled operational skill. A deployment-owned, exact-path/SHA-256 extension allowlist exists for future packaged read-only bridges and is empty by default.
 - Agent instructions are appended to Pi's system prompt via --append-system-prompt. In json mode the user task is sent via -p; in rpc mode it is sent as a prompt command and stdin remains open until agent_settled.
 - PAPERCLIP_PI_EXECUTION_MODE may set the deployment-wide default when an agent does not specify executionMode.
+- On a Vector installation (any non-empty \`PAPERCLIP_VECTOR_PROFILE\`), a conversation turn whose wake carries only complete, user-authored pending comments reaches Pi like the legacy \`pi --mode rpc\` chat: the user prompt is those comment bodies verbatim (blank-line joined, plus the native image note), and the system prompt is the instructions file (or, on restricted profiles, the admitted persona/role) plus connector skill docs, without the Paperclip wake payload, task markdown, heartbeat/bootstrap templates, session handoff, or instructions path directive. Workload launches, recoveries, interaction answers, truncated/fallback-fetch batches, and non-conversation runs keep the Paperclip prompt.
 `;

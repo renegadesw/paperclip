@@ -213,6 +213,8 @@ export const connectionGrants = pgTable(
         lastAccessRefreshAt?: string;
         lastWebhookAt?: string;
         webhookHealth?: "pending" | "healthy" | "unhealthy";
+        /** "installation": a GitHub App installation (bot) token. */
+        tokenKind?: "installation";
       };
     }>(),
     credentialSecretRefs: jsonb("credential_secret_refs").$type<ToolCredentialSecretRef[]>().notNull().default([]),

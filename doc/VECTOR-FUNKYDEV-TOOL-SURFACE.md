@@ -19,11 +19,11 @@ also contains:
 | Capability | Tools | Paperclip status |
 | --- | --- | --- |
 | Read-only Vault reference | `vault_search`, `vault_read` | Ported as a package asset; runtime selection requires the sealed engineering release manifest |
-| Operator question | `ask_user` | Blocked: needs RPC UI request/response continuation through Vector OS |
-| Todos | `todo_add`, `todo_list`, `todo_update`, `todo_mark_done` | Blocked: current extension calls legacy `/v1/todos` |
-| GitHub broker | `github_read`, `github_manage`, `github_api`, `github_repo` | Blocked: current extension calls legacy broker endpoints with a legacy session capability |
-| Personal memory | `memory_save`, `memory_search`, `memory_forget` | Blocked: current extension calls legacy memory endpoints and needs run-scoped user authority |
-| Voice marker | `speak` | Blocked: local extension is reusable, but the Paperclip event still needs projection onto the existing Vector client frame contract |
+| Operator question | `ask_user` | Paperclip callback bridge packaged; Vector OS must provide the durable question executor before activation |
+| Todos | `todo_add`, `todo_list`, `todo_update`, `todo_mark_done` | Paperclip callback bridge packaged; Vector OS must provide owner-scoped executors before activation |
+| GitHub | Paperclip `github.code` connector | Retired from Vector: the `github_*` tools, `publish_branch`, and the `gh` shim are gone. GitHub is the hosted GitHub MCP connector plus Paperclip's run-scoped `git`/`gh` launchers |
+| Personal memory | `memory_save`, `memory_search`, `memory_forget` | Paperclip callback bridge packaged; Vector OS must provide the three owner-scoped executors before activation |
+| Voice marker | `speak` | Ported in the matching Vector OS release: sealed local extension for engineering/standard, existing tool-frame projection, and private per-turn voice context; physical-device playback still requires acceptance |
 | LLM meter | no model-callable tool | Not ported: Paperclip owns its run usage/cost accounting |
 | Vector `/os/mcp` | server-defined analyst tools | Not current FunkyDev behavior; it belongs to the `funky-analyst` path and must not be imported without an explicit Vector identity contract |
 
@@ -36,6 +36,64 @@ only surface proven to reach an actual `/fd` session from current source is
 Pi's built-ins (and the runtime user's ordinary environment); the other tools
 are intended but not proven active. Paperclip does not copy that service-name
 bug: the installation profile, not a request service string, owns the ceiling.
+
+## Paperclip connectors on every Vector profile
+
+Pi has no MCP client, so `pi_local` delivers the run's granted connections
+itself (`server/paperclip-connectors.ts`). Before spawn it calls
+`initialize` and `tools/list` on each `ctx.runtimeMcp` endpoint. Each endpoint
+is a Paperclip tool gateway with a short-lived run token, one per grant the
+agent effectively holds. The adapter writes the tools to a private 0600 file,
+and the adapter-owned `vector-extensions/paperclip-connectors.ts` registers
+them as Pi tools that forward to the same gateway's `tools/call`. The gateway
+enforces the grant, the write and destructive approval policy, and audit. The
+listed names are added to Pi's `--tools` allowlist on every profile. That
+admits connector tools on Standard and the Funky servers without enabling a
+Pi built-in or any filesystem or shell authority.
+
+| Profile | Pi built-ins | Vector tools | Paperclip connectors |
+| --- | --- | --- | --- |
+| engineering (FunkyDev) | bash, edit, find, grep, ls, read, write | ask_user, todo_*, memory_*, vault_read, vault_search, speak | granted connectors (GitHub via `github.code`, Google, ...), plus Paperclip's run-scoped git/gh launchers on bash's PATH |
+| standard (Standard Chat) | none | ask_user, todo_*, memory_*, speak | granted connectors |
+| staging / production (Funky) | none | the Funky analyst tools | granted connectors |
+| demo | none | none | granted connectors |
+
+`github.code` requests the hosted toolsets
+`context,repos,issues,pull_requests,users,labels,actions` (`X-MCP-Toolsets`).
+It admits every read tool and exactly these write tools: `create_branch`,
+`create_or_update_file`, `push_files`, `delete_file`, `issue_write`,
+`sub_issue_write`, `add_issue_comment`, `update_issue_comment`,
+`create_pull_request`, `update_pull_request`, `update_pull_request_branch`,
+`merge_pull_request`, `pull_request_review_write`,
+`add_comment_to_pending_review`, `add_reply_to_pull_request_comment`,
+`label_write`, and `actions_run_trigger`. Any other write tool is disabled in
+the catalog. Destructive tools still need formal approval at call time.
+
+To grant GitHub to FunkyDev on the board: Connectors, then GitHub, then
+Connect (managed). Authorize the Paperclip GitHub App and choose the
+repositories. Then grant the connection to the FunkyDev agent (an agent grant,
+or a user grant for the responsible user). Other connectors are granted the
+same way, to Standard Chat or to the Funky agents. The next run lists the
+granted tools and receives the git/gh identity.
+
+Controller-owned run env (the git/gh launcher `PATH`, the GitHub broker
+URL/token, Git hardening, and scratch directories) is not agent
+configuration. Engineering forwards it to Pi's bash. Restricted profiles strip
+the shell part. They still reject every key the agent's own `adapterConfig.env`
+sets.
+
+## Legacy parity
+
+`packages/adapters/pi-local/src/server/fixtures/funkydev-legacy-tool-snapshot.json`
+is a byte-for-byte copy of Vector OS
+`contracts/FUNKYDEV_LEGACY_TOOL_SNAPSHOT.json`: the label, description and
+JSON Schema of every legacy FunkyDev tool, plus each extension's
+`before_agent_start` prompt addition, captured by executing the legacy
+`agents/piext/*.ts` sources. `funkydev-legacy-tool-parity.test.ts` fails if
+the callback bridge or the Vault extension drops a legacy tool or changes any
+of that model-facing text, the task-tracker guideline, or the saved-notes
+recall block. A callback refusal (`422 tool_refused`) is returned to the model
+as a tool result, as the legacy extensions did, so it can correct the call.
 
 ## Paperclip engineering package
 
@@ -50,8 +108,9 @@ Paperclip process. The entry is shaped as:
 {
   "profile": "engineering",
   "path": "/absolute/release/tool-assets/engineering/funkydev-vault-reference.ts",
-  "sha256": "b1620c829005975722da51115dd57ab17783b76523a90f3abe3cbab043525ce9",
+  "sha256": "8dd309b9ed85d93b85329bc0b0c1965e3947cf650ee54b233149b1b53d60fbb9",
   "tools": ["vault_read", "vault_search"],
+  "delivery": "local",
   "permissions": { "filesystem": true, "shell": false }
 }
 ```
@@ -96,16 +155,15 @@ negative contracts.
 ## Remaining compatibility seams
 
 Do not copy the remaining legacy extensions until their authority exists on
-the new path. Their minimum contracts are:
+the new path. Paperclip now supplies a private, run-scoped callback capability
+for the approved todo, question, and memory tool names, but activation still
+depends on matching Vector OS executors. The remaining minimum contracts are:
 
-- a run-scoped Paperclip-to-Vector capability that names the acting user,
-  installation, session/run, and allowed operation surface without placing a
-  master credential in Pi's env or transcript;
 - Vector OS compatibility endpoints for memory, GitHub and task/todo calls, or
   replacements whose response and refusal semantics are intentionally mapped;
 - bidirectional handling of Pi's `extension_ui_request` and
   `extension_ui_response` for `ask_user` (logging the event is not enough);
-- an event projection preserving the existing `speak` tool frame for
+- deployment verification of the existing `speak` tool-frame projection for
   Tailchat/NexusLink/Funky clients; and
 - an explicit decision whether FunkyDev should mount `/os/mcp`. Current source
   proves that bridge for the Funky analyst, not the native standing engineer.

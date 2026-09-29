@@ -1,3 +1,4 @@
+import { isLocalBoardUserId } from "../local-board-identity.js";
 import type { Request } from "express";
 import { and, eq } from "drizzle-orm";
 import { issues, type Db } from "@paperclipai/db";
@@ -24,5 +25,5 @@ export async function projectToolContext(db: Db, actor: Request["actor"], write 
   if (write && !["standard", "skill_test"].includes(issue.workMode)) throw forbidden("Project creation is unavailable in Ask or Plan mode");
   const userId = identity.run.responsibleUserId;
   // local-board is a server-owned identity; never accepted from tool arguments.
-  return { run, issue, userId, localTrusted: userId === "local-board" };
+  return { run, issue, userId, localTrusted: isLocalBoardUserId(userId) };
 }
