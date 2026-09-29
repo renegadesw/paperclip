@@ -336,6 +336,17 @@ export class VectorProviderAuthorityBridge {
       existing.sessionScope === input.pending.sessionScope
     ) {
       this.pending.delete(key);
+      // Same race as the tool bridge: a dispatch holding a snapshot from
+      // before the ingress bind may have rewritten it without
+      // vectorProviderAuthority. Re-assert the persisted binding (idempotent).
+      await this.bindRun({
+        companyId: existing.companyId,
+        agentId: existing.agentId,
+        externalSessionId: existing.externalSessionId,
+        issueId: existing.issueId,
+        runId: input.runId,
+        authorityHandle: existing.authorityHandle,
+      });
       return;
     }
     const grant = this.pending.get(key);

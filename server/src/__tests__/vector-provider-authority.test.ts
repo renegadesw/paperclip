@@ -233,6 +233,28 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(JSON.stringify(persisted)).not.toContain(routerToken);
   });
 
+  it("re-asserts the persisted provider binding when a stale dispatch erased it", async () => {
+    const bridge = new VectorProviderAuthorityBridge(db, {
+      endpoint: new URL("http://127.0.0.1:8431/inbound/paperclip/v1/providers/redeem"),
+      installationId: "t480-funkydev",
+      profile: "engineering",
+      secret,
+      ttlSeconds: 3600,
+    }, vi.fn() as unknown as typeof fetch);
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "queued", contextSnapshot: { issueId },
+    }).returning();
+    const scope = { companyId, agentId, externalSessionId: "raced-provider-session", issueId };
+    const pending = bridge.registerPending({ ...scope, commentId: randomUUID(), authorityHandle: "opaque-raced-provider" });
+    await bridge.bindRun({ ...scope, runId: run.id, authorityHandle: "opaque-raced-provider" });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, vectorProviderAuthorityPending: pending } })
+      .where(eq(heartbeatRuns.id, run.id));
+    await bridge.bindPendingRun({ companyId, agentId, issueId, runId: run.id, pending });
+    const persisted = await db.select({ context: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]?.context as Record<string, unknown>);
+    expect(persisted.vectorProviderAuthority).toMatchObject({ version: 1, handleSha256: pending.handleSha256 });
+  });
+
   it("accepts a longer parent-proxy capability only on the exact loopback proxy path", async () => {
     const now = Date.parse("2026-09-26T04:00:00Z");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

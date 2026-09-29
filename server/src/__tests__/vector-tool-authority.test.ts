@@ -289,6 +289,26 @@ const support = await getEmbeddedPostgresTestSupport();
     });
   });
 
+  it("re-asserts the persisted binding when a stale dispatch erased it", async () => {
+    // Ingress binds the run right after creating it. A dispatch that loaded the
+    // snapshot before that bind rewrites the whole snapshot without
+    // vectorToolAuthority; the dispatch's own pending bind then finds the grant
+    // in memory and must put the persisted binding back, or every callback
+    // fails the active-run check (live on t480 2026-09-29).
+    const run = await createRun();
+    const bridge = new VectorToolAuthorityBridge(db, config(), vi.fn());
+    const scope = { companyId, agentId, externalSessionId: "raced-session", issueId };
+    const pending = bridge.registerPending({ ...scope, commentId: randomUUID(), authorityHandle: "opaque-raced-handle" });
+    await bridge.bindRun({ ...scope, runId: run.id, authorityHandle: "opaque-raced-handle" });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, vectorToolAuthorityPending: pending } })
+      .where(eq(heartbeatRuns.id, run.id));
+    const access = await bridge.bindPendingRun({ companyId, agentId, issueId, runId: run.id, pending });
+    expect(access).toMatchObject({ tools: ["fs.read", "fs.write"] });
+    const persisted = await db.select({ context: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]?.context as Record<string, unknown>);
+    expect(persisted.vectorToolAuthority).toMatchObject({ version: 1, sessionScope: pending.sessionScope, handleSha256: pending.handleSha256 });
+  });
+
   it("proxies exact signed scope, rejects unknown tools and rejects replay", async () => {
     const run = await createRun();
     const fetchMock = vi.fn(async (_url: URL, init?: RequestInit) => {

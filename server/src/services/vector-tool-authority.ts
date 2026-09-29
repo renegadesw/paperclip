@@ -313,6 +313,20 @@ export class VectorToolAuthorityBridge {
       ) {
         this.pending.delete(key);
       }
+      // Ingress binds the run right after creating it, which can race the
+      // heartbeat: a dispatch that loaded the run's snapshot before that bind
+      // rewrites the whole snapshot and erases vectorToolAuthority, and every
+      // tool callback then fails the active-run check. Re-assert the persisted
+      // binding (idempotent) before handing out access.
+      await this.bindRun({
+        companyId: existing.companyId,
+        agentId: existing.agentId,
+        externalSessionId: existing.externalSessionId,
+        issueId: existing.issueId,
+        runId: input.runId,
+        authorityHandle: existing.authorityHandle,
+        allowedTools: existing.allowedTools,
+      });
       const access = this.runtimeAccess(input);
       if (access) return access;
     }

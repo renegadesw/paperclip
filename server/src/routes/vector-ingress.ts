@@ -106,7 +106,10 @@ const vectorRoleTurnSchema = z.object({
 
 const vectorPersonaTurnSchema = z.object({
   schemaVersion: z.literal(1),
-  personaId: z.string().uuid(),
+  // Vector persona IDs are fixed catalog identifiers (…-000000000023), not
+  // RFC 4122 UUIDs; z.uuid() rejects their version nibble, so accept any
+  // 8-4-4-4-12 hex GUID like the shared validators do.
+  personaId: z.string().guid(),
   personaName: boundedOpaqueId("personaName", 128),
   personaVersion: z.string().regex(/^[a-f0-9]{12}$/),
   model: z.string().trim().min(1).max(256),

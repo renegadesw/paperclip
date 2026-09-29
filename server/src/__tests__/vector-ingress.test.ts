@@ -180,6 +180,21 @@ describe("Vector ingress service authentication", () => {
     };
     await signedPost(app, path, imageBody).expect(201);
     expect(addTurn).toHaveBeenLastCalledWith(imageBody);
+    // Standard persona IDs are fixed catalog GUIDs, not RFC 4122 UUIDs; the
+    // route must admit them (every Standard turn was a 400 when it did not).
+    const personaBody = {
+      ...body,
+      clientRequestId: "request-persona",
+      ownerId: "owner-a", installationId: runtimeScope.installationId, profileId: runtimeScope.profile,
+      personaContext: {
+        schemaVersion: 1, personaId: "00000000-0000-0000-0000-000000000023",
+        personaName: "Friend", personaVersion: "50d14aba01ef", model: "router/Qwen3.8-Flash",
+        noBuiltinTools: true, systemPrompt: "Be a friend.",
+      },
+      runtimeSelection: { model: "Qwen3.8-Flash", thinking: "off" },
+    };
+    await signedPost(app, path, personaBody).expect(201);
+    expect(addTurn).toHaveBeenLastCalledWith(personaBody);
     await signedPost(app, path, {
       ...imageBody,
       clientRequestId: "request-image-invalid",
@@ -194,7 +209,7 @@ describe("Vector ingress service authentication", () => {
       400,
     );
     await signedPost(app, path, { ...body, ownerId: "owner-only" }).expect(400);
-    expect(addTurn).toHaveBeenCalledTimes(2);
+    expect(addTurn).toHaveBeenCalledTimes(3);
     await request(app).post(path).send(body).expect(401);
     await signedPost(app, path, body, "1699999000").expect(401);
     await request(app)
@@ -267,7 +282,7 @@ describe("Vector ingress service authentication", () => {
       ...runtimeScope,
       installationId: "stecke1-standard",
     }).expect(401);
-    expect(addTurn).toHaveBeenCalledTimes(2);
+    expect(addTurn).toHaveBeenCalledTimes(3);
     expect(inventory).toHaveBeenCalledTimes(1);
   });
 
