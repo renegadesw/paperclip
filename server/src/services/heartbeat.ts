@@ -23689,6 +23689,14 @@ export function heartbeatService(
             // (ingress) handles are not stripped: they still refuse the run.
             delete context.vectorToolAuthority;
             delete context.vectorProviderAuthority;
+            // The binds below are compare-and-set against the stored context,
+            // so the inherited grants must leave the stored row too.
+            await db
+              .update(heartbeatRuns)
+              .set({
+                contextSnapshot: sql`${heartbeatRuns.contextSnapshot} - 'vectorToolAuthority' - 'vectorProviderAuthority'`,
+              })
+              .where(eq(heartbeatRuns.id, run.id));
           }
           const vectorRoutineAuthorityBound = await prepareActiveVectorRoutineRunAuthority({
             runId: run.id,

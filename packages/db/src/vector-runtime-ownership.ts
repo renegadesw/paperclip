@@ -62,6 +62,11 @@ export async function acquireVectorRuntimeOwnership(
   const client = postgres(connectionString, {
     max: 1,
     idle_timeout: 0,
+    // postgres.js ends every connection after a random 30-60 minutes by
+    // default. This one holds the ownership lock for the process's lifetime,
+    // so a scheduled end reported the session lost and Paperclip exited
+    // (prod1 restarted twice mid-run). Never rotate it.
+    max_lifetime: 0,
     onnotice: () => {},
     connection: {
       application_name: "paperclip-vector-runtime-owner",
