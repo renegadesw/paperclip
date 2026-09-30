@@ -12,7 +12,7 @@ describe("Vector workload routine dispatch", () => {
       const timestamp = String((init?.headers as Record<string, string>)["x-paperclip-timestamp"]);
       const digest = createHash("sha256").update(body).digest("hex");
       const expected = `v1=${createHmac("sha256", "0123456789abcdef0123456789abcdef")
-        .update(`POST\n/internal/paperclip/workloads/dispatch\n${timestamp}\n${digest}`)
+        .update(`POST\n/inbound/paperclip/workloads/dispatch\n${timestamp}\n${digest}`)
         .digest("hex")}`;
       expect((init?.headers as Record<string, string>)["x-paperclip-signature"]).toBe(expected);
       expect(JSON.parse(body)).toEqual(expect.objectContaining({
@@ -25,7 +25,7 @@ describe("Vector workload routine dispatch", () => {
       return new Response(JSON.stringify({ claimed: 1, duplicate: false, state: "done" }), { status: 200 });
     });
     const dispatcher = createVectorWorkloadRoutineDispatcher({
-      url: "http://127.0.0.1:8430/internal/paperclip/workloads/dispatch",
+      url: "http://127.0.0.1:8430/inbound/paperclip/workloads/dispatch",
       secret: "0123456789abcdef0123456789abcdef",
       installationId: "stg1-staging",
       profile: "staging",
@@ -41,12 +41,12 @@ describe("Vector workload routine dispatch", () => {
 
   it("rejects non-loopback URLs and partial environment configuration", () => {
     expect(() => createVectorWorkloadRoutineDispatcher({
-      url: "https://example.com/internal/paperclip/workloads/dispatch",
+      url: "https://example.com/inbound/paperclip/workloads/dispatch",
       secret: "0123456789abcdef0123456789abcdef",
       installationId: "stg1-staging", profile: "staging", companyId: randomUUID(),
     })).toThrow("exact loopback");
     expect(() => vectorWorkloadRoutineDispatcherFromEnv({
-      PAPERCLIP_VECTOR_WORKLOAD_DISPATCH_URL: "http://127.0.0.1:8430/internal/paperclip/workloads/dispatch",
+      PAPERCLIP_VECTOR_WORKLOAD_DISPATCH_URL: "http://127.0.0.1:8430/inbound/paperclip/workloads/dispatch",
     })).toThrow("configured together");
   });
 });

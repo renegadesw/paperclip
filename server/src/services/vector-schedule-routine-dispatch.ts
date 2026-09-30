@@ -1,7 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-profiles";
 
-const DISPATCH_PATH = "/internal/paperclip/schedules/dispatch";
+const DISPATCH_PATH = "/inbound/paperclip/schedules/dispatch";
 const MIN_SECRET_LENGTH = 32;
 const DEFAULT_TIMEOUT_MS = 30_000;
 

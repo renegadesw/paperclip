@@ -1,6 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 
-const DISPATCH_PATH = "/internal/paperclip/workloads/dispatch";
+const DISPATCH_PATH = "/inbound/paperclip/workloads/dispatch";
 const MIN_SECRET_LENGTH = 32;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
