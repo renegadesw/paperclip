@@ -23681,6 +23681,15 @@ export function heartbeatService(
             agent.companyId,
             issueContext,
           );
+          if (vectorResearchWorkload) {
+            // A retry (e.g. after a server restart interrupted the previous
+            // run on this issue) inherits that run's context, including the
+            // tool/provider grants it had bound. Those are the previous run's
+            // grants and died with it; this run binds its own below. Pending
+            // (ingress) handles are not stripped: they still refuse the run.
+            delete context.vectorToolAuthority;
+            delete context.vectorProviderAuthority;
+          }
           const vectorRoutineAuthorityBound = await prepareActiveVectorRoutineRunAuthority({
             runId: run.id,
             companyId: agent.companyId,
