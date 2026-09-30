@@ -322,7 +322,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     });
     await db.update(routines).set({
       originKind: "vector_schedule_dispatch",
-      originId: "fa_research_daily",
+      originId: "fa_rollup_query_themes",
     }).where(eq(routines.id, routine.id));
 
     await expect(svc.runRoutine(routine.id, { source: "schedule" })).resolves.toMatchObject({
@@ -332,7 +332,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
       routineId: routine.id,
       companyId,
-      scheduleKey: "fa_research_daily",
+      scheduleKey: "fa_rollup_query_themes",
     }));
     expect(await db.select().from(issues).where(eq(issues.companyId, companyId))).toHaveLength(0);
   });

@@ -2,6 +2,8 @@ import { createHash, createHmac, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   createVectorScheduleRoutineDispatcher,
+  RETIRED_VECTOR_SCHEDULE_KEYS,
+  type VectorScheduleKey,
   vectorScheduleRoutineDispatcherFromEnv,
 } from "./vector-schedule-routine-dispatch.js";
 
@@ -22,7 +24,7 @@ describe("Vector schedule routine dispatch", () => {
         installationId,
         profile,
         companyId: "0f6d6b20-b9dd-43fc-8d48-5f8f65c6e047",
-        scheduleKey: "fa_research_daily",
+        scheduleKey: "fa_rollup_query_themes",
       }));
       expect(body).not.toContain("cron");
       expect(body).not.toContain("target");
@@ -42,7 +44,7 @@ describe("Vector schedule routine dispatch", () => {
     });
     await expect(dispatcher.dispatch({
       routineRunId: randomUUID(), routineId: randomUUID(), triggerId: randomUUID(),
-      companyId: "0f6d6b20-b9dd-43fc-8d48-5f8f65c6e047", scheduleKey: "fa_research_daily",
+      companyId: "0f6d6b20-b9dd-43fc-8d48-5f8f65c6e047", scheduleKey: "fa_rollup_query_themes",
     })).resolves.toEqual({
       accepted: true, skipped: false, duplicate: false, state: "accepted", reason: "accepted",
     });
@@ -72,5 +74,25 @@ describe("Vector schedule routine dispatch", () => {
     expect(() => vectorScheduleRoutineDispatcherFromEnv({
       PAPERCLIP_VECTOR_SCHEDULE_DISPATCH_URL: "http://127.0.0.1:8430/inbound/paperclip/schedules/dispatch",
     })).toThrow("configured together");
+  });
+
+  it("refuses the schedules the native research routines replaced, without calling Vector OS", async () => {
+    const fetchImpl = vi.fn();
+    const companyId = "0f6d6b20-b9dd-43fc-8d48-5f8f65c6e047";
+    const dispatcher = createVectorScheduleRoutineDispatcher({
+      url: "http://127.0.0.1:8430/inbound/paperclip/schedules/dispatch",
+      secret: "abcdef0123456789abcdef0123456789",
+      installationId: "prod1-production",
+      profile: "production",
+      companyId,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    for (const scheduleKey of RETIRED_VECTOR_SCHEDULE_KEYS) {
+      await expect(dispatcher.dispatch({
+        routineRunId: randomUUID(), routineId: randomUUID(), companyId,
+        scheduleKey: scheduleKey as unknown as VectorScheduleKey,
+      })).rejects.toThrow("Unsupported Vector schedule key");
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

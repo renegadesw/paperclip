@@ -1,5 +1,12 @@
 # Vector roster and workload parity
 
+> Superseded for the Funky server profiles (staging, production). Research and
+> DMV workloads now run as native Paperclip routine issues assigned to Funky
+> Scout / Funky Advisor, with run-scoped Vector tools bound by the routine-run
+> authority; the lease bridge, queue pumps and Vector research schedules below
+> are retired. See `VECTOR-INSTALLATION-PROVISIONING.md`. The rest of this
+> page is the historical bridge-phase mapping.
+
 This is the first honest, credential-free port contract for Vector's existing
 agent roster and background workloads. It was derived from Vector OS
 `9e632d512b42ef29e6030d4ca707d389a81742ea` and Vector

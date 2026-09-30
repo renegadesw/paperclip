@@ -198,6 +198,12 @@ import {
   setActiveVectorBoardRunAuthority,
   VectorBoardRunAuthority,
 } from "./services/vector-board-run-authority.js";
+import {
+  dbActiveResearchRoutineRun,
+  resolveVectorRoutineRunAuthorityConfig,
+  setActiveVectorRoutineRunAuthority,
+  VectorRoutineRunAuthority,
+} from "./services/vector-routine-run-authority.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -616,9 +622,15 @@ export async function createApp(
     process.env,
     vectorProviderAuthorityConfig,
   );
+  const vectorRoutineRunAuthorityConfig = resolveVectorRoutineRunAuthorityConfig(
+    process.env,
+    vectorProviderAuthorityConfig,
+    vectorToolAuthorityConfig,
+  );
   setActiveVectorToolAuthorityBridge(null);
   setActiveVectorProviderAuthorityBridge(null);
   setActiveVectorBoardRunAuthority(null);
+  setActiveVectorRoutineRunAuthority(null);
   if ((vectorToolAuthorityConfig || vectorProviderAuthorityConfig) && !vectorIngressAuth) {
     throw new Error("Vector runtime authority requires signed Vector ingress");
   }
@@ -646,6 +658,17 @@ export async function createApp(
       vectorBoardRunAuthorityConfig && vectorProviderAuthority
         ? new VectorBoardRunAuthority(vectorBoardRunAuthorityConfig, {
             activeRun: dbActiveBoardRun(db),
+            provider: vectorProviderAuthority,
+            tool: vectorToolAuthority,
+          })
+        : null,
+    );
+    // Funky research routine runs (Scout / Advisor workloads). Without this
+    // endpoint such a run fails closed in heartbeat instead of running toolless.
+    setActiveVectorRoutineRunAuthority(
+      vectorRoutineRunAuthorityConfig && vectorProviderAuthority && vectorToolAuthority
+        ? new VectorRoutineRunAuthority(vectorRoutineRunAuthorityConfig, {
+            activeRun: dbActiveResearchRoutineRun(db),
             provider: vectorProviderAuthority,
             tool: vectorToolAuthority,
           })

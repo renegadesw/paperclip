@@ -37,17 +37,47 @@ Roster shape is profile-closed rather than a shared superset:
   agent; every other seat (for example department managers, their engineers,
   and QA) must report to an agent declared before it;
 - `standard` provisions exactly the Standard Chat agent and no Funky workload catalog;
-- `staging` provisions exactly Funky analyst, Scout, and Advisor plus all seven
-  current Vector workload contracts.
+- `staging` and `production` (the Funky server profiles) provision exactly
+  Funky analyst, Scout, and Advisor plus all eight Funky workload contracts.
 
 The optional `workloads` catalog records the exact relationship between stable
-Vector workload keys and roster agents. Paperclip-owned work may use ordinary
-issues. A workload whose authority remains Vector's database must declare
-`runtimeAuthority: "vector_lease_triple"` and a credential-free, default-off
-bridge contract. Its imported `vector_jobs` schedule must also remain disabled.
-The canonical catalog digest and each agent's assigned workload keys are stored
-in agent metadata, so an edited task/tool/schedule mapping is immutable drift
-instead of a silent behavioral change.
+Vector workload keys and roster agents. The canonical catalog digest and each
+agent's assigned workload contracts (including each workload's declared tool
+surface) are stored in agent metadata, so an edited task/tool/schedule mapping
+is immutable drift instead of a silent behavioral change.
+
+On the Funky server profiles every workload is native Paperclip work
+(`promptSource: "paperclip_issue"`, `runtimeAuthority: "paperclip"`, no
+bridge, no Vector jobs schedule or lease recovery sweep). Provisioning seeds
+one ordinary issue-creating routine per workload, `origin_kind =
+vector_research_workload` and `origin_id` = the workload key, with sealed
+title, description (the agent's instructions for one run), assignee,
+`skip_if_active` and `skip_missed`, and a schedule trigger in
+America/New_York:
+
+| workload | assignee | cron | trigger at seed |
+| --- | --- | --- | --- |
+| `current_scout`, `macro_scout`, `demand_scout` | Funky Scout | `20 8 * * *` | enabled |
+| `advisor` | Funky Advisor | `40 8 * * *` | enabled |
+| `synthesis` | Funky Scout | `20 9 * * *` | enabled |
+| `curation` | Funky Scout | `50 9 * * *` | enabled |
+| `dmv_review` | Funky Advisor | `30 7 * * *` | disabled |
+| `dmv_audit_back_triage` | Funky Advisor | `0 8 * * *` | disabled |
+
+Trigger enablement and routine pause/archive are the operator's; every other
+routine and trigger field is sealed. The only Vector jobs schedule Paperclip
+still dispatches is `fa_rollup_query_themes` (demand scout's input). The two
+Vector queue pumps (`vector_workload_dispatch`) and the `fa_research_daily`,
+`fa_research_lease_sweep`, `fa_task_lease_sweep`, `fa_dmv_review_daily` and
+`fa_dmv_audit_back_triage_daily` schedule routines are no longer seeded; an
+existing one is archived with its triggers disabled, and its run history kept.
+
+A run on a research routine issue binds run-scoped provider and tool authority
+before it starts, through `PAPERCLIP_VECTOR_ROUTINE_AUTHORITY_URL`
+(`POST /inbound/paperclip/v1/routine-runs/authority`, signature version
+`vector-paperclip-routine-run-authority/v1`). The grant must stay inside the
+workload's declared tool surface; a refusal, a wider grant, or a missing
+endpoint fails the run instead of running it without its boundary.
 
 Each agent may declare `reportsTo`, the id of its manager. It must name an
 agent declared earlier in the manifest, which rules out self-references,
@@ -81,9 +111,9 @@ Reconciliation is intentionally strict:
   before database mutation;
 - failures print only `Vector provisioning failed` from the CLI boundary.
 
-This entrypoint provisions only the declared company, agents, and workload
-contract metadata. It does not claim or settle Vector tasks, enable imported
-schedules, create Paperclip routines for Vector lease queues, import historical
-transcripts, or add the remaining FunkyDev callback-backed tools. See
-`VECTOR-ROSTER-WORKLOAD-PARITY.md` for the exact current mapping and cutover
-gaps.
+This entrypoint provisions only the declared company, agents, workload
+contract metadata, and the Funky routines above. It does not claim or settle
+Vector tasks, enable imported Vector schedules, import historical transcripts,
+or add the remaining FunkyDev callback-backed tools.
+`VECTOR-ROSTER-WORKLOAD-PARITY.md` records the earlier lease-bridge mapping
+that the native research routines replace.

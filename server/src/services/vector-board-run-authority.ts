@@ -45,7 +45,7 @@ type ToolBinder = {
 
 type FetchLike = typeof fetch;
 
-function isLiteralLoopbackHostname(hostname: string): boolean {
+export function isLiteralLoopbackHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "");
   if (host === "::1") return true;
   const octets = host.split(".");
@@ -98,15 +98,51 @@ export function signVectorBoardRunAuthorityRequest(input: {
   return `v1=${createHmac("sha256", input.secret).update(canonical).digest("hex")}`;
 }
 
-function unavailable(message: string) {
+export function vectorRunAuthorityUnavailable(message: string) {
   return conflict(message, { code: "vector_provider_authority_unavailable" });
 }
 
-function boundedHandle(value: unknown): string {
+const unavailable = vectorRunAuthorityUnavailable;
+
+function boundedHandle(value: unknown, subject: string): string {
   if (typeof value !== "string" || !value.trim() || value.length > 1024) {
-    throw unavailable("Vector board run authority returned an invalid handle");
+    throw unavailable(`${subject} returned an invalid handle`);
   }
   return value.trim();
+}
+
+export type VectorRunAuthorityGrant = {
+  providerAuthorityHandle: string;
+  authorityHandle: string;
+  authorityTools: string[];
+};
+
+/**
+ * Reads a Vector OS run-authority response (board runs and routine runs share
+ * the shape). Anything but a well-formed version 1 grant is a refusal.
+ */
+export async function readVectorRunAuthorityGrant(response: Response, subject: string): Promise<VectorRunAuthorityGrant> {
+  if (!response.ok) {
+    throw unavailable(`${subject} was refused with status ${response.status}`);
+  }
+  const raw = Buffer.from(await response.arrayBuffer());
+  if (raw.length > MAX_RESPONSE_BYTES) throw unavailable(`${subject} response exceeded the size limit`);
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+  } catch {
+    throw unavailable(`${subject} response was not valid JSON`);
+  }
+  if (!body || typeof body !== "object" || body.version !== 1) {
+    throw unavailable(`${subject} returned an unsupported version`);
+  }
+  const providerAuthorityHandle = boundedHandle(body.providerAuthorityHandle, subject);
+  const authorityHandle = boundedHandle(body.authorityHandle, subject);
+  const tools = body.authorityTools;
+  if (!Array.isArray(tools) || tools.length === 0 || !tools.every((tool) => typeof tool === "string" && tool)) {
+    throw unavailable(`${subject} returned an invalid tool surface`);
+  }
+  return { providerAuthorityHandle, authorityHandle, authorityTools: tools as string[] };
 }
 
 /**
@@ -184,33 +220,14 @@ export class VectorBoardRunAuthority {
       body: rawBody,
       signal: AbortSignal.timeout(30_000),
     });
-    if (!response.ok) {
-      throw unavailable(`Vector board run authority was refused with status ${response.status}`);
-    }
-    const raw = Buffer.from(await response.arrayBuffer());
-    if (raw.length > MAX_RESPONSE_BYTES) throw unavailable("Vector board run authority response exceeded the size limit");
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
-    } catch {
-      throw unavailable("Vector board run authority response was not valid JSON");
-    }
-    if (!body || typeof body !== "object" || body.version !== 1) {
-      throw unavailable("Vector board run authority returned an unsupported version");
-    }
-    const providerHandle = boundedHandle(body.providerAuthorityHandle);
-    const toolHandle = boundedHandle(body.authorityHandle);
-    const tools = body.authorityTools;
-    if (!Array.isArray(tools) || tools.length === 0 || !tools.every((tool) => typeof tool === "string" && tool)) {
-      throw unavailable("Vector board run authority returned an invalid tool surface");
-    }
-    await this.deps.provider.bindRun({ ...scope, externalSessionId, authorityHandle: providerHandle });
+    const grant = await readVectorRunAuthorityGrant(response, "Vector board run authority");
+    await this.deps.provider.bindRun({ ...scope, externalSessionId, authorityHandle: grant.providerAuthorityHandle });
     if (this.deps.tool) {
       await this.deps.tool.bindRun({
         ...scope,
         externalSessionId,
-        authorityHandle: toolHandle,
-        allowedTools: tools as string[],
+        authorityHandle: grant.authorityHandle,
+        allowedTools: grant.authorityTools,
       });
     }
   }

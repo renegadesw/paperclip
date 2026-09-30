@@ -5,13 +5,19 @@ const DISPATCH_PATH = "/inbound/paperclip/schedules/dispatch";
 const MIN_SECRET_LENGTH = 32;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+// The Vector jobs schedules Paperclip still dispatches. Research fan-out,
+// the lease sweeps and the DMV enqueues were replaced by native research
+// routines (vector_research_workload): nothing claims a Vector research or
+// task lease any more, so firing them would only queue work nobody runs.
 export const VECTOR_SCHEDULE_KEYS = [
+  "fa_rollup_query_themes",
+] as const;
+export const RETIRED_VECTOR_SCHEDULE_KEYS = [
   "fa_research_daily",
   "fa_research_lease_sweep",
   "fa_task_lease_sweep",
   "fa_dmv_review_daily",
   "fa_dmv_audit_back_triage_daily",
-  "fa_rollup_query_themes",
 ] as const;
 export type VectorScheduleKey = (typeof VECTOR_SCHEDULE_KEYS)[number];
 const VECTOR_SCHEDULE_KEY_SET = new Set<string>(VECTOR_SCHEDULE_KEYS);

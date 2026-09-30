@@ -167,6 +167,11 @@ import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { prepareActiveVectorToolRuntimeAccess } from "./vector-tool-authority.js";
 import { prepareActiveVectorBoardRunAuthority } from "./vector-board-run-authority.js";
 import {
+  prepareActiveVectorRoutineRunAuthority,
+  VECTOR_RESEARCH_ROUTINE_ORIGIN_KIND,
+  type VectorResearchWorkloadIssue,
+} from "./vector-routine-run-authority.js";
+import {
   hasActiveVectorProviderAuthorityBridge,
   prepareActiveVectorProviderRuntimeAccess,
 } from "./vector-provider-authority.js";
@@ -10711,6 +10716,42 @@ export function heartbeatService(
       env: routine?.env ?? null,
       responsibleUserId:
         routineRun?.responsibleUserId ?? routine?.responsibleUserId ?? null,
+    };
+  }
+
+  // A routine_execution issue from a Vector research routine (Funky Scout /
+  // Funky Advisor workloads). Its run must bind routine-run authority capped
+  // to the workload's declared tool surface before it starts.
+  async function getVectorResearchWorkloadForExecutionIssue(
+    companyId: string,
+    issueContext: { originKind: string | null; originId: string | null } | null,
+  ): Promise<VectorResearchWorkloadIssue | null> {
+    if (
+      !issueContext ||
+      issueContext.originKind !== "routine_execution" ||
+      !issueContext.originId
+    ) {
+      return null;
+    }
+    const routine = await db
+      .select({
+        originKind: routines.originKind,
+        originId: routines.originId,
+        assigneeAgentId: routines.assigneeAgentId,
+      })
+      .from(routines)
+      .where(
+        and(
+          eq(routines.id, issueContext.originId),
+          eq(routines.companyId, companyId),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    if (routine?.originKind !== VECTOR_RESEARCH_ROUTINE_ORIGIN_KIND) return null;
+    return {
+      routineId: issueContext.originId,
+      workloadKey: routine.originId ?? "",
+      assigneeAgentId: routine.assigneeAgentId,
     };
   }
 
@@ -23620,20 +23661,40 @@ export function heartbeatService(
           const vectorProviderAuthorityRequired = hasActiveVectorProviderAuthorityBridge() &&
             typeof runtimeConfig.model === "string" &&
             runtimeConfig.model.startsWith("router/");
+          // A Vector research routine issue (Funky profiles) binds its
+          // routine-run authority first, required or not; a refusal or a
+          // missing authority fails the run rather than running it toolless.
+          const vectorResearchWorkload = await getVectorResearchWorkloadForExecutionIssue(
+            agent.companyId,
+            issueContext,
+          );
+          const vectorRoutineAuthorityBound = await prepareActiveVectorRoutineRunAuthority({
+            runId: run.id,
+            companyId: agent.companyId,
+            agentId: agent.id,
+            agentMetadata: agent.metadata,
+            issueId: issueRef?.id ?? null,
+            workload: vectorResearchWorkload,
+            toolPending: context.vectorToolAuthorityPending,
+            providerPending: context.vectorProviderAuthorityPending,
+            providerBound: context.vectorProviderAuthority,
+          });
           // A board-started run (task, assignment, routine Run now, board
           // chat) has no Vector ingress handle. On the engineering operator
           // host Vector OS may grant it run-scoped provider and tool
           // authority; a refusal fails the run exactly as before.
-          await prepareActiveVectorBoardRunAuthority({
-            runId: run.id,
-            companyId: agent.companyId,
-            agentId: agent.id,
-            issueId: issueRef?.id ?? null,
-            toolPending: context.vectorToolAuthorityPending,
-            providerPending: context.vectorProviderAuthorityPending,
-            providerBound: context.vectorProviderAuthority,
-            required: vectorProviderAuthorityRequired,
-          });
+          if (!vectorRoutineAuthorityBound) {
+            await prepareActiveVectorBoardRunAuthority({
+              runId: run.id,
+              companyId: agent.companyId,
+              agentId: agent.id,
+              issueId: issueRef?.id ?? null,
+              toolPending: context.vectorToolAuthorityPending,
+              providerPending: context.vectorProviderAuthorityPending,
+              providerBound: context.vectorProviderAuthority,
+              required: vectorProviderAuthorityRequired,
+            });
+          }
           const vectorToolAuthority = await prepareActiveVectorToolRuntimeAccess({
             runId: run.id,
             companyId: agent.companyId,
