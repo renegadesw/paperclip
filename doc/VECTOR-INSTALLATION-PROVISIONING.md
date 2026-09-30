@@ -72,6 +72,14 @@ Vector queue pumps (`vector_workload_dispatch`) and the `fa_research_daily`,
 `fa_dmv_audit_back_triage_daily` schedule routines are no longer seeded; an
 existing one is archived with its triggers disabled, and its run history kept.
 
+Funky Scout and Funky Advisor have no Paperclip issue tools, so Paperclip
+settles a research routine issue from its run when the run is released: a
+succeeded run closes it `done` with a comment carrying the run's final
+summary (redacted, truncated); a failed, cancelled, timed-out or interrupted
+run marks it `blocked` with a comment carrying the error code and message. A
+queued retry or other active run on the issue defers settlement. Stranded
+issue recovery excludes these issues explicitly.
+
 A run on a research routine issue binds run-scoped provider and tool authority
 before it starts, through `PAPERCLIP_VECTOR_ROUTINE_AUTHORITY_URL`
 (`POST /inbound/paperclip/v1/routine-runs/authority`, signature version

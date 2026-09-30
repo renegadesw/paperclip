@@ -167,6 +167,10 @@ import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { prepareActiveVectorToolRuntimeAccess } from "./vector-tool-authority.js";
 import { prepareActiveVectorBoardRunAuthority } from "./vector-board-run-authority.js";
 import {
+  dbVectorResearchIssueSettlementPort,
+  settleVectorResearchRoutineIssue,
+} from "./vector-research-issue-settlement.js";
+import {
   prepareActiveVectorRoutineRunAuthority,
   VECTOR_RESEARCH_ROUTINE_ORIGIN_KIND,
   type VectorResearchWorkloadIssue,
@@ -9404,6 +9408,15 @@ export function heartbeatService(
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const vectorResearchIssueSettlement = dbVectorResearchIssueSettlementPort(db, {
+    addComment: async ({ issueId, agentId, runId, body }) => {
+      await issuesSvc.addComment(issueId, body, { agentId, runId });
+    },
+    setStatus: async ({ companyId, issueId, agentId, status }) => {
+      await issuesSvc.update(issueId, { status, actorAgentId: agentId, companyGuard: companyId });
+    },
+  });
+
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const environmentsSvc = environmentService(db);
@@ -25826,6 +25839,17 @@ export function heartbeatService(
     run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId">,
     options: { suppressImmediateRecovery?: boolean } = {},
   ) {
+    // A Vector research routine run (Funky Scout / Advisor) cannot close its
+    // own issue; settle it from the run outcome while this run still holds
+    // the issue, exactly as an agent closing its issue mid-run would.
+    try {
+      await settleVectorResearchRoutineIssue(vectorResearchIssueSettlement, run.id);
+    } catch (error) {
+      logger.error(
+        { err: error, runId: run.id, companyId: run.companyId },
+        "failed to settle the Vector research routine issue from its run outcome",
+      );
+    }
     try {
       const { postCommitEffects } = await wakeQueue.releaseIssueExecution({
         companyId: run.companyId,

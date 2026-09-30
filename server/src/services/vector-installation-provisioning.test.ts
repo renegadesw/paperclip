@@ -553,6 +553,9 @@ describe("Vector installation provisioning", () => {
       expect(named.filter((tool) => !seed.toolSurface.includes(tool)), seed.workloadKey).toEqual([]);
       expect(seed.toolSurface.filter((tool) => !named.includes(tool)), seed.workloadKey).toEqual([]);
       expect(seed.description).toContain("Skipped: source not ready");
+      // The agent has no issue tools; Paperclip settles the issue from the run.
+      expect(seed.description).not.toMatch(/mark this issue|add a comment/i);
+      expect(seed.description).toContain("You do not update this issue yourself");
       expect(seed.description).toContain(`\`${seed.workloadKey}\``);
     }
   });

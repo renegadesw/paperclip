@@ -75,6 +75,10 @@ import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { budgetService } from "../budgets.js";
 import { unadmittedChatWakeupCondition } from "../durable-chat-wakeup.js";
+import {
+  isVectorResearchRoutineIssue,
+  vectorResearchRoutineIssueCondition,
+} from "../vector-research-issue-settlement.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import {
   legacyExecutionNeedsReconciliation,
@@ -3733,6 +3737,15 @@ export function recoveryService(
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
   }) {
+    // Fail-safe for callers outside the candidate sweep (run release, wake
+    // queue): a Vector research routine issue is never stranded-escalated.
+    if (await isVectorResearchRoutineIssue(db, input.issue)) {
+      logger.info(
+        { issueId: input.issue.id, companyId: input.issue.companyId },
+        "skipped stranded-issue escalation for a Vector research routine issue",
+      );
+      return null;
+    }
     if (isStrandedIssueRecoveryIssue(input.issue)) {
       return escalateStrandedRecoveryIssueInPlace({
         issue: input.issue,
@@ -4160,6 +4173,10 @@ export function recoveryService(
             : undefined,
           isNull(issues.hiddenAt),
           not(unadmittedChatWakeupCondition(issues.id, issues.companyId)),
+          // Vector research routine issues are settled from their run outcome
+          // (vector-research-issue-settlement); their agents have no issue
+          // tools, so re-waking or escalating them here is never right.
+          not(vectorResearchRoutineIssueCondition(issues)),
         ),
       );
 

@@ -351,10 +351,10 @@ const funkyWorkloadSpecs = {
 export type VectorResearchWorkloadKey = keyof typeof funkyWorkloadSpecs;
 
 const researchIssuePreamble = (key: string) =>
-  `Scheduled Vector research workload \`${key}\`. This issue carries no data: every input comes from the Vector tools bound to this run and every result is written through them. Report only what the tools returned. If a write tool refuses something, name the refusal and its reason in your summary; never reword a finding to get it past the check.`;
+  `Scheduled Vector research workload \`${key}\`. This issue carries no data: every input comes from the Vector tools bound to this run and every result is written through them. Report only what the tools returned. If a write tool refuses something, name the refusal and its reason in your summary; never reword a finding to get it past the check. You do not update this issue yourself: Paperclip posts your final message on it and closes it when your run ends (done when the run succeeds, blocked when it fails).`;
 
 const skippedRule =
-  "If the source is not ready, add a comment that starts with \"Skipped: source not ready\" and names each reason the tool gave, then mark this issue done. Do not retry in the same run.";
+  "If the source is not ready, end the run with a final message that starts with \"Skipped: source not ready\" and names each reason the tool gave. Do not retry in the same run.";
 
 // The sealed issue title and description of each research routine. They are
 // the agent's instructions for one run; Paperclip's routine owns scheduling.
@@ -367,7 +367,7 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
       `2. ${skippedRule}`,
       "3. For each ready slice key call `research_slice_payload` with `{\"slice_key\": \"<key>\"}`. Today's row (days_ago = 0) is the only possible subject; prior rows are context.",
       "4. For each material finding call `research_record_finding` with the slice_key and the finding, horizon \"current\". An unremarkable slice records nothing.",
-      "5. Comment one line per slice (findings recorded, none, or refused), then mark this issue done.",
+      "5. End with a final message of one line per slice (findings recorded, none, or refused).",
     ].join("\n\n"),
   },
   macro_scout: {
@@ -378,7 +378,7 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
       `2. ${skippedRule}`,
       "3. For each ready slice key call `research_slice_payload` with `{\"slice_key\": \"<key>\"}` and review its historical windows: persistent direction, acceleration, reversals and regime changes. A window the payload marks as lacking coverage is not evidence.",
       "4. For each material finding call `research_record_finding` with the slice_key and the finding, horizon \"weekly\", \"monthly\" or \"quarterly\" for the window it is about.",
-      "5. Comment one line per slice (findings recorded, none, or refused), then mark this issue done.",
+      "5. End with a final message of one line per slice (findings recorded, none, or refused).",
     ].join("\n\n"),
   },
   demand_scout: {
@@ -389,7 +389,7 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
       `2. ${skippedRule}`,
       "3. For each ready slice key call `research_slice_payload` with `{\"slice_key\": \"<key>\"}` and review what users asked: repeated questions, unanswered questions, and questions that stopped.",
       "4. For each material finding call `research_record_finding` with the slice_key and the finding, horizon \"current\".",
-      "5. Comment one line per slice (findings recorded, none, or refused), then mark this issue done.",
+      "5. End with a final message of one line per slice (findings recorded, none, or refused).",
     ].join("\n\n"),
   },
   advisor: {
@@ -399,7 +399,7 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
       "1. Call `pull_check_evidence` for your authored checks.",
       `2. ${skippedRule} An advisor with no active checks is skipped the same way.`,
       "3. Call `research_record_finding` once with a concise Binder update in your remit: lead with the operational takeaway, name checks that were skipped or errored, separate what the checks show from what you infer, and say plainly when nothing needs attention. A proposed action is a recommendation for a human decision; never claim it was executed.",
-      "4. Comment a one-line summary, then mark this issue done.",
+      "4. End with a one-line final summary.",
     ].join("\n\n"),
   },
   synthesis: {
@@ -410,7 +410,7 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
       `2. ${skippedRule} No scout findings today counts as not ready.`,
       "3. Relate the findings to each other: reinforcement, contradiction, anomalies the longer history explains, deterioration not yet visible today. Copy subjects and identifiers verbatim and never introduce a magnitude that no input finding carries.",
       "4. Call `research_record_finding` for each synthesis finding, horizon \"cross\".",
-      "5. Comment a one-line summary, then mark this issue done.",
+      "5. End with a one-line final summary.",
     ].join("\n\n"),
   },
   curation: {
@@ -421,7 +421,7 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
       `2. ${skippedRule} No findings today counts as not ready.`,
       "3. Score every finding on materiality, novelty, confidence, freshness and usefulness, judging it as written. Recommend nothing whose evidence receipt is missing or whose observation and inference are not separated.",
       "4. Call `research_record_curation` with a verdict (publish, hold or reject), a rank and a brief reason for each finding, copying each finding id exactly.",
-      "5. Comment a one-line summary, then mark this issue done.",
+      "5. End with a one-line final summary.",
     ].join("\n\n"),
   },
   dmv_review: {
@@ -430,8 +430,7 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
       researchIssuePreamble("dmv_review"),
       "1. Call `dmv.get_pipeline_health` and `dmv.list_recent_pipeline_failures` for today's intake, and `dmv.list_audit_back` for items sent back for review.",
       `2. ${skippedRule} A pipeline with no intake for the day is not ready.`,
-      "3. Comment a review for a human: what the pipeline shows, each failure with its reason, and any recommended follow-up. You cannot change DMV state.",
-      "4. Mark this issue done.",
+      "3. End with a final message reviewing for a human: what the pipeline shows, each failure with its reason, and any recommended follow-up. You cannot change DMV state.",
     ].join("\n\n"),
   },
   dmv_audit_back_triage: {
@@ -439,9 +438,8 @@ const researchRoutineIssueTemplates: Record<VectorResearchWorkloadKey, { title: 
     description: [
       researchIssuePreamble("dmv_audit_back_triage"),
       "1. Call `dmv.list_audit_back`, then `dmv.get_pipeline_health` and `dmv.list_recent_pipeline_failures` for context.",
-      `2. ${skippedRule} An empty audit-back list is not a skip: say so and mark this issue done.`,
-      "3. Comment a triage for a human: each audit-back item, the likely cause the evidence supports, and a recommended action. You cannot change DMV state and must not claim any action was taken.",
-      "4. Mark this issue done.",
+      `2. ${skippedRule} An empty audit-back list is not a skip: say so in your final message.`,
+      "3. End with a final message triaging for a human: each audit-back item, the likely cause the evidence supports, and a recommended action. You cannot change DMV state and must not claim any action was taken.",
     ].join("\n\n"),
   },
 };
