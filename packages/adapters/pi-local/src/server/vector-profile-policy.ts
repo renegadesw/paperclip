@@ -72,7 +72,7 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
     capability: "github",
     tools: [],
     status: "external",
-    dependency: "Paperclip's github.code connector: hosted GitHub MCP tools and run-scoped git/gh launchers, granted to the agent on the board. Vector's legacy github_* tools and gh shim are retired.",
+    dependency: "Paperclip's assigned GitHub connector tools are the only GitHub access path. Organization GitHub App and personal PAT connections retain separate grants and audit. Shell git/gh authentication is disabled; rctl is not an alternate GitHub credential source.",
   },
   {
     capability: "personal-memory",

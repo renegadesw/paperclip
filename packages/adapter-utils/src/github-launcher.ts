@@ -1,5 +1,6 @@
 /** Standalone source is staged unchanged on local, SSH, and sandbox runtimes. No secrets in files. */
-export function githubLauncherSource(): string {
+export function githubLauncherSource(options: { toolsOnly?: boolean } = {}): string {
+  if (options.toolsOnly) return `#!/usr/bin/env node\nprocess.stderr.write("Paperclip: use the assigned Paperclip connector tools; direct shell access to this tool is disabled for this profile.\\n");\nprocess.exit(126);\n`;
   return String.raw`#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');

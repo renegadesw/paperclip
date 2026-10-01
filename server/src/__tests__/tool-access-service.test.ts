@@ -7303,7 +7303,7 @@ describeEmbeddedPostgres("tool access service", () => {
     const userId = `github-manager-${randomUUID()}`;
     await grantBoardUser(db, company.id, userId, [], "owner");
     const agent = await createAgent(db, company.id);
-    const subject = `agent:${agent.id}`;
+    let subject = `agent:${agent.id}`;
     let minted = 0;
     const installationCredentials = () => ({
       v: 1 as const,
@@ -7432,6 +7432,26 @@ describeEmbeddedPostgres("tool access service", () => {
         "oauth.refresh_token",
       ]);
       expect(JSON.stringify(grant)).not.toContain("do-not-store");
+      const secondAgent = await createAgent(db, company.id);
+      subject = `agent:${secondAgent.id}`;
+      const secondStart = await service.startOAuth(company.id, connected.connectionId, {
+        redirectUri: "http://127.0.0.1:3100/api/tools/oauth/cloud-connector/callback",
+        actor, subjectAgentId: secondAgent.id,
+      });
+      await service.completePaperclipCloudConnectorCallback({
+        state: new URL(secondStart.authorizationUrl, "http://board.invalid").searchParams.get("state")!,
+        claimId: "second-installation-claim", actor,
+      });
+      const dedicatedGrants = await db.select().from(connectionGrants).where(
+        and(eq(connectionGrants.connectionId, connected.connectionId), eq(connectionGrants.kind, "agent")));
+      expect(dedicatedGrants).toHaveLength(2);
+      expect(dedicatedGrants.every((candidate) => candidate.status === "active")).toBe(true);
+      const bindings = await db.select().from(companySecretBindings).where(
+        eq(companySecretBindings.targetId, connected.connectionId));
+      expect(bindings).toHaveLength(4);
+      expect(new Set(bindings.map((binding) => binding.configPath)).size).toBe(4);
+      expect(bindings.every((binding) => binding.configPath.startsWith("grants."))).toBe(true);
+      subject = `agent:${agent.id}`;
       expect(githubPaths.some((path) => path === "/user" || path.startsWith("/user/"))).toBe(false);
 
       // A fresh one-hour installation token is not re-minted on every use...
@@ -15562,6 +15582,50 @@ describeEmbeddedPostgres("tool access service", () => {
     ]);
   });
 
+  it("repairs a legacy company-scoped personal key without exposing it or changing grants", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const userId = `personal-repair-${randomUUID()}`;
+    const actor = { actorType: "user" as const, actorId: userId };
+    mockToolsList([{ name: "get_file_contents", description: "Read",
+      inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } }]);
+    const connected = await withGalleryServerUrl("github", PUBLIC_MCP_FIXTURE_URL, () =>
+      service.connectGalleryApp(company.id, { galleryKey: "github", name: "Personal repair",
+        grantKind: "user", credentialValues: { "credentials.authorization": "original-personal-key" } }, actor));
+    const grant = (await service.listConnectionGrants(connected.connectionId, company.id))
+      .grants.find((candidate) => candidate.kind === "user")!;
+    const vault = secretService(db);
+    const legacy = await vault.create(company.id, { name: "Legacy personal key", key: `legacy.${randomUUID()}`,
+      provider: "local_encrypted", value: "original-personal-key" }, { userId });
+    const refs = [{ ...grant.credentialSecretRefs[0]!, secretId: legacy.id }];
+    await db.update(connectionGrants).set({ credentialSecretRefs: refs }).where(eq(connectionGrants.id, grant.id));
+    const connection = await service.getConnection(connected.connectionId, company.id);
+    await db.update(toolConnections).set({ credentialRefs: connection.credentialRefs.map((ref) =>
+      ({ ...ref, name: "authorization", secretId: legacy.id })) }).where(eq(toolConnections.id, connected.connectionId));
+    await vault.createBinding({ companyId: company.id, secretId: legacy.id,
+      targetType: "tool_connection", targetId: connected.connectionId, configPath: "credentials.authorization" });
+    await expect(service.reconnectGalleryApp(connected.connectionId, company.id,
+      { credentialValues: {}, repairStoredPersonalCredentials: true },
+      { actorType: "user", actorId: "another-owner" })).rejects.toThrow();
+    await withGalleryServerUrl("github", PUBLIC_MCP_FIXTURE_URL, () =>
+      service.reconnectGalleryApp(connected.connectionId, company.id,
+        { credentialValues: {}, repairStoredPersonalCredentials: true }, actor));
+    const repairedConnection = await service.getConnection(connected.connectionId, company.id);
+    expect(repairedConnection.credentialRefs).toHaveLength(1);
+    expect(repairedConnection.credentialRefs[0]!.secretId).not.toBe(legacy.id);
+    const repaired = (await service.listConnectionGrants(connected.connectionId, company.id)).grants;
+    expect(repaired).toHaveLength(1);
+    expect(repaired[0]).toMatchObject({ id: grant.id, kind: "user", subjectUserId: userId, status: "active" });
+    const [stored] = await db.select().from(companySecrets).where(eq(companySecrets.id,
+      repaired[0]!.credentialSecretRefs[0]!.secretId));
+    expect(stored).toMatchObject({ scope: "user", ownerUserId: userId });
+    expect(stored.userSecretDefinitionId).toBeTruthy();
+    const resolved = await vault.resolveUserSecretValue(company.id,
+      { definitionId: stored.userSecretDefinitionId!, responsibleUserId: userId, version: "latest", required: true });
+    expect(resolved?.value).toBe("original-personal-key");
+    expect(JSON.stringify(repaired)).not.toContain("original-personal-key");
+  });
+
   it("reconnects a personal key on the existing user grant without creating an organization credential", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
@@ -15617,6 +15681,10 @@ describeEmbeddedPostgres("tool access service", () => {
     ).toBe(false);
     const beforeSecretId =
       beforePersonalGrant.credentialSecretRefs[0]!.secretId;
+    const [personalSecret] = await db.select().from(companySecrets)
+      .where(eq(companySecrets.id, beforeSecretId));
+    expect(personalSecret).toMatchObject({ scope: "user", ownerUserId: userId });
+    expect(personalSecret.userSecretDefinitionId).toBeTruthy();
 
     await withGalleryServerUrl("github", PUBLIC_MCP_FIXTURE_URL, () =>
       service.reconnectGalleryApp(

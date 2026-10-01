@@ -5926,7 +5926,7 @@ export function toolAccessService(
     // A metadata edit or pause/resume must retain declarations for every
     // active personal/dedicated grant, not just connection-owned credentials.
     const activeGrants = await dbClient
-      .select({ refs: connectionGrants.credentialSecretRefs })
+      .select({ id: connectionGrants.id, kind: connectionGrants.kind, refs: connectionGrants.credentialSecretRefs })
       .from(connectionGrants)
       .where(
         and(
@@ -5935,6 +5935,12 @@ export function toolAccessService(
           eq(connectionGrants.status, "active"),
         ),
       );
+    // Each dedicated grant has its own credential at the same OAuth field.
+    // The durable target/path index is connection-scoped, so include the grant
+    // ID in these binding paths instead of colliding or replacing a teammate.
+    const dedicatedPaths = new Map(activeGrants.filter((grant) => grant.kind === "agent")
+      .flatMap((grant) => grant.refs.map((ref) =>
+        [`${ref.secretId}:${ref.configPath}`, `grants.${grant.id}.${ref.configPath}`] as const)));
     const rawBindings = [
       ...connection.credentialRefs.map((ref) => ({
         secretId: ref.secretId,
@@ -5961,6 +5967,9 @@ export function toolAccessService(
     // than one personal grant can reference the same client registration.
     // Binding rows are unique per secret/config path, so collapse those mirrors
     // before replacing the durable projection declarations.
+    for (const ref of rawBindings) {
+      ref.configPath = dedicatedPaths.get(`${ref.secretId}:${ref.configPath}`) ?? ref.configPath;
+    }
     const bindings = [
       ...new Map(
         rawBindings.map((ref) => [`${ref.secretId}:${ref.configPath}`, ref]),
@@ -9623,6 +9632,35 @@ export function toolAccessService(
     return galleryEntry;
   }
 
+  // Static personal credentials follow the same owner-bound vault contract as OAuth.
+  async function createOrRotatePersonalAppSecret(input: {
+    companyId: string; ownerUserId: string; name: string; configPath: string;
+    value: string; existingSecretId?: string; actor?: ActorInfo;
+  }) {
+    if (input.existingSecretId) {
+      const [existing] = await db.select().from(companySecrets).where(and(
+        eq(companySecrets.id, input.existingSecretId),
+        eq(companySecrets.companyId, input.companyId),
+      )).limit(1);
+      if (existing?.scope === "user") {
+        if (existing.ownerUserId !== input.ownerUserId || !existing.userSecretDefinitionId)
+          throw forbidden("Personal credential belongs to another user");
+        if (existing.status === "deleted") throw forbidden("Personal credential was deleted");
+        if (existing.status !== "active") await secrets.updateCurrentUserSecretValue(
+          input.companyId, input.ownerUserId, existing.id, { status: "active" }, actorForSecret(input.actor));
+        return secrets.rotateCurrentUserSecretValue(input.companyId, input.ownerUserId,
+          existing.id, { value: input.value }, actorForSecret(input.actor));
+      }
+    }
+    const definition = await secrets.createUserSecretDefinition(input.companyId, {
+      key: `tool_app.${randomUUID()}.${input.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}`,
+      name: input.name, provider: "local_encrypted", managedMode: "paperclip_managed",
+      description: "Personal app credential; resolved only for its owner.",
+    }, actorForSecret(input.actor));
+    return secrets.createCurrentUserSecretValue(input.companyId, input.ownerUserId,
+      { definitionId: definition.id, value: input.value }, actorForSecret(input.actor));
+  }
+
   async function createOrRotateOAuthSecret(
     input: {
       companyId: string;
@@ -11240,10 +11278,22 @@ export function toolAccessService(
       )
       .limit(1);
     if (!secret) throw notFound("OAuth credential secret not found");
+    let bindingConfigPath = ref.configPath;
+    if (grant.kind === "agent") {
+      const dedicatedPath = `grants.${grant.id}.${ref.configPath}`;
+      const [binding] = await db.select({ id: companySecretBindings.id }).from(companySecretBindings)
+        .where(and(eq(companySecretBindings.companyId, connection.companyId),
+          eq(companySecretBindings.secretId, ref.secretId),
+          eq(companySecretBindings.targetType, "tool_connection"),
+          eq(companySecretBindings.targetId, connection.id),
+          eq(companySecretBindings.configPath, dedicatedPath))).limit(1);
+      // Preserve the exact legacy binding until the next normal reconciliation.
+      if (binding) bindingConfigPath = dedicatedPath;
+    }
     const consumerContext = {
       consumerType: "tool_connection" as const,
       consumerId: connection.id,
-      configPath: ref.configPath,
+      configPath: bindingConfigPath,
       actorType: actor?.actorType ?? ("system" as const),
       actorId: actor?.actorId ?? null,
       responsibleUserId: grant.subjectUserId,
@@ -13003,18 +13053,22 @@ export function toolAccessService(
           throw badRequest(`Missing credential value for ${field.configPath}`);
         }
         if (!value) continue;
-        const secret = await secrets.create(
-          companyId,
-          {
-            name: `${name} ${field.label} ${randomUUID().slice(0, 8)}`,
-            key: `tool_app.${randomUUID()}.${field.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}`,
-            provider: "local_encrypted",
-            value,
-            description: `Credential for ${name} (${field.configPath}).`,
-          },
-          actorForSecret(actor),
-        );
-        createdSecretIds.push(secret.id);
+        const secret = personalIdentityUserId
+          ? await createOrRotatePersonalAppSecret({
+              companyId, ownerUserId: personalIdentityUserId,
+              name: `${name} ${field.label}`, configPath: field.configPath,
+              value, existingSecretId: retainedSecretRef?.secretId, actor,
+            })
+          : await secrets.create(
+              companyId,
+              {
+                name: `${name} ${field.label} ${randomUUID().slice(0, 8)}`,
+                key: `tool_app.${randomUUID()}.${field.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}`,
+                provider: "local_encrypted", value,
+                description: `Credential for ${name} (${field.configPath}).`,
+              }, actorForSecret(actor),
+            );
+        if (secret.id !== retainedSecretRef?.secretId) createdSecretIds.push(secret.id);
         credentialSecretRefs.push({
           secretId: secret.id,
           versionSelector: "latest",
@@ -14335,7 +14389,7 @@ export function toolAccessService(
   async function reconnectGalleryApp(
     connectionId: string,
     companyId: string,
-    input: { credentialValues: Record<string, string> },
+    input: { credentialValues: Record<string, string>; repairStoredPersonalCredentials?: boolean },
     actor?: ActorInfo,
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId, companyId);
@@ -14374,18 +14428,37 @@ export function toolAccessService(
           },
         ];
 
-    const providedFields = credentialFields.filter(
-      (field) =>
-        (input.credentialValues[field.configPath]?.trim().length ?? 0) > 0,
-    );
-    if (providedFields.length === 0)
+    const personalIdentity = await fixedPersonalIdentityForReconnect(connection, undefined, actor);
+    const credentialValues = { ...input.credentialValues };
+    if (input.repairStoredPersonalCredentials) {
+      if (!personalIdentity?.grant || personalIdentity.grant.status !== "active")
+        throw badRequest("Repair requires an active personal grant");
+      const otherGrants = await db.select().from(connectionGrants).where(
+        eq(connectionGrants.companyId, companyId));
+      for (const ref of personalIdentity.grant.credentialSecretRefs) {
+        if (!credentialFields.some((field) => field.configPath === ref.configPath)) continue;
+        const [stored] = await db.select().from(companySecrets).where(and(
+          eq(companySecrets.id, ref.secretId), eq(companySecrets.companyId, companyId),
+        )).limit(1);
+        if (stored?.scope === "user") continue;
+        if (!stored || stored.scope !== "company" || stored.status !== "active"
+            || stored.createdByUserId !== personalIdentity.subjectUserId
+            || otherGrants.some((grant) => grant.id !== personalIdentity.grant!.id
+              && grant.credentialSecretRefs.some((candidate) => candidate.secretId === ref.secretId)))
+          throw forbidden("Stored credential cannot be adopted by this personal grant");
+        credentialValues[ref.configPath] = await secrets.resolveSecretValue(companyId,
+          ref.secretId, ref.versionSelector ?? "latest", {
+            consumerType: "tool_connection", consumerId: connection.id,
+            configPath: ref.configPath, actorType: actor?.actorType ?? "system",
+            actorId: actor?.actorId ?? null, responsibleUserId: personalIdentity.subjectUserId,
+          });
+      }
+    }
+    const providedFields = credentialFields.filter((field) =>
+      (credentialValues[field.configPath]?.trim().length ?? 0) > 0);
+    if (providedFields.length === 0 && !input.repairStoredPersonalCredentials)
       throw badRequest("Paste a new key to reconnect this app");
 
-    const personalIdentity = await fixedPersonalIdentityForReconnect(
-      connection,
-      undefined,
-      actor,
-    );
     const credentialSecretRefs = [
       ...(personalIdentity?.grant?.credentialSecretRefs ??
         connection.credentialSecretRefs),
@@ -14395,36 +14468,25 @@ export function toolAccessService(
     ];
 
     for (const field of providedFields) {
-      const value = input.credentialValues[field.configPath]!.trim();
-      const existing = credentialSecretRefs.find(
-        (ref) => ref.configPath === field.configPath,
-      );
-      if (existing) {
-        await secrets.rotate(
-          existing.secretId,
-          { value },
-          actorForSecret(actor),
-        );
-        continue;
-      }
-      const secret = await secrets.create(
-        companyId,
-        {
-          name: `${connection.name} ${field.label} ${randomUUID().slice(0, 8)}`,
-          key: `tool_app.${randomUUID()}.${field.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}`,
-          provider: "local_encrypted",
-          value,
-          description: `Credential for ${connection.name} (${field.configPath}).`,
-        },
-        actorForSecret(actor),
-      );
-      credentialSecretRefs.push({
-        secretId: secret.id,
-        versionSelector: "latest",
-        configPath: field.configPath,
-        required: field.required ?? true,
-        label: field.label,
-      });
+      const value = credentialValues[field.configPath]!.trim();
+      const existingIndex = credentialSecretRefs.findIndex((ref) => ref.configPath === field.configPath);
+      const existing = credentialSecretRefs[existingIndex];
+      const secret = personalIdentity
+        ? await createOrRotatePersonalAppSecret({ companyId,
+            ownerUserId: personalIdentity.subjectUserId, name: `${connection.name} ${field.label}`,
+            configPath: field.configPath, value, existingSecretId: existing?.secretId, actor })
+        : existing
+          ? await secrets.rotate(existing.secretId, { value }, actorForSecret(actor))
+          : await secrets.create(companyId, {
+              name: `${connection.name} ${field.label} ${randomUUID().slice(0, 8)}`,
+              key: `tool_app.${randomUUID()}.${field.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}`,
+              provider: "local_encrypted", value,
+              description: `Credential for ${connection.name} (${field.configPath}).`,
+            }, actorForSecret(actor));
+      const nextRef = { secretId: secret.id, versionSelector: "latest" as const,
+        configPath: field.configPath, required: field.required ?? true, label: field.label };
+      if (existingIndex >= 0) credentialSecretRefs[existingIndex] = nextRef;
+      else credentialSecretRefs.push(nextRef);
       if (field.placement === "header" && field.key) {
         const nextCredentialRef = {
           name: field.configPath,
@@ -14435,7 +14497,7 @@ export function toolAccessService(
           prefix: field.prefix ?? null,
         } satisfies McpConnectionCredentialRef;
         const existingCredentialRefIndex = credentialRefs.findIndex(
-          (ref) => ref.name === field.configPath,
+          (ref) => ref.name === field.configPath || (ref.placement === "header" && ref.key === field.key),
         );
         if (existingCredentialRefIndex >= 0)
           credentialRefs[existingCredentialRefIndex] = nextCredentialRef;

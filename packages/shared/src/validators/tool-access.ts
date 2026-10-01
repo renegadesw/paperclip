@@ -478,6 +478,7 @@ export const connectToolAppSchema = z.object({
 export type ConnectToolApp = z.infer<typeof connectToolAppSchema>;
 
 export const reconnectToolAppSchema = z.object({
+  repairStoredPersonalCredentials: z.boolean().optional(),
   credentialValues: z.record(z.string().trim().min(1).max(200), z.string().min(1)),
 });
 

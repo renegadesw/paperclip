@@ -11,6 +11,16 @@ const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 describe("managed GitHub launchers", () => {
+  it.each(["git", "gh", "rctl"])("denies shell %s in connector-only profiles without invoking a broker", async (program) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-github-tools-only-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const launcher = path.join(root, program);
+    await writeFile(launcher, githubLauncherSource({ toolsOnly: true }), { mode: 0o700 });
+    await expect(exec(launcher, ["--version"], { env: { ...process.env } })).rejects.toMatchObject({
+      code: 126, stderr: expect.stringContaining("use the assigned Paperclip connector tools"),
+    });
+  });
+
   it.each(["broker-offline", "config-unwritable", "capability-rejected"])("keeps real local Git usable when %s", async (failure) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-github-failure-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));

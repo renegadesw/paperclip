@@ -141,3 +141,34 @@ and the projection never replaces `HOME`.
 
 Cloud deployment and exact GitHub App registration settings live in
 `paperclip-cloud/docs/github-connector-deploy-bootstrap.md`.
+
+## Vector engineering: connector tools only
+
+The Vector engineering installation uses assigned GitHub MCP tools as its
+GitHub access path. The controller stages denying `git`/`gh` and direct `rctl` wrappers and does
+not mint a shell GitHub credential capability. Local shell remains available
+for local editing, builds, tests and operator-approved device work. rctl is not
+registered as a second GitHub provider and has no independent GitHub credential
+role in this setup. The Vector connector broker replaces the Cloud handoff;
+provider grants, vault storage, policy and audit still belong to Paperclip.
+
+The organization GitHub App and personal PAT are separate connections. Agents
+select the assigned connection for the repository owner. A connection health
+check or tool listing is insufficient: verify actual repository reads with
+agent authority on each connection and record connection, repository, decision,
+invocation and result without credentials.
+
+Personal API-key/PAT setup and reconnect store owner-bound user secrets,
+including a user-secret definition. They must not write company secrets into
+personal grants. The reconnect API supports `repairStoredPersonalCredentials`
+with empty `credentialValues` for legacy malformed personal grants. The signed-in
+owner can adopt only an active company credential created by that same owner
+and referenced solely by that personal grant. Values move within the server;
+they never appear in the request, response or transcript. Grants and connection
+installations retain their IDs and scope. Shared or other-owner credentials
+are rejected. OAuth and dedicated-agent connection behavior is unchanged.
+
+Dedicated-agent OAuth vault bindings include their grant ID in the binding
+path. This permits one App connection to authorize multiple engineering agents
+without a target/path uniqueness collision or credential replacement. Legacy
+bindings retain exact secret validation until normal reconciliation updates them.

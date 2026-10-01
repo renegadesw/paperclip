@@ -20968,8 +20968,9 @@ export function heartbeatService(
           allowStandingDelegation: false,
         },
       );
+      const githubToolsOnly = process.env.PAPERCLIP_VECTOR_PROFILE === "engineering";
       const useHostGitHub =
-        !githubSelection.configured &&
+        !githubToolsOnly && !githubSelection.configured &&
         trustPreset.kind === "standard" &&
         ["local", "ssh"].includes(
           selectedEnvironmentForConfig?.driver ?? "local",
@@ -22105,9 +22106,9 @@ export function heartbeatService(
       });
       runtimeConfig = { ...runtimeConfig, env: gitExecutionEnv };
       for (const key of MANAGED_GITHUB_TOKEN_KEYS) secretKeys.add(key);
-      context.githubAuthenticationMode = useHostGitHub ? "host" : "managed";
+      context.githubAuthenticationMode = githubToolsOnly ? "connector_tools" : useHostGitHub ? "host" : "managed";
       if (!useHostGitHub) {
-        const githubBrokerToken = createRuntimeToolsToken({
+        const githubBrokerToken = githubToolsOnly ? null : createRuntimeToolsToken({
           agentId: agent.id,
           companyId: agent.companyId,
           runId: run.id,
@@ -22126,6 +22127,7 @@ export function heartbeatService(
             target: executionTarget,
             cwd: executionWorkspace.cwd,
             env: githubBrokerEnv,
+            toolsOnly: githubToolsOnly,
           }),
         };
         secretKeys.add("PAPERCLIP_GITHUB_BROKER_TOKEN");
