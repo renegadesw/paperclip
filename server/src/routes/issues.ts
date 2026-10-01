@@ -486,6 +486,7 @@ type ExecutionStageWakeContext = {
   currentParticipant: ParsedExecutionState["currentParticipant"];
   returnAssignee: ParsedExecutionState["returnAssignee"];
   reviewRequest: ParsedExecutionState["reviewRequest"];
+  lastDecisionId: ParsedExecutionState["lastDecisionId"];
   lastDecisionOutcome: ParsedExecutionState["lastDecisionOutcome"];
   allowedActions: string[];
 };
@@ -2092,6 +2093,7 @@ function buildExecutionStageWakeContext(input: {
     currentParticipant: input.state.currentParticipant,
     returnAssignee: input.state.returnAssignee,
     reviewRequest: input.state.reviewRequest ?? null,
+    lastDecisionId: input.state.lastDecisionId,
     lastDecisionOutcome: input.state.lastDecisionOutcome,
     allowedActions: input.allowedActions,
   };
@@ -2895,6 +2897,7 @@ function buildExecutionStageWakeup(input: {
     return {
       agentId,
       wakeup: {
+        executionStageHandoff: true,
         source: "assignment" as const,
         triggerDetail: "system" as const,
         reason,
@@ -2941,6 +2944,7 @@ function buildExecutionStageWakeup(input: {
     return {
       agentId,
       wakeup: {
+        executionStageHandoff: true,
         source: "assignment" as const,
         triggerDetail: "system" as const,
         reason: "execution_changes_requested",

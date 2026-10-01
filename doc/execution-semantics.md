@@ -515,6 +515,8 @@ An agent-owned `in_progress` issue is stalled when it has no active run, no queu
 
 This is review/approval state: execution is paused because the next move belongs to a reviewer, approver, board user, or recovery owner.
 
+A typed review, approval, or changes-requested handoff that arrives before the outgoing execution releases its process or lease is saved as a durable deferred wake. Cleanup and periodic reconciliation retry that exact handoff through ordinary admission. The current typed participant, company scope, pause, budget, and ownership gates still apply; changing the stage cancels a stale handoff. The outgoing agent cannot continue as the reviewer.
+
 A healthy `in_review` issue has at least one valid action path:
 
 - a typed execution-policy participant who can approve or request changes
