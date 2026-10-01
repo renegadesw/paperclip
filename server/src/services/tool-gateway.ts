@@ -1,3 +1,4 @@
+import { installationToken } from "./github-installation-bundle.js";
 import { runIdentityContexts } from "@paperclipai/db";
 import { captureRunIdentity } from "./run-identity.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
@@ -3798,7 +3799,7 @@ export function createToolGatewayService(
     session: ToolGatewaySession,
     connection: typeof toolConnections.$inferSelect,
     grant: typeof connectionGrants.$inferSelect,
-    resolveOptions: { forceRefresh?: boolean } = {},
+    resolveOptions: { forceRefresh?: boolean; parameters?: unknown } = {},
   ): Promise<Record<string, string>> {
     const tracked =
       session.identityContextId &&
@@ -3813,7 +3814,7 @@ export function createToolGatewayService(
               session,
               connection,
               grant,
-              resolveOptions,
+              { forceRefresh: resolveOptions.forceRefresh },
             );
       if (tracked)
         await db
@@ -3835,7 +3836,9 @@ export function createToolGatewayService(
             ),
           );
       // The managed GitHub profile selects its hosted MCP toolsets per request.
-      return { ...githubConnectorProfileHeaders(connection.config), ...headers };
+      const selectedHeaders = { ...headers };
+      if (selectedHeaders.Authorization?.startsWith("Bearer vgit1.")) selectedHeaders.Authorization = "Bearer " + installationToken(selectedHeaders.Authorization.slice(7), resolveOptions.parameters);
+      return { ...githubConnectorProfileHeaders(connection.config), ...selectedHeaders };
     } catch (error) {
       if (tracked)
         await db
@@ -5767,7 +5770,7 @@ export function createToolGatewayService(
     // during tools/list. Credentials remain authoritative on collisions.
     let credentialHeaders = composioSession?.headers ?? {
       ...projectedConnectionHeaders(connection),
-      ...(await resolveCredentialHeaders(session, connection, grant)),
+      ...(await resolveCredentialHeaders(session, connection, grant, { parameters })),
     };
     let builtHeaders = buildRemoteHeaders({
       session,
@@ -5800,11 +5803,7 @@ export function createToolGatewayService(
         options.remoteHttpRequest
           ? options.remoteHttpRequest(target, init)
           : guardedRemoteHttpFetch(target, init, {
-              ...remoteHttpFetchOptions(),
-              // This call site owns a caller-set budget that can exceed the
-              // transport's default response deadline, so hand it down rather than
-              // letting the tighter default cut a legitimately slow tool short.
-              responseTimeoutMs: ms,
+              ...remoteHttpFetchOptions(), responseTimeoutMs: ms,
             });
       let requestHeaders = headers;
       if (connection.config.mcpSessionRequired === true) {
@@ -5873,7 +5872,7 @@ export function createToolGatewayService(
         credentialHeaders = {
           ...projectedConnectionHeaders(connection),
           ...(await resolveCredentialHeaders(session, connection, grant, {
-            forceRefresh: true,
+            forceRefresh: true, parameters,
           })),
         };
         builtHeaders = buildRemoteHeaders({
@@ -5913,7 +5912,7 @@ export function createToolGatewayService(
         credentialHeaders = {
           ...projectedConnectionHeaders(connection),
           ...(await resolveCredentialHeaders(session, connection, grant, {
-            forceRefresh: true,
+            forceRefresh: true, parameters,
           })),
         };
         builtHeaders = buildRemoteHeaders({
@@ -5953,7 +5952,7 @@ export function createToolGatewayService(
         credentialHeaders = {
           ...projectedConnectionHeaders(connection),
           ...(await resolveCredentialHeaders(session, connection, grant, {
-            forceRefresh: true,
+            forceRefresh: true, parameters,
           })),
         };
         builtHeaders = buildRemoteHeaders({

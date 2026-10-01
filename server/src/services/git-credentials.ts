@@ -1,3 +1,4 @@
+import { installationToken } from "./github-installation-bundle.js";
 import {
   companySecrets,
   heartbeatRuns,
@@ -43,7 +44,8 @@ export const GIT_CREDENTIAL_TOKEN_ENV_KEY = "PAPERCLIP_GIT_TOKEN";
 // The helper is additionally installed URL-scoped (`credential.https://github.com.helper`)
 // so git does not consult it for other hosts in the first place — two independent gates.
 const GIT_CREDENTIAL_HELPER =
-  `!f() { ok=; proto=; while IFS= read -r l && [ -n "$l" ]; do case "$l" in host=github.com|host=www.github.com) ok=1;; protocol=https) proto=1;; esac; done; if [ "$1" = get ] && [ -n "$ok" ] && [ -n "$proto" ]; then printf 'username=x-access-token\\npassword=%s\\n' "$PAPERCLIP_GIT_TOKEN"; fi; }; f`;
+ `!f() { ok=; proto=; repo=; while IFS= read -r l && [ -n "$l" ]; do case "$l" in host=github.com|host=www.github.com) ok=1;; protocol=https) proto=1;; path=*) repo=\${l#path=};; esac; done; if [ "$1" = get ] && [ -n "$ok" ] && [ -n "$proto" ]; then printf 'username=x-access-token\\npassword='; PAPERCLIP_CREDENTIAL_REPO="$repo" node -e 'const v=process.env.PAPERCLIP_GIT_TOKEN||"";let t=v;if(v.startsWith("vgit1.")){const rows=JSON.parse(Buffer.from(v.slice(6),"base64url").toString());const owner=(process.env.PAPERCLIP_CREDENTIAL_REPO||"").split("/")[0].toLowerCase();const row=rows.find(r=>r.owner.toLowerCase()===owner);if(!row)process.exit(3);t=row.token;}process.stdout.write(t+"\\n");'; fi; }; f`;
+
 
 export type GitCredential = {
   token: string;
@@ -128,6 +130,7 @@ export function buildGitAuthInvocation(credential: GitCredential): GitAuthInvoca
       ["user.name", identity.login],
       ["user.email", noreplyEmail!],
     ] : []),
+    ["credential.useHttpPath", "true"],
   ];
   return {
     // The leading empty helper clears ambient helpers (gh, osxkeychain, credential-store) so
@@ -139,11 +142,12 @@ export function buildGitAuthInvocation(credential: GitCredential): GitAuthInvoca
       "-c", "credential.helper=",
       "-c", `credential.https://github.com.helper=${GIT_CREDENTIAL_HELPER}`,
       "-c", `credential.https://www.github.com.helper=${GIT_CREDENTIAL_HELPER}`,
+      "-c", "credential.useHttpPath=true",
     ],
     env: {
       [GIT_CREDENTIAL_TOKEN_ENV_KEY]: credential.token,
-      GH_TOKEN: credential.token,
-      GITHUB_TOKEN: credential.token,
+      GH_TOKEN: installationToken(credential.token),
+      GITHUB_TOKEN: installationToken(credential.token),
       GIT_TERMINAL_PROMPT: "0",
       ...(identity ? {
         GIT_AUTHOR_NAME: identity.login,
