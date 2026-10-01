@@ -9246,6 +9246,12 @@ export function issueRoutes(
               activeRecoveryAction.evidence.runId ??
               activeRecoveryAction.evidence.sourceRunId,
             decision: executionReconciliation,
+            releaseStoppedLocalEnvironment: async run => {
+              await heartbeat.releaseEnvironmentLeasesForRun({
+                runId: run.id, companyId: run.companyId, agentId: run.agentId,
+                status: run.status, failureReason: run.error,
+              });
+            },
           });
         } else if (executionReconciliation) {
           throw conflict(

@@ -30,6 +30,7 @@ export async function validateExecutionReconciliation(input: {
   agentId: string | null;
   sourceRunId: unknown;
   decision: ExecutionReconciliation | undefined;
+  releaseStoppedLocalEnvironment?: (run: typeof heartbeatRuns.$inferSelect) => Promise<void>;
 }) {
   const { db, companyId, issueId, agentId, decision } = input;
   if (!decision || decision.runId !== input.sourceRunId || !agentId) {
@@ -100,8 +101,8 @@ export async function validateExecutionReconciliation(input: {
     throw conflict(
       "This execution still has a coordinator or a linked continuation. Inspect that run first.",
     );
-  const leases = await db
-    .select({ id: environmentLeases.id })
+  let leases = await db
+    .select()
     .from(environmentLeases)
     .where(
       and(
@@ -109,8 +110,28 @@ export async function validateExecutionReconciliation(input: {
         eq(environmentLeases.heartbeatRunId, run.id),
         isNull(environmentLeases.releasedAt),
       ),
-    )
-    .limit(1);
+    );
+  // The stale-lock backstop can terminalize a legacy process before its normal
+  // finally block releases the local workspace. Operator reconciliation may
+  // finish that cleanup, using the same environment orchestrator as execution.
+  // Remote/native authority and executions without recorded process ownership
+  // still require their own cleanup receipts.
+  if (
+    leases.length &&
+    run.runtimeMode === "legacy" &&
+    (run.processPid || run.processGroupId) &&
+    input.releaseStoppedLocalEnvironment &&
+    leases.every(lease => lease.status === "active" && lease.provider === "local" && !lease.providerLeaseId)
+  ) {
+    await buildExecutionContinuation({ db, companyId, issueId, agentId,
+      context: { previousRunId: run.id }, summary: null, exposeLowTrustRaw: false });
+    await input.releaseStoppedLocalEnvironment(run);
+    leases = await db.select().from(environmentLeases).where(and(
+      eq(environmentLeases.companyId, companyId),
+      eq(environmentLeases.heartbeatRunId, run.id),
+      isNull(environmentLeases.releasedAt),
+    ));
+  }
   if (leases.length)
     throw conflict(
       "The previous execution environment has not finished releasing its authority.",

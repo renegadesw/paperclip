@@ -6,6 +6,7 @@ import { buildPaperclipWakePayload, heartbeatService } from "../heartbeat.js";
 import { legacyExecutionNeedsReconciliation, terminalizeLegacyExecution } from "../legacy-execution-recovery.js";
 import { deliverExecutionStatuses } from "../execution-status-delivery.js";
 import { publishLiveEvent } from "../live-events.js";
+import { environmentService } from "../environments.js";
 import {
   settleUnrecoverableExecutions,
   validateExecutionReconciliation,
@@ -25,6 +26,7 @@ import {
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
+  environmentLeases,
   issueRecoveryActions,
   issueComments,
   issues,
@@ -1048,6 +1050,39 @@ const support = externalDatabaseUrl
         }),
       ).rejects.toThrow("source or task owner changed");
     });
+    it.each(["dead_local", "live_local", "remote", "native", "unknown_process", "cleanup_pending"])(
+      "reconciles stopped local lease cleanup without bypassing authority (%s)", async scenario => {
+        const source = await seed();
+        await db.update(heartbeatRuns).set({
+          runtimeMode: scenario === "native" ? "native" : "legacy",
+          processPid: scenario === "live_local" ? process.pid : scenario === "unknown_process" ? null : 2147483647,
+          status: "interrupted",
+        }).where(eq(heartbeatRuns.id, source.runId));
+        const [lease] = await db.insert(environmentLeases).values({
+          companyId: source.companyId, heartbeatRunId: source.runId,
+          provider: scenario === "remote" ? "daytona" : "local",
+        }).returning();
+        const cleanup = vi.fn(async () => {
+          if (scenario !== "cleanup_pending") await environmentService(db).releaseLease(lease!.id, "failed");
+        });
+        const result = validateExecutionReconciliation({
+          db, ...source, sourceRunId: source.runId,
+          decision: { runId: source.runId, providerStopped: true, actionOutcome: "not_performed",
+            outcomeEvidence: "Operator verified the stopped fixture performed no external actions." },
+          releaseStoppedLocalEnvironment: cleanup,
+        });
+        if (scenario === "dead_local") {
+          await expect(result).resolves.toMatchObject({ id: source.runId });
+          expect(cleanup).toHaveBeenCalledOnce();
+          const [released] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease!.id));
+          expect(released!.releasedAt).not.toBeNull();
+        } else {
+          await expect(result).rejects.toThrow(scenario === "live_local" ? "still running" : "not finished releasing");
+          expect(cleanup).toHaveBeenCalledTimes(scenario === "cleanup_pending" ? 1 : 0);
+          const [held] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease!.id));
+          expect(held!.releasedAt).toBeNull();
+        }
+      });
     it("retains a reconciliation delivery across dispatch failure and invalidates stale ownership", async () => {
       const source = await seed();
       const [action] = await db
