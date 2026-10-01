@@ -2301,6 +2301,42 @@ rl.on("line", (line) => {
     }
   });
 
+  it.each(["authorization", "credentials.authorization"])("resolves personal HTTP header %s with its canonical declaration", async (name) => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    await createActiveMember(db, company.id, "alice");
+    await db.update(heartbeatRuns).set({ responsibleUserId: "alice" }).where(eq(heartbeatRuns.id, run.id));
+    const secrets = secretService(db);
+    const definition = await secrets.createUserSecretDefinition(company.id, {
+      name: "Personal HTTP token", key: `personal_http_${randomUUID().replace(/-/g, "")}`, provider: "local_encrypted",
+    });
+    const value = `personal-http-${randomUUID()}`;
+    const secret = await secrets.createCurrentUserSecretValue(company.id, "alice", { definitionId: definition.id, value });
+    const fake = await startFakeRemoteMcpServer((request) => {
+      expect(request.headers.authorization).toBe(`Bearer ${value}`);
+      return { body: { jsonrpc: "2.0", id: request.body?.id, result: { content: [{ type: "text", text: "personal connected" }] } } };
+    });
+    try {
+      const { connection } = await createRemoteMcpTool(db, company.id, {
+        url: fake.url, toolName: "whoami", riskLevel: "read",
+        credentialRefs: [{ name, secretId: secret.id, version: "latest", placement: "header", key: "Authorization", prefix: "Bearer " }],
+      });
+      await db.update(toolConnections).set({ credentialPolicy: "per_user" }).where(eq(toolConnections.id, connection.id));
+      await secrets.syncUserSecretDeclarationsForTarget(company.id, { targetType: "tool_connection", targetId: connection.id },
+        [{ definitionKey: definition.key, configPath: "credentials.authorization", envKey: "AUTHORIZATION", versionSelector: "latest", required: true }], { replaceAll: true });
+      await db.insert(connectionGrants).values({ companyId: company.id, connectionId: connection.id, kind: "user", subjectUserId: "alice",
+        credentialSecretRefs: [{ secretId: secret.id, configPath: "credentials.authorization", versionSelector: "latest", required: true }], status: "active" });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const tool = (await gateway.listToolsForSession(session.token)).find((item) => item.providerType === "mcp_remote_http")!;
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
+        .resolves.toMatchObject({ status: "completed", result: { content: "personal connected" } });
+      expect(fake.requests).toHaveLength(1);
+    } finally { await fake.close(); }
+  });
+
   it("creates a personal authorization card and resumes after the user grant exists", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);

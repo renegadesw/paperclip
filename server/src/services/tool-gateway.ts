@@ -4035,12 +4035,9 @@ export function createToolGatewayService(
           connection,
           grant,
           grantRef,
-          // OAuth grants declare their canonical oauth.* path. Treating
-          // this header projection as a generic credentials.* binding loses
-          // the personal secret declaration created by the OAuth callback.
-          grantRef.configPath.startsWith("oauth.")
-            ? grantRef.configPath
-            : `credentials.${ref.name}`,
+          // The grant owns the canonical declared path. Header names may
+          // already include credentials.; prefixing again loses that binding.
+          grantRef.configPath,
         );
         headers[ref.key] = `${ref.prefix ?? ""}${value}`;
       } catch {
