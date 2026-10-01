@@ -392,8 +392,9 @@ describe("Vector restricted profiles with a release-owned instructions file", ()
   });
 });
 
-// Byte-identical guard: these runs must render exactly what 625c5858c did.
-// The fixture was generated against that commit (VECTOR_PLAIN_CONVO_WRITE_GOLDEN=1).
+// These cases retain upstream prompt composition outside Vector plain chat.
+// Refreshed for upstream 67ebed8a5's prompt sections and connection guidance;
+// plain Vector chat and release-owned instructions are asserted separately above.
 const GOLDEN_CASES: Record<string, () => Parameters<typeof runTurn>[0]> = {
   nonVectorConversation: () => ({
     profile: null,

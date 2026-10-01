@@ -1,3 +1,7 @@
+import { instanceSettingsService } from "./instance-settings.js";
+import { createPostgresWakeQueueAdapter } from "../modules/wake-queue/adapters/postgres.js";
+import { createReleaseIssueExecution } from "../modules/wake-queue/application/use-cases.js";
+import * as nativeExecutor from "./native-runtime/native-session-executor.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { recordNativeLocalProcessStop, hasNativeLocalProcessStop, PROCESS_START_REQUESTED } from "./native-local-process-stop.js";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -6,17 +10,19 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
-import { beforeAll, afterAll, describe, it, expect } from "vitest";
+import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
 import {
   approvals, issueApprovals, issueThreadInteractions,
   agentWakeupRequests, agents, companies, createDb, heartbeatRunEvents, heartbeatRuns, issueComments, issueRecoveryActions,
-  issues, nativeRunFinalizations, environmentLeases, environments, issueRelations, issueTreeHolds, issueTreeHoldMembers,
+  issues, nativeRunFinalizations, nativeRunResults, completionContracts, environmentLeases, environments, issueRelations, issueTreeHolds, issueTreeHoldMembers,
 } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase, getEmbeddedPostgresTestSupport } from "../__tests__/helpers/embedded-postgres.js";
 import { admitExplicitNativeContinuation } from "./explicit-native-continuation.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import { heartbeatService, persistHeartbeatRunProcessMetadata, type HeartbeatEnvironmentRuntime } from "./heartbeat.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
+import { createDurableChatWakeupRequest } from "./durable-chat-wakeup.js";
+import { recordNativeFinalizationFailure } from "./native-runtime/native-run-finalizer.js";
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("explicit native conversation continuation", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -373,6 +379,32 @@ const support = await getEmbeddedPostgresTestSupport();
     return result;
   });
 
+  it.each(["verified", "unproven", "changed", "dry_run", "retry", "duplicate"])(
+    "requires exact local cleanup for a new turn after worker loss (%s)", async mode => {
+      const f = await seed();
+      await db.update(heartbeatRuns).set({ errorCode: "native_session_cleanup_quarantined" }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      const retire = vi.fn(() => mode !== "changed");
+      const verify = vi.spyOn(nativeExecutor, "verifyStoppedNativeSessionForContinuation").mockResolvedValue(
+        mode === "unproven" ? null : { evidence: { runId: f.sourceRunId, schema: "paperclip.stopped_native_conversation.v1" }, retire });
+      try {
+        const result = mode === "retry"
+          ? await db.transaction(tx => admitExplicitNativeContinuation({ ...f, db: tx as unknown as typeof db,
+              reason: "retry_failed_run", failedRunId: f.sourceRunId }))
+          : await admit(f, mode === "dry_run");
+        expect(Boolean(result)).toBe(["verified", "dry_run", "duplicate"].includes(mode));
+        expect(retire).toHaveBeenCalledTimes(["verified", "changed", "duplicate"].includes(mode) ? 1 : 0);
+        const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+        expect(Boolean(actions[0].evidence.explicitUserContinuation)).toBe(["verified", "duplicate"].includes(mode));
+        const events = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, f.sourceRunId),
+          eq(heartbeatRunEvents.eventType, "native.stopped_conversation_verified")));
+        expect(events).toHaveLength(["verified", "duplicate"].includes(mode) ? 1 : 0);
+        if (mode === "duplicate") {
+          expect(await admit(f)).toBeNull();
+          expect(retire).toHaveBeenCalledTimes(1);
+        }
+      } finally { verify.mockRestore(); }
+    });
+
   it.each(["suspended", "ready", "wrong_run", "wrong_thread", "active_provider", "pending_tool", "pending_output", "missing_state", "new_launch"])(
     "recovers a historical run without process metadata only from exact suspended state (%s)", async kind => {
       const f = await seed();
@@ -613,6 +645,25 @@ const support = await getEmbeddedPostgresTestSupport();
     const [adopted] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, waiting.id));
     expect(adopted).toMatchObject({ status: "coalesced", runId: runs[0].id });
     expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+  });
+
+
+  it.each(["issue_commented", "retry_failed_run"])("does not bypass an unsafe restore hold through %s", async reason => {
+    const f = await seed();
+    await db.update(agents).set({ adapterType: "grok_local" }).where(eq(agents.id, f.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", processPid: null,
+      errorCode: "workspace_restore_failed", resultJson: { workspaceRestoreFailure: "restore_unsafe_archive", conversationContinuation: "continue_conversation_v1" },
+    }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+    await db.update(issueRecoveryActions).set({ cause: "legacy_execution_requires_reconciliation" }).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    const blocked = vi.fn();
+    expect(await db.transaction(tx => admitExplicitNativeContinuation({ ...f, reason,
+      commentId: reason === "issue_commented" ? f.commentId : null,
+      failedRunId: reason === "retry_failed_run" ? f.sourceRunId : null,
+      onBlocked: blocked, db: tx as unknown as typeof db,
+    }))).toBeNull();
+    expect(blocked).toHaveBeenCalledWith("workspace_repair_required", expect.any(String));
+    expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: f.sourceRunId });
   });
 
   it.each(["issue_commented", "retry_failed_run"])("continues a legacy Daytona run lost before adapter.invoke: %s", async reason => {
@@ -952,6 +1003,244 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(coordinator.attempt).toBe(3);
     expect(coordinator.failureDetail?.replacementDenied).toBe("explicit_user_continuation");
   });
+  it.each(["failed", "succeeded_result", "rejected_result", "still_committing", "controller", "successor", "live_process"])(
+    "requires a fully committed failed result and verified stop for a new turn (%s)", async scenario => {
+      const f = await seed(), contractId = randomUUID(), resultId = randomUUID();
+      await db.insert(completionContracts).values({ id: contractId, companyId: f.companyId, issueId: f.issueId,
+        revision: 1, schemaVersion: "paperclip.completion-contract.v1", policyVersion: "test",
+        risk: "standard", completionAuthority: "server_arbiter", incompleteCriteriaPolicy: "preserve_non_terminal",
+        contractJson: {}, canonicalSha256: contractId, createdByActorType: "system", createdByActorId: "test" });
+      await db.update(heartbeatRuns).set({ completionContractId: contractId,
+        ...(scenario === "live_process" ? { processPid: process.pid } : {}),
+      }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      await db.insert(nativeRunResults).values({ id: resultId, companyId: f.companyId, issueId: f.issueId,
+        runId: f.sourceRunId, completionContractId: contractId, serverFingerprint: resultId,
+        schemaStatus: scenario === "rejected_result" ? "rejected" : "accepted", canonicalSha256: resultId,
+        resultJson: { terminal: { runTerminalState: scenario === "succeeded_result" ? "succeeded" : "failed" } } });
+      await db.update(nativeRunFinalizations).set({ resultId,
+        phase: scenario === "still_committing" ? "result_accepted" : "committed",
+        leaseOwner: scenario === "controller" ? "active-controller" : null,
+        failureDetail: scenario === "successor" ? { successorRunId: randomUUID() } : null,
+      }).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+      const result = await admit(f);
+      if (scenario === "failed") {
+        expect(result).toEqual({ previousRunId: f.sourceRunId, commentId: f.commentId });
+        expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+        const [saved] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+        expect(saved).toMatchObject({ phase: "committed", resultId });
+      } else {
+        expect(result).toBeNull();
+        expect(await getExecutionBlocker(db, f.companyId, f.issueId)).not.toBeNull();
+      }
+    });
+  async function seedResultBeforeTerminalFailure(f: Fixture) {
+    const contractId = randomUUID(), resultId = randomUUID();
+    await db.insert(completionContracts).values({ id: contractId, companyId: f.companyId, issueId: f.issueId,
+      revision: 1, schemaVersion: "paperclip.completion-contract.v1", policyVersion: "test",
+      risk: "standard", completionAuthority: "server_arbiter", incompleteCriteriaPolicy: "preserve_non_terminal",
+      contractJson: {}, canonicalSha256: contractId, createdByActorType: "system", createdByActorId: "test" });
+    await db.update(heartbeatRuns).set({ completionContractId: contractId, errorCode: "provider_transport_failed" })
+      .where(eq(heartbeatRuns.id, f.sourceRunId));
+    // Dickens returned a result before checkpoint/suspension failed. Accepting
+    // that result did not commit its disposition or make the failed run live.
+    await db.insert(nativeRunResults).values({ id: resultId, companyId: f.companyId, issueId: f.issueId,
+      runId: f.sourceRunId, completionContractId: contractId, serverFingerprint: resultId,
+      schemaStatus: "accepted", canonicalSha256: resultId,
+      resultJson: { terminal: { runTerminalState: "succeeded", reportedWorkDisposition: "blocked" } } });
+    await db.update(nativeRunFinalizations).set({ resultId, failureCode: "native_session_retry_exhausted" })
+      .where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+    await db.update(issueRecoveryActions).set({ status: "active", cause: "native_session_retry_exhausted",
+      evidence: { runId: f.sourceRunId, coordinatorAttempt: 3, sourceFailureCode: "provider_transport_failed" },
+    }).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    return resultId;
+  }
+  it.each(["stopped", "controller", "successor", "still_committing", "live_process", "identity_missing"])(
+    "continues after terminal failure with a retained result only when execution stopped (%s)", async scenario => {
+      const f = await seed(), resultId = await seedResultBeforeTerminalFailure(f);
+      await db.update(nativeRunFinalizations).set({
+        phase: scenario === "still_committing" ? "result_accepted" : "terminal_failure",
+        leaseOwner: scenario === "controller" ? "active-controller" : null,
+        failureDetail: scenario === "successor" ? { successorRunId: randomUUID() } : null,
+      }).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+      if (scenario === "live_process" || scenario === "identity_missing") {
+        await db.update(heartbeatRuns).set({ processPid: scenario === "live_process" ? process.pid : null })
+          .where(eq(heartbeatRuns.id, f.sourceRunId));
+      }
+      const result = await admit(f);
+      expect(result).toEqual(scenario === "stopped" ? { previousRunId: f.sourceRunId, commentId: f.commentId } : null);
+      expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toEqual(scenario === "stopped" ? null : expect.anything());
+      const [coordinator] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+      expect(coordinator).toMatchObject({ resultId, attempt: 3,
+        phase: scenario === "still_committing" ? "result_accepted" : "terminal_failure" });
+      const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+      expect(source).toMatchObject({ status: "failed", errorCode: "provider_transport_failed" });
+      const [savedResult] = await db.select().from(nativeRunResults).where(eq(nativeRunResults.id, resultId));
+      expect(savedResult.resultJson).toEqual({ terminal: { runTerminalState: "succeeded", reportedWorkDisposition: "blocked" } });
+    });
+  it.each(["task", "chat", "chat_with_next_message"])("delivers a queued %s message exactly once after a retained-result failure and delayed remote stop", async kind => {
+    const f = await seed(), resultId = await seedResultBeforeTerminalFailure(f);
+    const settings = instanceSettingsService(db);
+    const experimental = await settings.getExperimental();
+    await settings.updateExperimental({ enableAgentChat: true });
+    try {
+      if (kind !== "task") await db.update(issues).set({ conversationAgentId: f.agentId,
+        conversationUserId: "board", conversationState: "active",
+      }).where(eq(issues.id, f.issueId));
+      // Occupy the agent slot so admission is real without launching a provider.
+      await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" });
+      const lease = { id: randomUUID(), companyId: f.companyId, heartbeatRunId: f.sourceRunId,
+        provider: "daytona", providerLeaseId: "dickens-stopped-sandbox" };
+      await db.insert(environmentLeases).values({ ...lease, status: "active", leasePolicy: "ephemeral" });
+      const heartbeat = heartbeatService(db);
+      const wake = await heartbeat.wakeup(f.agentId, {
+        source: "on_demand", triggerDetail: "manual", reason: "issue_commented",
+        requestedByActorType: "user", requestedByActorId: "board",
+        payload: { issueId: f.issueId, commentId: f.commentId },
+        contextSnapshot: { source: "issue.comment", issueId: f.issueId, wakeCommentId: f.commentId },
+      });
+      expect(wake).toBeNull();
+      const [waiting] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
+      expect(waiting).toMatchObject({ status: "deferred_issue_execution", runId: null,
+        payload: { executionWait: { reason: "remote_cleanup" } } });
+      let nextCommentId: string | null = null;
+      let nextWakeId: string | null = null;
+      if (kind === "chat_with_next_message") {
+        nextCommentId = randomUUID();
+        nextWakeId = randomUUID();
+        await db.insert(issueComments).values({ id: nextCommentId, companyId: f.companyId, issueId: f.issueId,
+          authorType: "user", authorUserId: "board", body: "A separate follow-up." });
+        await db.insert(agentWakeupRequests).values({ id: nextWakeId, companyId: f.companyId, agentId: f.agentId,
+          source: "on_demand", triggerDetail: "manual", reason: "issue_commented", status: "deferred_issue_execution",
+          requestedByActorType: "user", requestedByActorId: "board", payload: {
+            issueId: f.issueId, commentId: nextCommentId,
+            _paperclipWakeContext: { source: "issue.comment", issueId: f.issueId, wakeCommentId: nextCommentId, wakeReason: "issue_commented" },
+          },
+        });
+      }
+      const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+      await heartbeat.resumeRemoteStopComments(source);
+      expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued")))).toHaveLength(0);
+      await db.update(environmentLeases).set({ status: "released", releasedAt: new Date(), cleanupStatus: "success",
+        metadata: { remoteExecutionTermination: remoteTerminationReceipt(lease, { providerLeaseId: lease.providerLeaseId, state: "stopped" }) },
+      }).where(eq(environmentLeases.id, lease.id));
+      // Cleanup and periodic recovery can race to dispatch the same receipt.
+      await Promise.all([heartbeat.resumeRemoteStopComments(source), heartbeat.resumeRemoteStopComments(source)]);
+      const successors = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued")));
+      expect(successors).toHaveLength(1);
+      expect(successors[0].contextSnapshot).toMatchObject({ forceFreshSession: true, previousRunId: f.sourceRunId, wakeCommentId: f.commentId });
+      if (nextWakeId) {
+        expect(successors[0].contextSnapshot?.wakeCommentIds).not.toContain(nextCommentId);
+        const [nextWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, nextWakeId));
+        expect(nextWake.status).toBe("deferred_issue_execution");
+      }
+      // Complete the admitted turn and run the same transactional queue drain
+      // used by finalization. A stale receipt must not create another turn.
+      await db.update(heartbeatRuns).set({ status: "succeeded", startedAt: new Date(), finishedAt: new Date() })
+        .where(eq(heartbeatRuns.id, successors[0].id));
+      await db.update(issues).set({ executionRunId: successors[0].id, status: "in_progress" })
+        .where(eq(issues.id, f.issueId));
+      const release = createReleaseIssueExecution({
+        issueLock: createPostgresWakeQueueAdapter(db, {
+          resolveResponsibleUserId: async () => "board",
+          getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+          resolveSessionBeforeForWakeup: async () => null,
+        }),
+        recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
+      });
+      const drained = await release({ companyId: f.companyId, runId: successors[0].id, now: new Date(), suppressImmediateRecovery: true });
+      expect(drained.outcome.kind).toBe(nextWakeId ? "promoted" : "released");
+      await heartbeat.resumeRemoteStopComments(source);
+      await release({ companyId: f.companyId, runId: successors[0].id, now: new Date(), suppressImmediateRecovery: true });
+      const afterDrain = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued")));
+      expect(afterDrain).toHaveLength(nextWakeId ? 1 : 0);
+      if (nextWakeId) {
+        expect(afterDrain[0]).toMatchObject({ wakeupRequestId: nextWakeId, contextSnapshot: { wakeCommentId: nextCommentId } });
+        expect(afterDrain[0].contextSnapshot?.wakeCommentIds ?? []).not.toContain(f.commentId);
+      }
+      const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, waiting.id));
+      expect(delivered).toMatchObject({ status: "coalesced", runId: successors[0].id });
+      const [coordinator] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+      expect(coordinator).toMatchObject({ phase: "terminal_failure", resultId, attempt: 3 });
+      expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+    } finally {
+      await settings.updateExperimental({ enableAgentChat: experimental.enableAgentChat });
+    }
+  });
+  it("keeps exhausted workspace export on its own repair path after the sandbox stops", async () => {
+    const f = await seed(), resultId = await seedResultBeforeTerminalFailure(f);
+    await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    await db.update(nativeRunFinalizations).set({ phase: "result_accepted", attempt: 1, failureCode: null, failureDetail: null })
+      .where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+    await db.update(heartbeatRuns).set({ status: "running", nativePhase: "result_accepted", finishedAt: null })
+      .where(eq(heartbeatRuns.id, f.sourceRunId));
+    const lease = { id: randomUUID(), companyId: f.companyId, heartbeatRunId: f.sourceRunId,
+      provider: "daytona", providerLeaseId: "pending-workspace-export" };
+    await db.insert(environmentLeases).values({ ...lease, status: "active", leasePolicy: "ephemeral" });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+    await db.update(heartbeatRuns).set({ runnerProfileJson: { ...run.runnerProfileJson,
+      nativeWorkspaceSync: { schema: "paperclip.native-workspace-sync/v1", state: "prepared",
+        descriptorSha256: "a".repeat(64), baselineSha256: "b".repeat(64), finalHostSha256: null,
+        workspaceId: randomUUID(), leaseId: lease.id, providerLeaseId: lease.providerLeaseId,
+        remoteCwd: "/work", resourceDisposition: "destroy" },
+    } }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await recordNativeFinalizationFailure({ db, runId: f.sourceRunId,
+        error: new Error("native_workspace_sync_out_failed"), failureScope: "workspace", projectRunStatus: true });
+    }
+    const [retainedLease] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+    expect(retainedLease).toMatchObject({ status: "pending_cleanup", metadata: {
+      nativeWorkspaceExportResume: { runId: f.sourceRunId, leaseId: lease.id, resultId },
+    } });
+    await db.update(environmentLeases).set({ status: "released", releasedAt: new Date(), cleanupStatus: "success",
+      metadata: { ...retainedLease.metadata,
+        remoteExecutionTermination: remoteTerminationReceipt(lease, { providerLeaseId: lease.providerLeaseId, state: "stopped" }) },
+    }).where(eq(environmentLeases.id, lease.id));
+    const exportState = () => Promise.all([
+      db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId)),
+      db.select().from(nativeRunResults).where(eq(nativeRunResults.id, resultId)),
+      db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id)),
+      db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId)),
+    ]);
+    const before = await exportState();
+    // Export repair is intentionally excluded before conversation stop checks.
+    // A new message must leave the accepted result, retention, and repair intact.
+    await db.update(issueComments).set({ createdAt: new Date(Date.now() + 1000) }).where(eq(issueComments.id, f.commentId));
+    expect(await admit(f)).toBeNull();
+    expect(await exportState()).toEqual(before);
+    const [coordinator] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+    expect(coordinator).toMatchObject({ phase: "terminal_failure", resultId, attempt: 1,
+      failureCode: "native_workspace_sync_out_retry_exhausted", failureDetail: { workspaceFinalizeAttempt: 3 } });
+    const [action] = await db.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.sourceIssueId, f.issueId), eq(issueRecoveryActions.cause, "native_workspace_sync_out_retry_exhausted"),
+    ));
+    expect(action).toMatchObject({ status: "active", cause: "native_workspace_sync_out_retry_exhausted" });
+  });
+  it.each(["linked", "revoked", "unlinked", "wrong_author"])(
+    "admits a fresh Slack message after failure only with current linked-user authority (%s)", async scenario => {
+      const f = await seed();
+      // Keep execution queued so this tests real admission without launching a provider.
+      await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" });
+      const authorize = vi.fn(async () => { if (scenario === "revoked") throw new Error("chat_authorization_revoked"); });
+      const request = createDurableChatWakeupRequest({ id: randomUUID(), ...f,
+        requestedByActorType: scenario === "unlinked" ? "system" : "user",
+        requestedByActorId: scenario === "wrong_author" ? "another-user" : "board", requestedAt: new Date(), authorize });
+      const wake = () => heartbeatService(db).wakeup(f.agentId, {
+        source: "assignment", triggerDetail: "system", reason: "External chat message received",
+        requestedByActorType: request.requestedByActorType, requestedByActorId: request.requestedByActorId,
+        payload: { issueId: f.issueId, wakeCommentId: f.commentId, mutation: "chat_message_received" },
+        contextSnapshot: { issueId: f.issueId, wakeCommentId: f.commentId, source: "chat:slack" },
+        durableChatRequest: request,
+      });
+      if (scenario === "revoked") await expect(wake()).rejects.toThrow("chat_authorization_revoked");
+      else await wake();
+      expect(authorize).toHaveBeenCalled();
+      const successors = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued")));
+      expect(successors).toHaveLength(scenario === "linked" ? 1 : 0);
+      if (scenario === "linked") {
+        expect(successors[0].contextSnapshot).toMatchObject({ forceFreshSession: true, previousRunId: f.sourceRunId });
+        expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+      } else expect(await getExecutionBlocker(db, f.companyId, f.issueId)).not.toBeNull();
+    });
   it.each(["live_process", "missing_process", "lease", "coordinator", "successor", "agent_message", "old_comment", "wrong_author", "run_authored", "reassigned", "automatic", "approval", "question", "malformed_comment", "legacy_owner"])("keeps the hold for %s", async kind => {
     const f = await seed();
     if (kind === "legacy_owner") await db.insert(heartbeatRuns).values({ companyId: f.companyId,

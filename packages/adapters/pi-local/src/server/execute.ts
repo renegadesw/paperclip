@@ -1,3 +1,4 @@
+import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -45,10 +46,9 @@ import {
   resolveLegacyPaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
   renderTemplate,
-  renderPaperclipWakePrompt,
-  selectPaperclipTaskMarkdown,
+  selectPaperclipPromptSections,
+  selectInitialCommunicationGuidance,
   isPaperclipRecoveryWakePayload,
-  stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
   runChildProcess,
@@ -565,6 +565,7 @@ async function readSavedSessionCwd(input: {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
   const vectorIngressImages = parseVectorIngressImages(context.vectorIngressImages);
   const sensitiveImageData = vectorIngressImages.map((image) => image.data);
@@ -580,6 +581,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE
       : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
+  const hasCustomPromptTemplate = asString(config.promptTemplate, "").trim().length > 0;
   const deploymentPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND?.trim() || undefined;
   const command = asString(config.command, deploymentPiCommand ?? "pi");
   const configuredModel = asString(config.model, "").trim();
@@ -684,7 +686,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const linkedIssueIds = Array.isArray(context.issueIds)
     ? context.issueIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
-  const wakePayloadJson = stringifyPaperclipWakePayload(context.paperclipWake);
   const issueWorkMode = readPaperclipIssueWorkModeFromContext(context);
     
   if (wakeTaskId) env.PAPERCLIP_TASK_ID = wakeTaskId;
@@ -694,7 +695,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (approvalId) env.PAPERCLIP_APPROVAL_ID = approvalId;
   if (approvalStatus) env.PAPERCLIP_APPROVAL_STATUS = approvalStatus;
   if (linkedIssueIds.length > 0) env.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
-  if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
   refreshPaperclipWorkspaceEnvForExecution({
     env,
     envConfig,
@@ -1143,46 +1143,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       renderTemplate(systemPromptExtension, templateData), context.vectorVoiceActive,
     );
     const plainConversation = plainConversationMessage !== null;
-    const renderedBootstrapPrompt =
-      !plainConversation && !canResumeSession && bootstrapPromptTemplate.trim().length > 0
-        ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
-        : "";
-    const taskContextNote = !plainConversation && context.conversationMode === true
-      ? selectPaperclipTaskMarkdown(context, { resumedSession: canResumeSession })
-      : "";
-    const wakePrompt = plainConversation ? "" : renderPaperclipWakePrompt(context.paperclipWake, {
-      conversationMode: context.conversationMode === true,
-      resumedSession: canResumeSession,
-      suppressIssueDescription: taskContextNote.length > 0,
-    });
-    const shouldUseResumeDeltaPrompt = canResumeSession && wakePrompt.length > 0;
-    const renderedHeartbeatPrompt = plainConversation || shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
-      ? ""
-      : renderTemplate(promptTemplate, templateData);
-    const sessionHandoffNote = plainConversation
-      ? ""
-      : asString(context.paperclipSessionHandoffMarkdown, "").trim();
+    const systemOwnsDefaultPolicy = !hasCustomPromptTemplate || Boolean(resolvedInstructionsFilePath && !instructionsReadFailed);
+    const sessionHandoffNote = plainConversation ? "" : asString(context.paperclipSessionHandoffMarkdown, "").trim();
     const vectorImageNote = vectorIngressImages.length > 0
       ? "The image attachments for this turn are supplied natively with this prompt. Do not attempt to download them or request Paperclip API credentials."
       : "";
-    const userPrompt = joinPromptSections([
-      plainConversationMessage,
-      renderedBootstrapPrompt,
-      wakePrompt,
-      taskContextNote,
-      sessionHandoffNote,
-      vectorImageNote,
-      renderedHeartbeatPrompt,
-    ]);
-    const promptMetrics = {
-      systemPromptChars: renderedSystemPromptExtension.length,
-      promptChars: userPrompt.length,
-      bootstrapPromptChars: renderedBootstrapPrompt.length,
-      wakePromptChars: wakePrompt.length,
-      taskContextChars: taskContextNote.length,
-      sessionHandoffChars: sessionHandoffNote.length,
-      heartbeatPromptChars: renderedHeartbeatPrompt.length,
-    };
 
     const commandNotes = (() => {
       const notes = [...preparedRuntimeConfig.notes];
@@ -1204,7 +1169,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       return notes;
     })();
 
-    const buildArgs = (sessionFile: string): string[] => {
+    const buildArgs = (sessionFile: string, userPrompt: string): string[] => {
       const args: string[] = [];
 
       args.push("--mode", executionMode);
@@ -1243,7 +1208,44 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (vectorIngressImages.length > 0 && executionMode !== "rpc") {
         throw new Error("Vector ingress images require Pi RPC execution mode");
       }
-      const args = buildArgs(sessionFile);
+      const attemptResumedSession = canResumeSession && sessionFile === sessionPath;
+      const attemptSections = selectPaperclipPromptSections(context, {
+        resumedSession: attemptResumedSession,
+        includeCommunicationGuidance: false,
+        includeExecutionContract: systemOwnsDefaultPolicy ? false : undefined,
+      });
+      const attemptBootstrapPrompt = !plainConversation && !attemptResumedSession && bootstrapPromptTemplate.trim().length > 0
+        ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
+        : "";
+      const attemptWakePrompt = plainConversation ? "" : attemptSections.wakePrompt;
+      const attemptRenderedHeartbeatPrompt = plainConversation || attemptResumedSession && attemptWakePrompt.length > 0
+        || isPaperclipRecoveryWakePayload(context.paperclipWake)
+        || !hasCustomPromptTemplate
+        ? ""
+        : renderTemplate(promptTemplate, templateData);
+      const attemptBaseUserPrompt = joinPromptSections([
+        plainConversationMessage,
+        attemptBootstrapPrompt,
+        attemptWakePrompt,
+        plainConversation ? "" : attemptSections.taskContextNote,
+        sessionHandoffNote,
+        vectorImageNote,
+        attemptRenderedHeartbeatPrompt,
+      ]);
+      const userPrompt = joinPromptSections([
+        plainConversation ? "" : selectInitialCommunicationGuidance(context, { resumedSession: attemptResumedSession }),
+        attemptBaseUserPrompt,
+      ]);
+      const promptMetrics = {
+        systemPromptChars: renderedSystemPromptExtension.length,
+        promptChars: userPrompt.length,
+        bootstrapPromptChars: attemptBootstrapPrompt.length,
+        wakePromptChars: attemptWakePrompt.length,
+        taskContextChars: plainConversation ? 0 : attemptSections.taskContextNote.length,
+        sessionHandoffChars: sessionHandoffNote.length,
+        heartbeatPromptChars: attemptRenderedHeartbeatPrompt.length,
+      };
+      const args = buildArgs(sessionFile, userPrompt);
       if (onMeta) {
         await onMeta({
           adapterType: "pi_local",
@@ -1311,6 +1313,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ),
       );
       const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, processCommand, processArgs, {
+        onProcessStopped: providerStop.beginInvocation(),
         cwd,
         env: processEnv,
         inheritProcessEnv: !vectorEmbeddedRpc,
@@ -1461,11 +1464,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       return toResult(initial);
     } finally {
-      await Promise.all([
-        paperclipBridge?.stop(),
-        restoreRemoteWorkspace?.(),
-        localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-      ]);
+      try {
+        await providerStop.collectBeforeRestore();
+      } finally {
+        await Promise.all([
+          paperclipBridge?.stop(),
+          restoreRemoteWorkspace?.(),
+          localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
+        ]);
+      }
     }
   } finally {
     await Promise.all([

@@ -27,6 +27,7 @@ interface AppLogoProps {
   allowRemoteFallback?: boolean;
   darkLogoUrl?: string | null;
   size?: number;
+  compact?: boolean;
   className?: string;
 }
 
@@ -42,6 +43,7 @@ export function AppLogo({
   darkLogoUrl,
   allowRemoteFallback = true,
   size = 36,
+  compact = false,
   className,
 }: AppLogoProps) {
   const qualifyLogo = (value: string | null | undefined) => value?.startsWith("/") ? paperclipPath(value) : value;
@@ -113,7 +115,7 @@ export function AppLogo({
                 alt=""
                 width={size}
                 height={size}
-                className="h-full w-full object-contain p-1.5 dark:hidden"
+                className={cn("h-full w-full object-contain dark:hidden", compact ? "p-0.5" : "p-1.5")}
                 onError={() => markLogoFailed(lightLogoUrlForRender)}
               />
             ) : (
@@ -133,7 +135,7 @@ export function AppLogo({
                 alt=""
                 width={size}
                 height={size}
-                className="hidden h-full w-full object-contain p-1.5 dark:block"
+                className={cn("hidden h-full w-full object-contain dark:block", compact ? "p-0.5" : "p-1.5")}
                 onError={() => markLogoFailed(darkLogoUrlForRender)}
               />
             ) : (
@@ -154,7 +156,7 @@ export function AppLogo({
             alt=""
             width={size}
             height={size}
-            className="h-full w-full object-contain p-1.5"
+            className={cn("h-full w-full object-contain", compact ? "p-0.5" : "p-1.5")}
             onError={() => markLogoFailed(fallbackLogoUrl)}
           />
         )}

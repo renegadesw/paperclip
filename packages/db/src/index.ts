@@ -1,6 +1,7 @@
 export {
   createDb,
   databaseClientOptionsFromEnv,
+  withDedicatedDbConnection,
   closeRegisteredClients,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
