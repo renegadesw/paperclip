@@ -88,7 +88,13 @@ async function rpc(
 }
 
 function piToolName(upstream: string, taken: Set<string>): string {
-  const base = upstream.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^[^A-Za-z0-9]+/, "").slice(0, 60) || "connector_tool";
+  // Keep the connection identity and action; long application UUID prefixes
+  // otherwise hide both behind numeric collision suffixes.
+  const connected = /^mcp\.(.+):(.+)$/.exec(upstream);
+  const readable = connected
+    ? `mcp_${connected[1]!.split("-").at(-1)}_${connected[2]}`
+    : upstream;
+  const base = readable.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^[^A-Za-z0-9]+/, "").slice(0, 60) || "connector_tool";
   let name = base;
   for (let suffix = 2; taken.has(name); suffix += 1) name = `${base}_${suffix}`;
   taken.add(name);

@@ -1290,9 +1290,9 @@ export function createToolGatewayService(
         return {
           name: gatewayToolName,
           displayName: catalogEntry.title ?? catalogEntry.toolName,
-          description:
-            catalogEntry.description ??
-            `Connected MCP tool ${catalogEntry.toolName} from ${connection.name}.`,
+          description: `Connection: ${connection.name}. Credential policy: ${connection.credentialPolicy}. ${
+            catalogEntry.description ?? `Connected MCP tool ${catalogEntry.toolName}.`
+          }`,
           parametersSchema: inputSchema,
           pluginId: `mcp:${applicationKey ?? application.id}`,
           providerType:
