@@ -12,18 +12,22 @@ no PR or workflow dispatch is part of this update.
 - Connector repair baseline: `fix/personal-pat-run-credentials`,
   `cc8bf4f4c7536d77c251f5594975064342ab34bb`.
 - Upstream default branch: `paperclipai/paperclip:master`,
-  `f07f8d959970d95b22a4084fcd27b648309c5162`.
+  `427e0484059c33fdfd98263e2d6f4c3a27a7e156`.
 - Initial upstream merge: `67ebed8a5271713181b110a6f8c4fd5561b1deb9`;
   the subsequent `41c18aa443fe791fa67b27eef28fd7239f5e9d5d` and
   `f07f8d959970d95b22a4084fcd27b648309c5162` advances update Storybook
   development dependencies only. Dependencies, typecheck and build were
-  refreshed after the final advance.
+  refreshed after those advances. The final refresh through `427e04840` adds
+  release-note corrections and a managed-checkout skill import boundary fix.
 - Existing connector repair session: `01a0f617-4858-7ff3-a256-1cb557a7ad58`.
   Its clean, pushed repair commits are included as ancestors. Final identity
   naming repair: `0ea25a79a9b7adc6a7126d5333be47149b1481b3`; engineering
   startup identity repair: `33d0e70f1dc74f8974dd5f66e56e8a5b1a4d6314`; gateway
   discovery/selection repair: `41ea207955b58d40a643772cb14e1bda9d3fedbd`. Its installed dev
   overlay and the primary local checkout are not changed by this integration.
+  Board retry authority repair `e47bd3869ba485418fbf9ea763021a7dfa99173c` is
+  also merged: verified board retries receive fresh run-bound authority while
+  ingress handles and mismatched or active predecessors remain fail closed.
 
 ## Compatibility decisions
 
@@ -132,6 +136,27 @@ Live connector evidence belongs to the repair session and its dev overlay;
 local compatibility tests do not prove that this updated branch is installed.
 That session separately owns any user-authorized live agent proof.
 
+## Cloud prohibition follow-up verification
+
+- All 156 final Cloud policy, enrollment, signing/sealing, local broker relay,
+  real HTTP redirect refusal, gateway, board authority and managed-skill
+  boundary checks pass across thirteen server files.
+- Thirteen compatibility suites pass: 443 checks cover both GitHub identities,
+  launcher restrictions, rctl tool authority, local feedback, managed-instance
+  security floors and stopped-process recovery. The subsequent retry merge is
+  separately covered by the board authority integration checks above.
+- Full workspace typecheck passes after all source merges.
+- Shared suite: 853 pass, one fails. The unchanged worktree-lock fixture races
+  its lease worker's initial timestamp refresh (`mtime` becomes fresh before
+  the fixture can assert it is stale). Its isolated retry also fails. The exact
+  two unmodified source/test files extracted from pre-change `164cd62da`
+  reproduce the failure in a disposable directory. This is not a green whole
+  shared suite; neither lock behavior nor its assertion was weakened here.
+- The focused shared Cloud policy and telemetry tests pass: 62 checks.
+- No live database, configuration, reporting line or agent state is changed
+  by this source integration. Live repair-only test runs remain owned by the
+  existing connector session.
+
 ## Local test environment
 
 Use Node 25.9.0 and pnpm 9.15.4. The stable runner creates canonical temporary
@@ -179,4 +204,6 @@ pnpm build
 
 Interrupted groups were resumed from their failed file under the isolated test
 environment above; targeted repair tests were rerun after each imported repair.
-No tests, protection checks, deployment gates or runtime stop guards were removed.
+Hosted Cloud transport tests are replaced with prohibition checks; local broker
+signing, sealing and ownership coverage remains. No authorization, containment,
+migration or runtime stop guards or deployment gates were weakened.
