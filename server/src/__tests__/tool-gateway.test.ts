@@ -2791,6 +2791,21 @@ rl.on("line", (line) => {
       });
       expect(JSON.stringify(search.result)).toContain(targetToolName);
 
+      // An agent can combine a connection identifier with human-readable
+      // action words instead of guessing the catalog's separator spelling.
+      const combinedSearch = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: "search_tools",
+        parameters: { query: `${remoteTool.connection.id} kv set`, limit: 2 },
+      });
+      expect(JSON.stringify(combinedSearch.result)).toContain(targetToolName);
+      const unrelatedSearch = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: "search_tools",
+        parameters: { query: `${remoteTool.connection.id} unavailable-action`, limit: 2 },
+      });
+      expect(unrelatedSearch.result).toEqual(expect.objectContaining({ data: { tools: [] } }));
+
       const result = await gateway.executeTool({
         sessionToken: session.token,
         tool: "run_tool",
