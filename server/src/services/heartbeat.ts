@@ -165,7 +165,7 @@ import {
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { prepareActiveVectorToolRuntimeAccess } from "./vector-tool-authority.js";
-import { prepareActiveVectorBoardRunAuthority } from "./vector-board-run-authority.js";
+import { isInheritedVectorBoardRetryAuthority, prepareActiveVectorBoardRunAuthority } from "./vector-board-run-authority.js";
 import {
   dbVectorResearchIssueSettlementPort,
   settleVectorResearchRoutineIssue,
@@ -23721,7 +23721,23 @@ export function heartbeatService(
             agent.companyId,
             issueContext,
           );
-          if (vectorResearchWorkload) {
+          let inheritedBoardRetryAuthority = false;
+          if (!vectorResearchWorkload && vectorProviderAuthorityRequired && run.retryOfRunId && issueRef) {
+            const [previous] = await db.select().from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.id, run.retryOfRunId),
+              eq(heartbeatRuns.companyId, agent.companyId),
+              eq(heartbeatRuns.agentId, agent.id),
+            )).limit(1);
+            const [boardIssue] = await db.select({ originKind: issues.originKind }).from(issues).where(and(
+              eq(issues.id, issueRef.id), eq(issues.companyId, agent.companyId),
+            )).limit(1);
+            inheritedBoardRetryAuthority = Boolean(boardIssue && isInheritedVectorBoardRetryAuthority({
+              runId: run.id, retryOfRunId: run.retryOfRunId,
+              companyId: agent.companyId, agentId: agent.id, issueId: issueRef.id,
+              issueOriginKind: boardIssue.originKind, context, previous: previous ?? null,
+            }));
+          }
+          if (vectorResearchWorkload || inheritedBoardRetryAuthority) {
             // A retry (e.g. after a server restart interrupted the previous
             // run on this issue) inherits that run's context, including the
             // tool/provider grants it had bound. Those are the previous run's

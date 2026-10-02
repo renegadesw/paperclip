@@ -266,3 +266,38 @@ export async function prepareActiveVectorBoardRunAuthority(input: {
   });
   return true;
 }
+
+/** Run-bound grants cannot be inherited by a board retry. Ingress handles stay fail-closed. */
+export function isInheritedVectorBoardRetryAuthority(input: {
+  runId: string;
+  retryOfRunId: string | null;
+  companyId: string;
+  agentId: string;
+  issueId: string;
+  issueOriginKind: string;
+  context: Record<string, unknown>;
+  previous: { id: string; companyId: string; agentId: string; status: string; contextSnapshot: unknown } | null;
+}): boolean {
+  const previous = input.previous;
+  if (!previous || !input.retryOfRunId || previous.id !== input.retryOfRunId || previous.id === input.runId ||
+      previous.companyId !== input.companyId || previous.agentId !== input.agentId ||
+      ACTIVE_RUN_STATUSES.includes(previous.status as typeof ACTIVE_RUN_STATUSES[number]) ||
+      input.issueOriginKind === VECTOR_INGRESS_ORIGIN_KIND) return false;
+  const context = input.context;
+  const prior = previous.contextSnapshot as Record<string, unknown> | null;
+  if (!prior || prior.issueId !== input.issueId ||
+      context.vectorToolAuthorityPending != null || context.vectorProviderAuthorityPending != null ||
+      prior.vectorToolAuthorityPending != null || prior.vectorProviderAuthorityPending != null) return false;
+  let found = false;
+  for (const key of ["vectorProviderAuthority", "vectorToolAuthority"]) {
+    const marker = context[key] as Record<string, unknown> | null;
+    if (marker == null) continue;
+    const original = prior[key] as Record<string, unknown> | null;
+    if (!original || marker.version !== 1 || original.version !== 1 ||
+        typeof marker.handleSha256 !== "string" || !/^[a-f0-9]{64}$/.test(marker.handleSha256) ||
+        typeof marker.sessionScope !== "string" || !marker.sessionScope ||
+        !["handleSha256", "sessionScope", "profile", "installationId"].every((field) => marker[field] === original[field])) return false;
+    found = true;
+  }
+  return found;
+}

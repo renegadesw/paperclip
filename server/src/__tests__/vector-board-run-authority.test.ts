@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  isInheritedVectorBoardRetryAuthority,
   prepareActiveVectorBoardRunAuthority,
   resolveVectorBoardRunAuthorityConfig,
   setActiveVectorBoardRunAuthority,
@@ -284,5 +285,33 @@ describe("Vector board run authority request", () => {
     await expect(prepareActiveVectorProviderRuntimeAccess({
       ...run, pending: null, bound: null, required: true,
     })).rejects.toMatchObject({ status: 409, details: { code: "vector_provider_authority_unavailable" } });
+  });
+});
+
+
+describe("board retry inherited authority", () => {
+  function fixture() {
+    const run = scope();
+    const marker = { version: 1, profile: "engineering", installationId: "t480-engineering", handleSha256: "a".repeat(64), sessionScope: "board-scope" };
+    const context = { issueId: run.issueId, vectorProviderAuthority: marker, vectorToolAuthority: marker };
+    const previous = { id: randomUUID(), companyId: run.companyId, agentId: run.agentId, status: "failed", contextSnapshot: context };
+    return { ...run, issueOriginKind: "board", retryOfRunId: previous.id, context, previous };
+  }
+  it("rebinds inherited markers from a terminal board predecessor", () => {
+    expect(isInheritedVectorBoardRetryAuthority(fixture())).toBe(true);
+  });
+  it("keeps ingress handles, active predecessors and mismatched authority fail-closed", () => {
+    const base = fixture();
+    for (const candidate of [
+      { ...base, issueOriginKind: "vector_ingress" },
+      { ...base, retryOfRunId: null },
+      { ...base, previous: { ...base.previous, status: "running" } },
+      { ...base, previous: { ...base.previous, agentId: randomUUID() } },
+      { ...base, previous: { ...base.previous, companyId: randomUUID() } },
+      { ...base, previous: { ...base.previous, contextSnapshot: { ...base.context, issueId: randomUUID() } } },
+      { ...base, context: { ...base.context, vectorProviderAuthorityPending: { version: 1 } } },
+      { ...base, context: { ...base.context, vectorToolAuthorityPending: { version: 1 } } },
+      { ...base, context: { ...base.context, vectorProviderAuthority: { ...base.context.vectorProviderAuthority, handleSha256: "b".repeat(64) } } },
+    ]) expect(isInheritedVectorBoardRetryAuthority(candidate)).toBe(false);
   });
 });
