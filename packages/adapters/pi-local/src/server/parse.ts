@@ -122,8 +122,9 @@ export function extractPiRuntimeEvents(line: string): AdapterRuntimeEvent[] {
     }
     const usage = readUsagePayload(message);
     if (usage) events.push({ eventType: "usage", stream: "stdout", payload: usage });
-    if (message?.role === "assistant" && message.stopReason === "error") {
-      const error = asString(message.errorMessage, "").trim() || "Pi provider request failed.";
+    if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "length")) {
+      const error = asString(message.errorMessage, "").trim() ||
+        (message.stopReason === "length" ? "Pi response was truncated by the model token limit before completion." : "Pi provider request failed.");
       events.push({ eventType: "error", stream: "stdout", level: "error", message: error, payload: { source: "provider" } });
     }
     return events;
@@ -202,8 +203,9 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
         : [];
     for (const rawMessage of terminalMessages) {
       const message = asRecord(rawMessage);
-      if (message?.role !== "assistant" || message.stopReason !== "error") continue;
-      const error = asString(message.errorMessage, "").trim() || "Pi provider request failed.";
+      if (message?.role !== "assistant" || !["error", "length"].includes(asString(message.stopReason, ""))) continue;
+      const error = asString(message.errorMessage, "").trim() ||
+        (message.stopReason === "length" ? "Pi response was truncated by the model token limit before completion." : "Pi provider request failed.");
       if (!result.errors.includes(error)) result.errors.push(error);
     }
 
