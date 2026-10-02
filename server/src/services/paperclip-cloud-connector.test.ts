@@ -43,7 +43,7 @@ function config() {
   const sealing = generateKeyPairSync("x25519");
   return {
     config: {
-      baseUrl: "https://my.example.test",
+      baseUrl: "http://127.0.0.1:8431",
       instanceId,
       environment: "staging",
       signPrivateKey: rawPrivateKey(signing.privateKey),
@@ -184,7 +184,7 @@ describe("Paperclip Cloud connector", () => {
       const claims = JSON.parse(Buffer.from(body.request.split(".")[1], "base64url").toString("utf8"));
       expect(claims.prf).toBe(profile);
       expect(claims.scp).toEqual(scopes);
-      return Response.json({ confirmationUrl: "https://my.example.test/connections/confirm?session=chat", expiresAt: "2099-01-01T00:00:00Z" });
+      return Response.json({ confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=chat", expiresAt: "2099-01-01T00:00:00Z" });
     });
     const connector = createPaperclipCloudConnector({ config: keys.config, request: request as typeof fetch });
     await connector.startAuthorization({ subject, companyId, profile,
@@ -204,7 +204,7 @@ describe("Paperclip Cloud connector", () => {
       const claims = JSON.parse(Buffer.from(encodedClaims!, "base64url").toString("utf8"));
       expect(claims).toMatchObject({
         iss: instanceId,
-        aud: "https://my.example.test/v1/connector/sessions",
+        aud: "http://127.0.0.1:8431/v1/connector/sessions",
         sub: subject,
         cid: companyId,
         env: "staging",
@@ -216,7 +216,7 @@ describe("Paperclip Cloud connector", () => {
         rst: "state-1",
       });
       return Response.json({
-        confirmationUrl: "https://my.example.test/connections/confirm?session=broker-state",
+        confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=broker-state",
         handoff: {
           kind: "tenant_background",
           session: "broker_state_abcdefghijklmnop",
@@ -245,7 +245,7 @@ describe("Paperclip Cloud connector", () => {
     const connector = createPaperclipCloudConnector({
       config: keys.config,
       request: vi.fn(async () => Response.json({
-        confirmationUrl: "https://my.example.test/connections/confirm?session=broker-state",
+        confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=broker-state",
         authorizationUrl: "https://github.com/login/oauth/authorize?client_id=client&state=broker-state",
         expiresAt: "2099-08-21T20:00:00.000Z",
       })) as typeof fetch,
@@ -273,7 +273,7 @@ describe("Paperclip Cloud connector", () => {
         const body = JSON.parse(String(init?.body));
         const claims = JSON.parse(Buffer.from(body.request.split(".")[1], "base64url").toString("utf8"));
         expect(claims).toMatchObject({ prv: "asana", prf: "asana.mcp", scp: ["default"] });
-        return Response.json({ confirmationUrl: "https://my.example.test/connections/confirm?session=test",
+        return Response.json({ confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=test",
           authorizationUrl, expiresAt: "2099-01-01T00:00:00Z" });
       }) as typeof fetch,
     });
@@ -288,7 +288,7 @@ describe("Paperclip Cloud connector", () => {
     const connector = createPaperclipCloudConnector({
       config: keys.config,
       request: vi.fn(async () => Response.json({
-        confirmationUrl: "https://my.example.test/connections/confirm?session=broker-state",
+        confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=broker-state",
         authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=client&state=broker-state",
         expiresAt: "2099-08-21T20:00:00.000Z",
       })) as typeof fetch,
@@ -318,7 +318,7 @@ describe("Paperclip Cloud connector", () => {
     const connector = createPaperclipCloudConnector({
       config: keys.config,
       request: vi.fn(async () => Response.json({
-        confirmationUrl: "https://my.example.test/connections/confirm?session=broker-state",
+        confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=broker-state",
         authorizationUrl,
         expiresAt: "2099-08-21T20:00:00.000Z",
       })) as typeof fetch,
@@ -379,7 +379,7 @@ describe("Paperclip Cloud connector", () => {
     const legacy = createPaperclipCloudConnector({
       config: keys.config,
       request: vi.fn(async () => Response.json({
-        confirmationUrl: "https://my.example.test/connections/confirm?session=broker-state",
+        confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=broker-state",
         expiresAt: "2099-08-21T20:00:00.000Z",
       })) as typeof fetch,
     });
@@ -393,7 +393,7 @@ describe("Paperclip Cloud connector", () => {
     const malformed = createPaperclipCloudConnector({
       config: keys.config,
       request: vi.fn(async () => Response.json({
-        confirmationUrl: "https://my.example.test/connections/confirm?session=broker-state",
+        confirmationUrl: "http://127.0.0.1:8431/connections/confirm?session=broker-state",
         handoff: { kind: "tenant_background", session: "not valid" },
         expiresAt: "2099-08-21T20:00:00.000Z",
       })) as typeof fetch,
@@ -485,7 +485,7 @@ describe("Paperclip Cloud connector", () => {
       const claims = JSON.parse(Buffer.from(encodedClaims!, "base64url").toString("utf8"));
       expect(claims).toMatchObject({
         iss: instanceId,
-        aud: "https://my.example.test/v1/connector/instance-status",
+        aud: "http://127.0.0.1:8431/v1/connector/instance-status",
         sub: "instance-capabilities",
         cid: "instance-capabilities",
         env: "staging",
@@ -529,7 +529,7 @@ describe("Paperclip Cloud connector", () => {
       const claims = JSON.parse(Buffer.from(encodedClaims!, "base64url").toString("utf8"));
       expect(claims).toMatchObject({
         iss: instanceId,
-        aud: "https://my.example.test/v1/connector/instance-status",
+        aud: "http://127.0.0.1:8431/v1/connector/instance-status",
         sub: "instance-status",
         cid: "instance-status",
         env: "staging",
@@ -580,7 +580,7 @@ describe("Paperclip Cloud connector", () => {
       PAPERCLIP_CLOUD_CONNECTOR_SEAL_PRIVATE_KEY: "key",
       PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT: "development",
       PAPERCLIP_CLOUD_CONNECTOR_BASE_URL: "http://my.example.test",
-    })).toThrowError(/HTTPS/);
+    })).toThrowError(/disabled in Vector/);
     const legacyError = (() => {
       try {
         paperclipCloudConnectorConfigFromEnv({
@@ -601,7 +601,7 @@ describe("Paperclip Cloud connector", () => {
 
   it("keeps gallery capability discovery available during incomplete enrollment", async () => {
     await expect(paperclipCloudConnectorCapabilitiesFromEnv({
-      PAPERCLIP_CLOUD_CONNECTOR_BASE_URL: "https://my-staging.paperclip.app",
+      PAPERCLIP_CLOUD_CONNECTOR_BASE_URL: "http://127.0.0.1:8432",
       PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT: "staging",
     })).resolves.toEqual([]);
   });

@@ -1,3 +1,4 @@
+import { isLocalPaperclipServiceUrl } from "../paperclip-cloud-policy.js";
 import { createHash } from "node:crypto";
 import type {
   TelemetryConfig,
@@ -11,10 +12,7 @@ import type {
 import { type ResolvedTelemetryCaps, resolveCaps } from "./config.js";
 import { PAPERCLIP_EVENTS } from "./generated/paperclip-telemetry.js";
 
-const DEFAULT_ENDPOINTS = [
-  "https://telemetry.paperclip.ing/ingest",
-  "https://rusqrrg391.execute-api.us-east-1.amazonaws.com/ingest",
-] as const;
+const DEFAULT_ENDPOINTS: readonly string[] = [];
 // Queue-pressure valve: auto-flush once this many events are buffered. This is
 // an in-memory backpressure trigger, independent of the wire caps that
 // `chunkForSend` enforces on each POST.
@@ -104,7 +102,9 @@ export class TelemetryClient {
     // a seeded function for deterministic backoff. Callers keep the 3-arg form.
     random: () => number = Math.random,
   ) {
-    this.config = config;
+    // Even direct construction cannot reach hosted telemetry. Explicit local
+    // clients remain available for local transport tests and private tooling.
+    this.config = { ...config, enabled: config.enabled && isLocalPaperclipServiceUrl(config.endpoint) };
     this.caps = resolveCaps(config);
     this.stateFactory = stateFactory;
     this.version = version;
@@ -418,6 +418,7 @@ export class TelemetryClient {
       const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
       try {
         const response = await fetch(endpoint, {
+          redirect: "error",
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body,

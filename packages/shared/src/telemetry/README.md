@@ -13,6 +13,16 @@ Shared enum constants live in `packages/shared/src/constants.ts`. Use those
 constants when code needs a reusable domain, but treat the generated telemetry
 types as the final authority for emitted first-party telemetry shapes.
 
+## Vector delivery policy
+
+Paperclip Cloud is prohibited in every Vector runtime profile. Runtime telemetry
+configuration always resolves to disabled, regardless of environment or saved
+preferences. Hosted telemetry endpoints and their fallback are removed. Direct
+client construction supports only an explicitly supplied IP loopback endpoint
+for local diagnostics; requests refuse redirects. This does not enable runtime
+telemetry. No event names, dimensions, generated contracts, or retention rules
+change. The privacy impact is removal of outgoing first-party collection.
+
 ## Public Sources
 
 Use these files when reviewing or changing telemetry code:

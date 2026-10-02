@@ -1,3 +1,4 @@
+import { PAPERCLIP_CLOUD_ENABLED } from "@paperclipai/shared/paperclip-cloud-policy";
 import { createHash } from "node:crypto";
 import {
   ANNOUNCEMENT_IMAGE_MAX_BYTES, ANNOUNCEMENT_MANIFEST_MAX_BYTES, ANNOUNCEMENT_ANIMATION_MAX_BYTES,
@@ -133,7 +134,7 @@ export function announcementFeedService(options: AnnouncementFeedOptions) {
   }
 
   async function current() {
-    if (options.enabled === false) return null;
+    if (!PAPERCLIP_CLOUD_ENABLED || options.enabled === false) return null;
     if (pending) await pending;
     else if (now() >= nextCheck) {
       pending = refresh().finally(() => { pending = null; });

@@ -1,3 +1,4 @@
+import { requireLocalPaperclipServiceUrl } from "@paperclipai/shared/paperclip-cloud-policy";
 import {
   createHash,
   createPrivateKey,
@@ -81,7 +82,7 @@ export function paperclipCloudConnectorEnrollmentStatus(
   const hasManagedIdentityOverride = hasManagedConnectorIdentityOverride(env);
   if (hasManagedIdentityOverride) {
     const { brokerBaseUrl, environment } = connectorTarget(env);
-    if (!managedInstanceId || !managedSignPrivateKey || !managedSealPrivateKey || !managedEnvironment) {
+    if (!brokerBaseUrl || !managedInstanceId || !managedSignPrivateKey || !managedSealPrivateKey || !managedEnvironment) {
       return {
         configured: false,
         status: "unverified",
@@ -159,6 +160,7 @@ async function startPaperclipCloudConnectorEnrollmentUnlocked(input: {
   const origin = normalizeInstanceOrigin(input.origin);
   const existingIdentity = loadPaperclipCloudConnectorIdentity();
   const target = connectorTarget(env, existingIdentity);
+  requireLocalPaperclipServiceUrl(target.brokerBaseUrl);
   let identity: PaperclipCloudConnectorIdentity;
   if (!existingIdentity) {
     identity = createIdentity(env);
@@ -186,6 +188,7 @@ async function startPaperclipCloudConnectorEnrollmentUnlocked(input: {
   const returnUri = `${origin}/api/tools/oauth/cloud-connector/enrollment-callback`;
   const response = await request(`${identity.brokerBaseUrl}/v1/connector/enrollments`, {
     method: "POST",
+    redirect: "error",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
       instanceId: identity.instanceId,
@@ -275,6 +278,7 @@ async function completePaperclipCloudConnectorEnrollmentUnlocked(input: {
   }, privateKey(identity.signPrivateKey));
   const response = await (input.request ?? fetch)(audience, {
     method: "POST",
+    redirect: "error",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({ request: requestToken, enrollmentId: input.enrollmentId, approvalCode: input.approvalCode }),
     signal: AbortSignal.timeout(15_000),
@@ -343,20 +347,11 @@ function parseIdentity(value: unknown): PaperclipCloudConnectorIdentity {
 function connectorEnvironment(
   env: NodeJS.ProcessEnv,
   fallback?: LocalConnectorEnvironment,
-  brokerBaseUrl = "https://my.paperclip.app",
 ): LocalConnectorEnvironment {
-  const host = new URL(brokerBaseUrl).hostname.toLowerCase();
-  const inferred = host === "my.paperclip.app"
-    ? "production"
-    : host === "my-staging.paperclip.app"
-      ? "staging"
-      : "development";
-  const value = env.PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT?.trim() || fallback || inferred;
+  // Environment is a protocol label, independent of Vector's runtime profile.
+  // The destination is validated separately and has no hosted default.
+  const value = env.PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT?.trim() || fallback || "development";
   if (!isEnvironment(value)) throw new Error("Paperclip Cloud connector environment is invalid");
-  if ((host === "my.paperclip.app" && value !== "production")
-    || (host === "my-staging.paperclip.app" && value !== "staging")) {
-    throw new Error("Paperclip Cloud connector broker and environment do not match");
-  }
   return value;
 }
 
@@ -365,12 +360,11 @@ function connectorTarget(
   identity?: PaperclipCloudConnectorIdentity | null,
 ): Pick<PaperclipCloudConnectorIdentity, "brokerBaseUrl" | "environment"> {
   const brokerOverride = env.PAPERCLIP_CLOUD_CONNECTOR_BASE_URL?.trim() || undefined;
-  const brokerBaseUrl = normalizeBrokerOrigin(
-    brokerOverride ?? identity?.brokerBaseUrl ?? "https://my.paperclip.app",
-  );
+  const broker = brokerOverride ?? identity?.brokerBaseUrl;
+  const brokerBaseUrl = broker ? normalizeBrokerOrigin(broker) : "";
   return {
     brokerBaseUrl,
-    environment: connectorEnvironment(env, brokerOverride ? undefined : identity?.environment, brokerBaseUrl),
+    environment: connectorEnvironment(env, brokerOverride ? undefined : identity?.environment),
   };
 }
 
@@ -394,7 +388,7 @@ function isEnvironment(value: unknown): value is LocalConnectorEnvironment {
 }
 
 function normalizeBrokerOrigin(value: string): string {
-  const url = new URL(value.trim());
+  const url = requireLocalPaperclipServiceUrl(value.trim());
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback(url.hostname))) {
     throw new Error("Paperclip Cloud connector URL must use HTTPS");
   }

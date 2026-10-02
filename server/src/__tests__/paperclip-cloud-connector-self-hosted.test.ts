@@ -8,6 +8,8 @@ import {
   type KeyObject,
 } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { selfHostedBrokerRelayPath } from "@paperclipai/shared";
 import { createPaperclipCloudConnector } from "../services/paperclip-cloud-connector.js";
 
@@ -110,13 +112,44 @@ const start = {
 
 describe("self-hosted connector broker", () => {
   it("returns a loopback broker's same-origin relay path as the browser URL", async () => {
-    const { client } = connector("http://127.0.0.1:4567", () => session(RELAY, "http://127.0.0.1:4567"));
+    const { client, request } = connector("http://127.0.0.1:4567", () => session(RELAY, "http://127.0.0.1:4567"));
     await expect(client.startAuthorization(start)).resolves.toMatchObject({ authorizationUrl: RELAY });
+    expect(request.mock.calls[0]?.[1]?.redirect).toBe("error");
   });
 
-  it("never accepts a relative browser URL from a Paperclip Cloud broker", async () => {
-    const { client } = connector("https://my.paperclip.app", () => session(RELAY, "https://my.paperclip.app"));
-    await expect(client.startAuthorization(start)).rejects.toMatchObject({ code: "CONNECTOR_BAD_RESPONSE" });
+  it("does not follow an HTTP redirect from the local broker", async () => {
+    let redirectedRequests = 0;
+    let brokerRequests = 0;
+    const target = createServer((_req, res) => { redirectedRequests++; res.end("unexpected"); });
+    target.listen(0, "127.0.0.1");
+    await once(target, "listening");
+    const targetPort = (target.address() as { port: number }).port;
+    const broker = createServer((_req, res) => {
+      brokerRequests++;
+      res.writeHead(307, { location: `http://127.0.0.1:${targetPort}/redirect-target` });
+      res.end();
+    });
+    broker.listen(0, "127.0.0.1");
+    await once(broker, "listening");
+    try {
+      const client = createPaperclipCloudConnector({ config: {
+        baseUrl: `http://127.0.0.1:${(broker.address() as { port: number }).port}`,
+        instanceId: INSTANCE, environment: "production",
+        signPrivateKey: rawPrivate(sign.privateKey), sealPrivateKey: rawPrivate(seal.privateKey),
+      } });
+      await expect(client.startAuthorization(start)).rejects.toThrow();
+      expect(brokerRequests).toBe(1);
+      expect(redirectedRequests).toBe(0);
+    } finally {
+      broker.closeAllConnections();
+      target.closeAllConnections();
+      await Promise.all([new Promise<void>((resolve) => broker.close(() => resolve())), new Promise<void>((resolve) => target.close(() => resolve()))]);
+    }
+  });
+
+  it("refuses a hosted broker before constructing a client", () => {
+    expect(() => connector("https://my.paperclip.app", () => session(RELAY, "https://my.paperclip.app")))
+      .toThrow(/disabled in Vector/);
   });
 
   it.each([

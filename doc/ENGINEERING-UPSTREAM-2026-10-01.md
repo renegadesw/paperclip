@@ -53,6 +53,35 @@ no PR or workflow dispatch is part of this update.
 - Preserve the board's URL prefix while adopting upstream API error handling,
   adapter branding and private-response service worker protections.
 
+## Permanent Paperclip Cloud prohibition
+
+The owner requires engineering to exercise the same policy as production.
+Paperclip Cloud is disabled in source for every profile; no saved preference
+or environment opt-in can restore it. The shared policy has no hosted default.
+
+- Connector destinations must be explicit HTTP/HTTPS IP loopback origins
+  (`127.0.0.1` or `::1`). Missing URLs, DNS names, hosted overrides and hosted
+  stored identities fail before I/O; enrollment refuses them before creating
+  keys. Broker POSTs refuse redirects, including enrollment callbacks.
+- Keep the local Vector broker, its `/__connector/` relay, callback paths,
+  sealed claims and grant handling. A `production` connector protocol label
+  is valid with a local broker and does not imply Paperclip Cloud.
+- Runtime telemetry and hosted announcements are permanently disabled.
+  Telemetry has no Paperclip or AWS fallback; direct client construction is
+  limited to an explicit IP loopback diagnostics endpoint and refuses redirects.
+- Feedback trace uploads always fail with `PAPERCLIP_CLOUD_DISABLED`; the
+  upload transport is removed. Local feedback and downloadable bundles remain.
+- Cloud portfolio requests return 403; lifecycle notification transport is
+  removed. Restrictive managed-instance company/security floors remain.
+- Startup refuses Paperclip Cloud tenant credentials, control-plane origins
+  and nonlocal connector broker URLs. GitHub, PAT, rctl and operator-selected
+  observability providers remain separate from the first-party Cloud policy.
+
+Privacy review: this change removes outgoing first-party collection. It adds
+no events, dimensions or payload fields, so the generated telemetry contract
+is unchanged. The telemetry README documents the fork's delivery policy.
+This is source validation; the integration branch is not installed on t480.
+
 ## Migration compatibility
 
 The installed Vector fork owns migration names `0280` through `0287`. Upstream

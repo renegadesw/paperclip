@@ -1,3 +1,4 @@
+import { requireLocalPaperclipServiceUrl } from "@paperclipai/shared/paperclip-cloud-policy";
 import { ASANA_CONNECTOR_SCOPES, isAsanaConnectorProfileId, type AsanaConnectorProfileId } from "@paperclipai/shared";
 import {
   createDecipheriv,
@@ -230,7 +231,7 @@ export function paperclipCloudConnectorConfigFromEnv(
   const environment = hasManagedIdentityOverride ? managedEnvironment : localIdentity!.environment;
   const baseUrl = env.PAPERCLIP_CLOUD_CONNECTOR_BASE_URL?.trim()
     || (hasActiveLocalIdentity ? localIdentity!.brokerBaseUrl : undefined)
-    || "https://my.paperclip.app";
+    || undefined;
   const values = [instanceId, signPrivateKey, sealPrivateKey, environment];
   if (values.some((value) => !value)) {
     throw new PaperclipCloudConnectorError("Paperclip Cloud connector configuration is incomplete", "CONNECTOR_CONFIG_INCOMPLETE");
@@ -238,20 +239,12 @@ export function paperclipCloudConnectorConfigFromEnv(
   if (environment !== "development" && environment !== "staging" && environment !== "production") {
     throw new PaperclipCloudConnectorError("Paperclip Cloud connector environment is invalid", "CONNECTOR_CONFIG_INVALID");
   }
-  const parsedBaseUrl = new URL(baseUrl);
+  const parsedBaseUrl = requireLocalPaperclipServiceUrl(baseUrl);
   if (parsedBaseUrl.protocol !== "https:" && !(parsedBaseUrl.protocol === "http:" && isLoopback(parsedBaseUrl.hostname))) {
     throw new PaperclipCloudConnectorError("Paperclip Cloud connector URL must use HTTPS", "CONNECTOR_CONFIG_INVALID");
   }
   if (parsedBaseUrl.username || parsedBaseUrl.password || parsedBaseUrl.search || parsedBaseUrl.hash) {
     throw new PaperclipCloudConnectorError("Paperclip Cloud connector URL is invalid", "CONNECTOR_CONFIG_INVALID");
-  }
-  const brokerHost = parsedBaseUrl.hostname.toLowerCase();
-  if ((brokerHost === "my.paperclip.app" && environment !== "production")
-    || (brokerHost === "my-staging.paperclip.app" && environment !== "staging")) {
-    throw new PaperclipCloudConnectorError(
-      "Paperclip Cloud connector broker and environment do not match",
-      "CONNECTOR_CONFIG_INVALID",
-    );
   }
   parsedBaseUrl.pathname = parsedBaseUrl.pathname.replace(/\/$/, "");
   return {
@@ -268,7 +261,7 @@ export function createPaperclipCloudConnector(input: {
   request?: typeof fetch;
   now?: () => number;
 }) {
-  const config = input.config;
+  const config = { ...input.config, baseUrl: requireLocalPaperclipServiceUrl(input.config.baseUrl).toString().replace(/\/$/, "") };
   const request = input.request ?? fetch;
   const now = input.now ?? Date.now;
   const signingKey = privateKey(config.signPrivateKey, "ed25519");
@@ -311,6 +304,7 @@ export function createPaperclipCloudConnector(input: {
     try {
       response = await request(endpoint, {
         method: "POST",
+        redirect: "error",
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(15_000),
