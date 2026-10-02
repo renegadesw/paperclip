@@ -1246,14 +1246,14 @@ export function createToolGatewayService(
           inArray(toolConnections.transport, ["mcp_remote", "local_stdio", "rest_api"]),
           eq(toolConnections.status, "active"),
           eq(toolConnections.enabled, true),
-          // A personal connection has no company-level credential to probe. A
+          // Personal and per-agent connections have no company-level credential to probe. A
           // credential-less health sweep can therefore mark it as errored even
           // while the responsible user's grant is valid. Keep its cached active
           // catalog discoverable; execution resolves and validates that user's
           // grant, and a successful call restores the shared health indicator.
           or(
             inArray(toolConnections.healthStatus, ["ok", "healthy"]),
-            eq(toolConnections.credentialPolicy, "per_user"),
+            inArray(toolConnections.credentialPolicy, ["per_user", "per_agent"]),
           ),
           eq(toolApplications.companyId, companyId),
           inArray(toolApplications.type, ["mcp_http", "mcp_stdio", "rest_api"]),
@@ -2681,7 +2681,8 @@ export function createToolGatewayService(
     const guestBotConnection = await githubGuestBotConnectionForSession(db, session);
     if (guestBotConnection && tool.connectionId && (tool.connectionId !== guestBotConnection || tool.providerType !== "paperclip_github_chat"))
       throw new ToolGatewayHttpError(403, "Sponsored GitHub runs can only use their bot's governed connection; sponsorship does not grant personal credentials", "guest_connection_denied");
-    if (session.identityContextId && session.agentId && tool.connectionId) {
+    if (process.env.PAPERCLIP_VECTOR_PROFILE !== "engineering" &&
+        session.identityContextId && session.agentId && tool.connectionId) {
       const [connection] = await db
         .select()
         .from(toolConnections)
@@ -4311,6 +4312,7 @@ export function createToolGatewayService(
       ? (session.responsibleUserId ?? null)
       : (run?.responsibleUserId ?? session.responsibleUserId ?? null);
     if (
+      process.env.PAPERCLIP_VECTOR_PROFILE !== "engineering" &&
       session.identityContextId &&
       session.agentId &&
       (connection.config.sourceTemplateKey === "github" ||
