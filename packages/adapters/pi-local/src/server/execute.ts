@@ -70,6 +70,11 @@ import { PAPERCLIP_CONNECTOR_TOOLS_ENV, prepareConnectorTools } from "./papercli
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { appendVectorVoiceContext } from "./vector-voice-context.js";
 import {
+  isBundledPaperclipSkill,
+  isVectorOwnedPromptInstallation,
+  renderVectorRunData,
+} from "./vector-compact-prompt.js";
+import {
   readPaperclipConnectorSkillInstructions,
   resolveVectorPlainConversationMessage,
 } from "./vector-plain-conversation.js";
@@ -397,7 +402,10 @@ async function ensurePiSkillsInjected(
   }
 }
 
-async function buildPiSkillsDir(config: Record<string, unknown>): Promise<string> {
+async function buildPiSkillsDir(
+  config: Record<string, unknown>,
+  options: { excludeBundledPaperclipSkills?: boolean } = {},
+): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-skills-"));
   const target = path.join(tmp, "skills");
   await fs.mkdir(target, { recursive: true });
@@ -405,6 +413,7 @@ async function buildPiSkillsDir(config: Record<string, unknown>): Promise<string
   const desiredNames = new Set(resolveLegacyPaperclipDesiredSkillNames(config, availableEntries));
   for (const entry of availableEntries) {
     if (!desiredNames.has(entry.key)) continue;
+    if (options.excludeBundledPaperclipSkills && isBundledPaperclipSkill(entry)) continue;
     if (isPaperclipSkillSourceMissing(entry)) continue;
     await fs.symlink(entry.source, path.join(target, entry.runtimeName));
   }
@@ -430,9 +439,14 @@ function buildRemoteSessionPath(runtimeRootDir: string, agentId: string, timesta
   return path.posix.join(runtimeRootDir, "sessions", `${safeTimestamp}-${agentId}.jsonl`);
 }
 
+// `vectorOwnedOnly` appends the admitted Vector OS prompt verbatim, without
+// the Paperclip framing sentence, for Vector-owned prompting.
+type VectorPromptAppendOptions = { vectorOwnedOnly?: boolean };
+
 export function appendVectorWorkloadSystemPrompt(
   base: string,
   rawLaunch: unknown,
+  options: VectorPromptAppendOptions = {},
 ): string {
   const vectorWorkloadLaunch = parseObject(rawLaunch);
   if (Object.keys(vectorWorkloadLaunch).length === 0) return base;
@@ -443,6 +457,7 @@ export function appendVectorWorkloadSystemPrompt(
   if (schemaVersion !== 1 || !workloadKey || !taskId || !dynamicSystemPrompt) {
     throw new Error("Signed Vector workload launch context is malformed.");
   }
+  if (options.vectorOwnedOnly) return joinPromptSections([base, dynamicSystemPrompt]);
   return joinPromptSections([
     base,
     "Vector OS admitted the following workload system instructions through the signed, installation-scoped ingress. They apply only to this run and remain subordinate to Paperclip's deployment and agent safety policy.",
@@ -450,7 +465,11 @@ export function appendVectorWorkloadSystemPrompt(
   ]);
 }
 
-export function appendVectorRoleSystemPrompt(base: string, rawRole: unknown): string {
+export function appendVectorRoleSystemPrompt(
+  base: string,
+  rawRole: unknown,
+  options: VectorPromptAppendOptions = {},
+): string {
   const vectorRoleTurn = parseObject(rawRole);
   if (Object.keys(vectorRoleTurn).length === 0) return base;
   const schemaVersion = vectorRoleTurn.schemaVersion;
@@ -459,6 +478,7 @@ export function appendVectorRoleSystemPrompt(base: string, rawRole: unknown): st
   if (schemaVersion !== 1 || !role || !dynamicSystemPrompt || vectorRoleTurn.noBuiltinTools !== true) {
     throw new Error("Signed Vector role turn context is malformed.");
   }
+  if (options.vectorOwnedOnly) return joinPromptSections([base, dynamicSystemPrompt]);
   return joinPromptSections([
     base,
     "Vector OS admitted the following product role instructions through the signed, installation-scoped ingress. They apply only to this turn and remain subordinate to Paperclip's deployment and agent safety policy.",
@@ -466,7 +486,11 @@ export function appendVectorRoleSystemPrompt(base: string, rawRole: unknown): st
   ]);
 }
 
-export function appendVectorPersonaSystemPrompt(base: string, rawPersona: unknown): string {
+export function appendVectorPersonaSystemPrompt(
+  base: string,
+  rawPersona: unknown,
+  options: VectorPromptAppendOptions = {},
+): string {
   const vectorPersonaTurn = parseObject(rawPersona);
   if (Object.keys(vectorPersonaTurn).length === 0) return base;
   const schemaVersion = vectorPersonaTurn.schemaVersion;
@@ -479,6 +503,7 @@ export function appendVectorPersonaSystemPrompt(base: string, rawPersona: unknow
   ) {
     throw new Error("Signed Vector persona turn context is malformed.");
   }
+  if (options.vectorOwnedOnly) return joinPromptSections([base, dynamicSystemPrompt]);
   return joinPromptSections([
     base,
     "Vector OS admitted this selected standard-chat persona through the signed, installation-scoped ingress. It applies to this conversation and remains subordinate to Paperclip's deployment and agent safety policy.",
@@ -575,13 +600,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
 
-  const promptTemplate = asString(
+  // Vector installations take their prompt only from the deployment; agent
+  // prompt templates and Paperclip's default templates never apply there.
+  const vectorOwnedPrompt = isVectorOwnedPromptInstallation(process.env.PAPERCLIP_VECTOR_PROFILE);
+  const promptTemplate = vectorOwnedPrompt ? "" : asString(
     config.promptTemplate,
     context.conversationMode === true
       ? DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE
       : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
-  const hasCustomPromptTemplate = asString(config.promptTemplate, "").trim().length > 0;
+  const hasCustomPromptTemplate = !vectorOwnedPrompt && asString(config.promptTemplate, "").trim().length > 0;
   const deploymentPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND?.trim() || undefined;
   const command = asString(config.command, deploymentPiCommand ?? "pi");
   const configuredModel = asString(config.model, "").trim();
@@ -646,6 +674,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // operational skill remains mounted explicitly below, even while Pi's
   // ambient skill discovery is disabled.
   const runtimeSkillConfig = vectorProfilePolicy.useBundledPaperclipSkillsOnly ? {} : config;
+  // Restricted Vector profiles (standard, staging, production) get no bundled
+  // Paperclip skill: their prompt is the deployment's alone. Engineering keeps
+  // the operational skill its release role files direct agents to read.
+  const excludeBundledPaperclipSkills = vectorOwnedPrompt && vectorProfilePolicy.restricted;
   const piSkillEntries = await readPaperclipRuntimeSkillEntries(runtimeSkillConfig, __moduleDir);
   const desiredPiSkillNames = resolveLegacyPaperclipDesiredSkillNames(
     runtimeSkillConfig,
@@ -774,6 +806,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const injectedSkillKeys = new Set(desiredPiSkillNames);
     const skillBinDirs = piSkillEntries
       .filter((entry) => injectedSkillKeys.has(entry.key) && entry.source.length > 0)
+      .filter((entry) => !excludeBundledPaperclipSkills || !isBundledPaperclipSkill(entry))
       .map((entry) => path.join(entry.source, "bin"));
     const vectorEmbeddedRpc = executionMode === "rpc"
       && process.env.PAPERCLIP_DATABASE_PROFILE?.trim() === "vector-embedded";
@@ -845,12 +878,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
 
     if (vectorProfilePolicy.restricted && !executionTargetIsRemote) {
-      localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig);
+      localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig, { excludeBundledPaperclipSkills });
     }
 
     if (executionTargetIsRemote) {
       try {
-        localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig);
+        localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig, { excludeBundledPaperclipSkills });
         await onLog(
           "stdout",
           `[paperclip] Syncing workspace and Pi runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
@@ -1062,6 +1095,71 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       vectorProfile: process.env.PAPERCLIP_VECTOR_PROFILE,
       context,
     });
+    // Vector installations: the system prompt is the release instructions plus
+    // the signed Vector OS persona/role/workload prompts, verbatim; the prompt
+    // is the user's plain message or the run's Paperclip state as data.
+    const vectorPrompt = vectorOwnedPrompt ? await (async () => {
+      const signedVectorPrompt = [context.vectorWorkloadLaunch, context.vectorRoleTurn, context.vectorPersonaTurn]
+        .some((value) => Object.keys(parseObject(value)).length > 0);
+      let instructionsContents = "";
+      if (resolvedInstructionsFilePath) {
+        try {
+          instructionsContents = (await fs.readFile(resolvedInstructionsFilePath, "utf8")).trim();
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `Vector release instructions file "${resolvedInstructionsFilePath}" could not be read: ${reason}. ` +
+            "A Vector installation runs only with its deployment-owned prompt.",
+          );
+        }
+        if (!instructionsContents) {
+          throw new Error(
+            `Vector release instructions file "${resolvedInstructionsFilePath}" is empty. ` +
+            "A Vector installation runs only with its deployment-owned prompt.",
+          );
+        }
+      } else if (!signedVectorPrompt) {
+        throw new Error(
+          "This Vector agent has no release instructions file and no admitted Vector OS persona, role or workload prompt. " +
+          "A Vector installation runs only with its deployment-owned prompt.",
+        );
+      }
+      // Engineering release role files resolve ../WORKFLOW.md against this path.
+      const instructionBase = !vectorProfilePolicy.restricted && instructionsContents
+        ? `Instruction base: ${instructionsFileDir}`
+        : "";
+      let systemPrompt = joinPromptSections([instructionsContents, instructionBase]);
+      systemPrompt = appendVectorWorkloadSystemPrompt(systemPrompt, context.vectorWorkloadLaunch, { vectorOwnedOnly: true });
+      systemPrompt = appendVectorRoleSystemPrompt(systemPrompt, context.vectorRoleTurn, { vectorOwnedOnly: true });
+      systemPrompt = appendVectorPersonaSystemPrompt(systemPrompt, context.vectorPersonaTurn, { vectorOwnedOnly: true });
+      systemPrompt = appendVectorVoiceContext(systemPrompt, context.vectorVoiceActive);
+      const plainMessage = vectorPlainConversation.plain ? vectorPlainConversation.message : null;
+      const runData = plainMessage === null ? renderVectorRunData(context) : "";
+      const userPrompt = plainMessage ?? runData;
+      return {
+        systemPrompt,
+        userPrompt,
+        promptMetrics: {
+          systemPromptChars: systemPrompt.length,
+          promptChars: userPrompt.length,
+          bootstrapPromptChars: 0,
+          wakePromptChars: 0,
+          runDataChars: runData.length,
+          taskContextChars: 0,
+          sessionHandoffChars: 0,
+          heartbeatPromptChars: 0,
+          vectorOwnedPrompt: 1,
+        },
+        commandNotes: [
+          ...preparedRuntimeConfig.notes,
+          plainMessage !== null
+            ? "Vector conversation turn: sent the user's message verbatim with the deployment-owned instructions as the system prompt."
+            : "Vector run: deployment-owned instructions as the system prompt and the Paperclip run state as data; no Paperclip prompt text.",
+          ...(resolvedInstructionsFilePath ? [`Loaded agent instructions from ${resolvedInstructionsFilePath}`] : []),
+        ],
+      };
+    })() : null;
+
     let plainConversationMessage: string | null = null;
     // Connector skill docs move from the wake prompt to the system prompt so
     // the user message stays verbatim.
@@ -1139,7 +1237,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       run: { id: runId, source: "on_demand" },
       context,
     };
-    const renderedSystemPromptExtension = appendVectorVoiceContext(
+    const renderedSystemPromptExtension = vectorPrompt?.systemPrompt ?? appendVectorVoiceContext(
       renderTemplate(systemPromptExtension, templateData), context.vectorVoiceActive,
     );
     const plainConversation = plainConversationMessage !== null;
@@ -1149,7 +1247,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? "The image attachments for this turn are supplied natively with this prompt. Do not attempt to download them or request Paperclip API credentials."
       : "";
 
-    const commandNotes = (() => {
+    const commandNotes = vectorPrompt?.commandNotes ?? (() => {
       const notes = [...preparedRuntimeConfig.notes];
       if (plainConversationMessage !== null) {
         notes.push("Vector conversation turn: sent the user's message verbatim with the agent instructions as the system prompt (no Paperclip wake or heartbeat prompt).");
@@ -1232,11 +1330,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         vectorImageNote,
         attemptRenderedHeartbeatPrompt,
       ]);
-      const userPrompt = joinPromptSections([
+      const userPrompt = vectorPrompt?.userPrompt ?? joinPromptSections([
         plainConversation ? "" : selectInitialCommunicationGuidance(context, { resumedSession: attemptResumedSession }),
         attemptBaseUserPrompt,
       ]);
-      const promptMetrics = {
+      const promptMetrics = vectorPrompt?.promptMetrics ?? {
         systemPromptChars: renderedSystemPromptExtension.length,
         promptChars: userPrompt.length,
         bootstrapPromptChars: attemptBootstrapPrompt.length,

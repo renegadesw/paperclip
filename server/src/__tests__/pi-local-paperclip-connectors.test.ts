@@ -7,6 +7,17 @@ import path from "node:path";
 import { execute } from "@paperclipai/adapter-pi-local/server";
 
 // A fake RPC Pi that records its argv and environment, then settles one turn.
+// Vector installations run only with release-owned instructions under
+// <release>/paperclip/profile-assets/<profile>/; the release Pi command is
+// <release>/runtime/bin/pi.
+async function stageVectorRelease(root: string, profile: string): Promise<string> {
+  await fs.mkdir(path.join(root, "runtime", "bin"), { recursive: true });
+  const file = path.join(root, "paperclip", "profile-assets", profile, "agent", "AGENTS.md");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, "# Vector agent\n\nDeployment-owned instructions.\n", "utf8");
+  return file;
+}
+
 async function writeRecordingPi(commandPath: string, argsPath: string, envPath: string): Promise<void> {
   await fs.writeFile(commandPath, `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -62,10 +73,11 @@ async function withGateway<T>(fn: (url: string, calls: string[]) => Promise<T>):
 async function runPi(profile: string, options: { servers?: Array<{ name: string; url: string; token: string; connectionId: string }>; env?: Record<string, string> }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-connectors-"));
   const workspace = path.join(root, "workspace");
-  const commandPath = path.join(root, "pi");
+  const commandPath = path.join(root, "runtime", "bin", "pi");
   const argsPath = path.join(root, "args.json");
   const envPath = path.join(root, "env.json");
   await fs.mkdir(workspace, { recursive: true });
+  const instructionsFilePath = await stageVectorRelease(root, profile);
   await writeRecordingPi(commandPath, argsPath, envPath);
   const saved = { ...process.env };
   Object.assign(process.env, {
@@ -82,6 +94,7 @@ async function runPi(profile: string, options: { servers?: Array<{ name: string;
       runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
       config: {
         command: commandPath,
+        instructionsFilePath,
         cwd: workspace,
         model: "router/Qwen3.8-Flash",
         executionMode: "rpc",

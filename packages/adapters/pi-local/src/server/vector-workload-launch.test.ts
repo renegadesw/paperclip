@@ -22,6 +22,19 @@ describe("Vector workload launch system prompt", () => {
     );
   });
 
+  it("appends the admitted Vector prompts verbatim, without Paperclip framing, when Vector-owned", () => {
+    const options = { vectorOwnedOnly: true };
+    expect(appendVectorWorkloadSystemPrompt("Static.", {
+      schemaVersion: 1, workloadKey: "current_scout", taskId: "task-1", systemPrompt: "Charter.",
+    }, options)).toBe("Static.\n\nCharter.");
+    expect(appendVectorRoleSystemPrompt("", {
+      schemaVersion: 1, role: "funky-analyst", noBuiltinTools: true, systemPrompt: "Role.",
+    }, options)).toBe("Role.");
+    expect(appendVectorPersonaSystemPrompt("Static.", {
+      schemaVersion: 1, personaId: "p", personaVersion: "abcdef012345", noBuiltinTools: true, systemPrompt: "Persona.",
+    }, options)).toBe("Static.\n\nPersona.");
+  });
+
   it("fails closed on partial workload context", () => {
     expect(() => appendVectorWorkloadSystemPrompt("Static", {
       schemaVersion: 1,
