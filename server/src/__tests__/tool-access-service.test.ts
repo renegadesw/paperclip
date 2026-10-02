@@ -7050,7 +7050,7 @@ describeEmbeddedPostgres("tool access service", () => {
       expect(JSON.stringify(getConnectableAppDefinition(slug))).toBe(definitionBefore);
   });
 
-  it.each(GOOGLE_WORKSPACE_CONNECTOR_PROFILE_IDS)("connects advertised Workspace %s with a Cloud-delivered environment identity", async (profile) => {
+  it.each(GOOGLE_WORKSPACE_CONNECTOR_PROFILE_IDS)("connects advertised Workspace %s through the local Vector connector broker", async (profile) => {
     const slug = GOOGLE_WORKSPACE_CONNECTOR_PROFILES[profile].appSlug;
     const methodKey = getConnectableAppDefinition(slug)!.methods.find((method) => method.connectorProfile === profile)!.key;
     const company = await createCompany(db);
@@ -7059,7 +7059,8 @@ describeEmbeddedPostgres("tool access service", () => {
     const signing = generateKeyPairSync("ed25519");
     const sealing = generateKeyPairSync("x25519");
     vi.stubEnv("PAPERCLIP_AUTH_PUBLIC_BASE_URL", "https://tenant.paperclip.app");
-    vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_BASE_URL", "https://my.paperclip.app");
+    // Paperclip Cloud is disabled in Vector; the connector broker is the local Vector broker.
+    vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_BASE_URL", "http://127.0.0.1:4410");
     vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT", "production");
     vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_INSTANCE_ID", "inst-cloud-workspace-regression");
     vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_SIGN_PRIVATE_KEY", signing.privateKey.export({ type: "pkcs8", format: "pem" }).toString());
@@ -7069,17 +7070,17 @@ describeEmbeddedPostgres("tool access service", () => {
       const signed = JSON.parse(String(init?.body)).request as string;
       const claims = JSON.parse(Buffer.from(signed.split(".")[1]!, "base64url").toString());
       expect(claims).toMatchObject({ iss: "inst-cloud-workspace-regression", env: "production" });
-      if (String(url) === "https://my.paperclip.app/v1/connector/instance-status") {
+      if (String(url) === "http://127.0.0.1:4410/v1/connector/instance-status") {
         expect(claims.op).toBe("status");
         return Response.json({ active: true, status: "active", profiles: [profile] });
       }
-      expect(String(url)).toBe("https://my.paperclip.app/v1/connector/sessions");
+      expect(String(url)).toBe("http://127.0.0.1:4410/v1/connector/sessions");
       expect(claims).toMatchObject({
         op: "session", prf: profile, cid: company.id, sub: userId,
         ruri: "https://tenant.paperclip.app/api/tools/oauth/cloud-connector/callback",
       });
       return Response.json({
-        confirmationUrl: "https://my.paperclip.app/connections/confirm?id=test-workspace-session",
+        confirmationUrl: "http://127.0.0.1:4410/connections/confirm?id=test-workspace-session",
         expiresAt: new Date(Date.now() + 600_000).toISOString(),
       });
     });
@@ -7094,9 +7095,41 @@ describeEmbeddedPostgres("tool access service", () => {
         galleryKey: slug, connectionMethodKey: methodKey, grantKind: "user", name: `Cloud ${slug}`,
       });
       expect(result.status, JSON.stringify(result.body)).toBe(201);
-      expect(result.body.auth.startUrl).toBe("https://my.paperclip.app/connections/confirm?id=test-workspace-session");
+      expect(result.body.auth.startUrl).toBe("http://127.0.0.1:4410/connections/confirm?id=test-workspace-session");
       expect(result.body.connection).toMatchObject({ credentialPolicy: "per_user", ownership: "platform_shared" });
       expect(cloudRequest).toHaveBeenCalled();
+    } finally {
+      invalidatePaperclipCloudConnectorCapabilities();
+    }
+  });
+
+  it("refuses the hosted Paperclip Cloud broker for Workspace connections", async () => {
+    const profile = GOOGLE_WORKSPACE_CONNECTOR_PROFILE_IDS[0]!;
+    const slug = GOOGLE_WORKSPACE_CONNECTOR_PROFILES[profile].appSlug;
+    const methodKey = getConnectableAppDefinition(slug)!.methods.find((method) => method.connectorProfile === profile)!.key;
+    const company = await createCompany(db);
+    const userId = `hosted-workspace-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const signing = generateKeyPairSync("ed25519");
+    const sealing = generateKeyPairSync("x25519");
+    vi.stubEnv("PAPERCLIP_AUTH_PUBLIC_BASE_URL", "https://tenant.paperclip.app");
+    vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_BASE_URL", "https://my.paperclip.app");
+    vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT", "production");
+    vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_INSTANCE_ID", "inst-hosted-workspace-refused");
+    vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_SIGN_PRIVATE_KEY", signing.privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    vi.stubEnv("PAPERCLIP_CLOUD_CONNECTOR_SEAL_PRIVATE_KEY", sealing.privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    invalidatePaperclipCloudConnectorCapabilities();
+    const cloudRequest = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({}));
+    try {
+      const app = createRouteApp(db, boardSessionActor(company.id, "owner", userId), undefined, {
+        deploymentMode: "authenticated", deploymentExposure: "public",
+      });
+      const result = await request(app).post(`/api/companies/${company.id}/tools/apps/connect`).send({
+        galleryKey: slug, connectionMethodKey: methodKey, grantKind: "user", name: `Hosted ${slug}`,
+      });
+      expect(result.status).toBeGreaterThanOrEqual(400);
+      expect(cloudRequest.mock.calls.some(([url]) => String(url).includes("paperclip.app"))).toBe(false);
+      expect(await db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id))).toEqual([]);
     } finally {
       invalidatePaperclipCloudConnectorCapabilities();
     }
