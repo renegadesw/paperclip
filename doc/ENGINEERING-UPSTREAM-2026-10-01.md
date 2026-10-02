@@ -34,6 +34,9 @@ rule remains until the owner resolves the PR-triggered review workflow.
   Final Pi completion repair `c785b4cc4acdae287de9ce5922b67cd7aa828a24` is
   included: a provider length stop is incomplete work, including thinking-only
   output and an agent-end-only terminal envelope. It must not appear successful.
+  On-demand search repair `ebf8c09913ad441448e0d68c491f7e7c576684f4` is
+  included. Search matches connection IDs and action words across spaces,
+  hyphens and underscores. Company scope and execution policy checks remain.
 
 ## Compatibility decisions
 
@@ -169,6 +172,11 @@ The final parser repair changes only Pi terminal-response classification and
 its tests. After importing it, all seventeen Pi source files pass: 198 checks
 pass and one is skipped. The gateway, local-broker and Cloud-config suites pass
 again: 62 checks across three files. Full workspace typecheck passes again.
+The subsequent search repair passed full workspace typecheck. Its combined
+gateway/local-broker/Cloud-config run passed 146 checks and failed one unchanged
+resource-proxy fixture with a socket hang-up. The entire gateway file then
+passed unchanged in isolation: all 85 checks, including connection-ID/action
+search and no-match cases. No assertion or timeout was relaxed.
 The preceding final stopped-process recovery run passed all 331 checks at
 `800bdd06c`; the parser follow-up does not change heartbeat recovery logic.
 
