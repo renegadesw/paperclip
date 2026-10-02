@@ -169,6 +169,9 @@ async function runTurn(input: {
       cwd: harness.workspace,
       model: "google/gemini-3-flash-preview",
       executionMode: "rpc",
+      // Legacy goldens explicitly prove the opt-out contract; compact task
+      // behavior is covered below through the same actual RPC adapter.
+      promptMode: "full",
       // Restricted Vector profiles forbid an instructions file; the admitted
       // persona/role context carries their instructions.
       ...(input.profile === null || input.profile === "engineering"
@@ -505,5 +508,24 @@ describe("resolveVectorPlainConversationMessage fail-safe", () => {
     expect(base(conversationWake([userComment("c1", "[VECTOR_ROLE_TURN_V1]\nnot-json\n\nhi")]), { vectorRoleTurn: ROLE }))
       .toEqual({ plain: false, reason: "unrecognized_turn_envelope" });
     expect(base(conversationWake(one))).toEqual({ plain: true, message: "hi" });
+  });
+});
+
+
+describe("compact task RPC invocation", () => {
+  it("sends deployment role instructions and one task brief without generic heartbeat templates", async () => {
+    const build = GOLDEN_CASES.vectorBoardTask();
+    const context = { ...build.context, paperclipWake: { ...build.context.paperclipWake as Record<string, unknown>,
+      issue: { id: "issue-1", identifier: "VECA-1", title: "Task", status: "todo", description: "UNIQUE_FULL_TASK_BRIEF" } } };
+    const full = await runTurn({ profile: "engineering", context });
+    const compact = await runTurn({ profile: "engineering", context, config: { promptMode: "compact" } });
+    expect(compact.systemPrompt).toContain(INSTRUCTIONS.trim());
+    expect(compact.systemPrompt).not.toContain("Execution contract:");
+    expect(compact.systemPrompt).not.toContain("Continue your Paperclip work");
+    expect(compact.prompt.split("UNIQUE_FULL_TASK_BRIEF")).toHaveLength(2);
+    expect(compact.promptMetrics.heartbeatPromptChars).toBe(0);
+    expect(compact.promptMetrics.compactPrompt).toBe(1);
+    expect(compact.promptMetrics.systemPromptChars).toBeLessThan(full.promptMetrics.systemPromptChars! / 4);
+    expect(compact.prompt).toBe(compact.rpcMessage);
   });
 });

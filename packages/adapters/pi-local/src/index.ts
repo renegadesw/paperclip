@@ -24,6 +24,7 @@ Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file appended to system prompt via --append-system-prompt (restricted Vector profiles admit only a regular file inside <release>/paperclip/profile-assets/<profile>/ of the release pinned by PAPERCLIP_VECTOR_PI_COMMAND)
 - promptTemplate (string, optional): user prompt template passed via -p flag
+- promptMode ("compact" | "full", optional): Vector task prompts default to compact on engineering/standard; compact uses deployment role instructions and a single wake brief, full restores generic heartbeat templates. Chat, review/recovery context, connector authority, and non-Vector defaults are preserved.
 - model (string, required): Pi model id in provider/model format (for example xai/grok-4)
 - thinking (string, optional): thinking level (off, minimal, low, medium, high, xhigh)
 - command (string, optional): defaults to "pi"

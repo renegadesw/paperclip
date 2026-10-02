@@ -2220,6 +2220,7 @@ function renderPaperclipWakePromptBody(
   // fresh sessions; only resume deltas (which replace the template) and
   // template-less adapters need the wake-payload copy.
   const includeExecutionContract = options.conversationMode !== true &&
+    options.includeExecutionContract !== false &&
     (resumedSession || options.includeExecutionContract === true);
   const hasWakeCommentBatch =
     normalized.comments.length > 0 ||

@@ -69,6 +69,7 @@ import { prepareVectorToolCapability } from "./vector-tool-capability.js";
 import { PAPERCLIP_CONNECTOR_TOOLS_ENV, prepareConnectorTools } from "./paperclip-connectors.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { appendVectorVoiceContext } from "./vector-voice-context.js";
+import { COMPACT_VECTOR_TASK_FALLBACK, useCompactVectorTaskPrompt } from "./vector-compact-prompt.js";
 import {
   readPaperclipConnectorSkillInstructions,
   resolveVectorPlainConversationMessage,
@@ -574,9 +575,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
 
+  const compactTaskPrompt = useCompactVectorTaskPrompt(process.env.PAPERCLIP_VECTOR_PROFILE, config, context);
   const promptTemplate = asString(
     config.promptTemplate,
-    context.conversationMode === true
+    compactTaskPrompt ? "" : context.conversationMode === true
       ? DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE
       : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
@@ -1084,6 +1086,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           // so neither the path directive nor Paperclip's heartbeat/conversation
           // template is appended.
           systemPromptExtension = plainConversationSystemBase(instructionsContents);
+        } else if (compactTaskPrompt) {
+          systemPromptExtension = `${instructionsContents.trim()}\n\nInstruction base: ${instructionsFileDir}`;
         } else {
           systemPromptExtension =
             `${instructionsContents}\n\n` +
@@ -1101,7 +1105,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`,
         );
         // Fall back to base prompt template
-        systemPromptExtension = promptTemplate;
+        systemPromptExtension = compactTaskPrompt ? COMPACT_VECTOR_TASK_FALLBACK : promptTemplate;
       }
     } else if (
       vectorPlainConversation.plain &&
@@ -1113,7 +1117,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       plainConversationMessage = vectorPlainConversation.message;
       systemPromptExtension = plainConversationSystemBase("");
     } else {
-      systemPromptExtension = promptTemplate;
+      systemPromptExtension = compactTaskPrompt ? COMPACT_VECTOR_TASK_FALLBACK : promptTemplate;
     }
 
     systemPromptExtension = appendVectorWorkloadSystemPrompt(
@@ -1153,6 +1157,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const wakePrompt = plainConversation ? "" : renderPaperclipWakePrompt(context.paperclipWake, {
       conversationMode: context.conversationMode === true,
       resumedSession: canResumeSession,
+      includeExecutionContract: compactTaskPrompt ? false : undefined,
       suppressIssueDescription: taskContextNote.length > 0,
     });
     const shouldUseResumeDeltaPrompt = canResumeSession && wakePrompt.length > 0;
@@ -1182,10 +1187,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       taskContextChars: taskContextNote.length,
       sessionHandoffChars: sessionHandoffNote.length,
       heartbeatPromptChars: renderedHeartbeatPrompt.length,
+      compactPrompt: compactTaskPrompt ? 1 : 0,
     };
 
     const commandNotes = (() => {
       const notes = [...preparedRuntimeConfig.notes];
+      if (compactTaskPrompt) notes.push("Compact Vector task prompt: deployment role instructions and one wake brief; generic heartbeat boilerplate omitted. Review, recovery, continuation and connector authority retained.");
       if (plainConversationMessage !== null) {
         notes.push("Vector conversation turn: sent the user's message verbatim with the agent instructions as the system prompt (no Paperclip wake or heartbeat prompt).");
       }
@@ -1198,9 +1205,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
       notes.push(`Loaded agent instructions from ${resolvedInstructionsFilePath}`);
       if (plainConversation) return notes;
-      notes.push(
-        `Appended instructions + path directive to system prompt (relative references from ${instructionsFileDir}).`,
-      );
+      notes.push(compactTaskPrompt
+        ? `Loaded compact role instructions (relative references from ${instructionsFileDir}).`
+        : `Appended instructions + path directive to system prompt (relative references from ${instructionsFileDir}).`);
       return notes;
     })();
 
