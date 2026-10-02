@@ -417,3 +417,20 @@ describe("terminal provider failures", () => {
       .toEqual(["Pi provider request failed."]);
   });
 });
+
+
+describe("token-limited Pi completion", () => {
+  it("does not report a thinking-only length stop as successful", () => {
+    const line = JSON.stringify({ type: "message_end", message: {
+      role: "assistant", stopReason: "length", content: [{ type: "thinking", thinking: "unfinished work" }],
+    } });
+    expect(parsePiJsonl(line).errors).toEqual(["Pi response was truncated by the model token limit before completion."]);
+    expect(extractPiRuntimeEvents(line.replace("message_end", "turn_end"))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "error", level: "error", message: expect.stringContaining("token limit") }),
+    ]));
+  });
+  it("recognizes a length stop delivered only in the agent-end envelope", () => {
+    const line = JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", stopReason: "length", content: [] }] });
+    expect(parsePiJsonl(line).errors).toHaveLength(1);
+  });
+});
