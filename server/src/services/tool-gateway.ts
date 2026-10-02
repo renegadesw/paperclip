@@ -1337,9 +1337,10 @@ export function createToolGatewayService(
         return {
           name: gatewayToolName,
           displayName: catalogEntry.title ?? catalogEntry.toolName,
-          description:
+          description: `Connection: ${connection.name}. Credential policy: ${connection.credentialPolicy}. ${
             googleChatToolDescription(connection, catalogEntry.toolName, catalogEntry.description) ??
-            `Connected MCP tool ${catalogEntry.toolName} from ${connection.name}.`,
+            `Connected MCP tool ${catalogEntry.toolName}.`
+          }`,
           parametersSchema: inputSchema,
           pluginId: `mcp:${applicationKey ?? application.id}`,
           providerType:

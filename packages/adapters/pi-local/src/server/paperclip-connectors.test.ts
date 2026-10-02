@@ -49,6 +49,20 @@ describe("Paperclip connector delivery for Pi", () => {
     expect(auth.filter(([url]) => url === google.url).every(([, header]) => header === "Bearer run-token-2")).toBe(true);
   });
 
+  it("retains the connection ID and action in long Paperclip gateway tool names", async () => {
+    const prefix = "mcp.app-gallery-github-f40fb726-d357-451d-b0d1-12ad394f75e5-";
+    const tools = await discoverConnectorTools([github], [], { fetchImpl: gateway({
+      [github.url]: [
+        { name: `${prefix}6de47f1e:get-file-contents`, description: "Connection: GitHub. Credential policy: per_agent." },
+        { name: `${prefix}4f1bef03:get-file-contents`, description: "Connection: dawgflymd PAT. Credential policy: per_user." },
+      ],
+    }) as typeof fetch });
+    expect(tools.map((tool) => tool.name)).toEqual(["mcp_6de47f1e_get-file-contents", "mcp_4f1bef03_get-file-contents"]);
+    expect(tools[0]!.description).toContain("Connection: GitHub");
+    expect(tools[1]!.description).toContain("Connection: dawgflymd PAT");
+    expect(tools[0]!.upstreamName).toBe(`${prefix}6de47f1e:get-file-contents`);
+  });
+
   it("omits a gateway that cannot be listed instead of guessing its tools", async () => {
     const errors: string[] = [];
     const fetchImpl = gateway({ [google.url]: [{ name: "search" }] }, new Set([github.url]));
