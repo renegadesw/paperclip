@@ -408,6 +408,22 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
     const runtimeEntries = await db.select().from(toolProfileEntries)
       .where(eq(toolProfileEntries.profileId, runtimeGateway!.profileId!));
     expect(runtimeEntries.map((entry) => entry.connectionId)).toEqual([dedicated!.id]);
+
+    const previousProfile = process.env.PAPERCLIP_VECTOR_PROFILE;
+    try {
+      process.env.PAPERCLIP_VECTOR_PROFILE = "engineering";
+      const engineeringServers = await buildPaperclipRuntimeMcpServers({ db, agent: agent!, runId: run!.id });
+      expect(engineeringServers).toHaveLength(1);
+      const engineeringGateway = (await db.select().from(toolMcpGateways))
+        .find((gateway) => engineeringServers[0]!.url.endsWith(`/mcp/gateways/${gateway.gatewayPublicId}`));
+      expect(engineeringGateway).toBeTruthy();
+      const entries = await db.select().from(toolProfileEntries)
+        .where(eq(toolProfileEntries.profileId, engineeringGateway!.profileId!));
+      expect(entries.map((entry) => entry.connectionId).sort()).toEqual([personal!.id, dedicated!.id].sort());
+    } finally {
+      if (previousProfile === undefined) delete process.env.PAPERCLIP_VECTOR_PROFILE;
+      else process.env.PAPERCLIP_VECTOR_PROFILE = previousProfile;
+    }
   });
 
   it("audits permitted remote MCP connections that were not installed when delivery is empty", async () => {
