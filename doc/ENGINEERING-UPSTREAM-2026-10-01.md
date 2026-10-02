@@ -3,7 +3,10 @@
 This update is for the direct t480/FunkyDev engineering setup. It does not
 activate a release, apply live database migrations, resume agents, or authorize
 staging or production deployment. Publish this branch with CI skip markers;
-no PR or workflow dispatch is part of this update.
+the initial handoff included no PR or workflow dispatch. The owner later
+authorized [RD-451](https://oxygenxl.atlassian.net/browse/RD-451) and a PR in
+the fork, ready for review, with work stopped before merge. The earlier no-CI
+rule remains until the owner resolves the PR-triggered review workflow.
 
 ## Sources and coordination
 
@@ -28,6 +31,9 @@ no PR or workflow dispatch is part of this update.
   Board retry authority repair `e47bd3869ba485418fbf9ea763021a7dfa99173c` is
   also merged: verified board retries receive fresh run-bound authority while
   ingress handles and mismatched or active predecessors remain fail closed.
+  Final Pi completion repair `c785b4cc4acdae287de9ce5922b67cd7aa828a24` is
+  included: a provider length stop is incomplete work, including thinking-only
+  output and an agent-end-only terminal envelope. It must not appear successful.
 
 ## Compatibility decisions
 
@@ -157,6 +163,15 @@ That session separately owns any user-authorized live agent proof.
   by this source integration. Live repair-only test runs remain owned by the
   existing connector session.
 
+## Final connector-session follow-up
+
+The final parser repair changes only Pi terminal-response classification and
+its tests. After importing it, all seventeen Pi source files pass: 198 checks
+pass and one is skipped. The gateway, local-broker and Cloud-config suites pass
+again: 62 checks across three files. Full workspace typecheck passes again.
+The preceding final stopped-process recovery run passed all 331 checks at
+`800bdd06c`; the parser follow-up does not change heartbeat recovery logic.
+
 ## Local test environment
 
 Use Node 25.9.0 and pnpm 9.15.4. The stable runner creates canonical temporary
@@ -176,10 +191,16 @@ Host credential-helper tests run with the normal Git environment.
 
 ## Delivery boundary
 
-The user selected pushing only `vector/engineering-upstream-20261001`.
+The initial authorization selected pushing only
+`vector/engineering-upstream-20261001`. The owner subsequently requested
+RD-451 and a linked, non-draft fork PR targeting `vector/main`, with work
+stopped before merge. This source follow-up uses the RD key in its commit
+without renaming the existing integration branch or rewriting its history.
 `vector/main` and the canonical checkout remain at
-`d554c4789ed3930f8a53ac9fdf6503b3187097da` for this task. No PR, workflow
-dispatch, merged-upstream dev installation or live migration is included.
+`d554c4789ed3930f8a53ac9fdf6503b3187097da` for this task. There is no merge,
+workflow dispatch, integration runtime installation or live migration. PR
+creation is prepared pending the owner's decision about the inherited
+`pull_request_target` review workflow, which ignores CI skip markers.
 
 The connector session independently updated its repair-only t480 dev overlay.
 Its autonomous coordinator proved distinct organization and personal GitHub
