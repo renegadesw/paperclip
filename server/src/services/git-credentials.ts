@@ -441,6 +441,9 @@ export async function filterResolvedGitHubConnectionsForRun<T extends {
   responsibleUserId?: string | null;
   connections: T[];
 }): Promise<T[]> {
+  // Engineering agents use separate connector tools for every assigned identity;
+  // there is no single exported shell credential to select in this profile.
+  if (process.env.PAPERCLIP_VECTOR_PROFILE === "engineering") return input.connections;
   const githubConnections = input.connections.filter((connection) => {
     const config = connection.config && typeof connection.config === "object"
       ? connection.config as Record<string, unknown>
