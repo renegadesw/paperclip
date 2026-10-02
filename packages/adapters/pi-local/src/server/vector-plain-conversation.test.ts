@@ -51,7 +51,6 @@ const PAPERCLIP_PROMPT_TEXT = [
     "Recovery contract",
     "The above agent instructions were loaded from",
     "Resolve any relative file references",
-    "Instruction base:",
     "Vector OS admitted",
     "subordinate to Paperclip",
     "Assigned connector skills",
@@ -287,7 +286,7 @@ describe("Vector plain conversation turns", () => {
     });
     expect(turn.prompt).toBe("Check the t480 runner.\n\nAnd then open a PR.");
     expect(turn.rpcMessage).toBe(turn.prompt);
-    expect(turn.systemPrompt).toBe(INSTRUCTIONS.trim());
+    expect(turn.systemPrompt).toBe(`${INSTRUCTIONS.trim()}\n\nInstruction base: ${path.dirname(harness.instructionsPath)}/`);
     expectNoPaperclipPromptText(turn.systemPrompt);
   });
 
@@ -328,7 +327,7 @@ describe("Vector plain conversation turns", () => {
     });
     expect(turn.session).toBe(sessionPath);
     expect(turn.prompt).toBe("Follow-up question.");
-    expect(turn.systemPrompt).toBe(INSTRUCTIONS.trim());
+    expect(turn.systemPrompt).toBe(`${INSTRUCTIONS.trim()}\n\nInstruction base: ${path.dirname(harness.instructionsPath)}/`);
   });
 });
 
@@ -514,11 +513,15 @@ describe("Vector-owned prompting in every profile and mode", () => {
         expectNoPaperclipPromptText(turn.systemPrompt);
         expectNoPaperclipPromptText(turn.prompt);
         expect(turn.rpcMessage).toBe(turn.prompt);
-        expect(turn.skills).toEqual([]);
         expect(turn.promptMetrics).toMatchObject({ vectorOwnedPrompt: 1, heartbeatPromptChars: 0, bootstrapPromptChars: 0 });
-        expect(turn.systemPrompt).toBe(mode === "routine"
-          ? `${PROFILE_INSTRUCTIONS.trim()}\n\n${CHARTER}`
-          : PROFILE_INSTRUCTIONS.trim());
+        // Engineering release role files resolve ../WORKFLOW.md against the
+        // instruction base and read the operational Paperclip skill; every
+        // other profile receives the deployment's instructions alone.
+        const base = profile === "engineering"
+          ? `${PROFILE_INSTRUCTIONS.trim()}\n\nInstruction base: ${path.dirname(config.instructionsFilePath)}/`
+          : PROFILE_INSTRUCTIONS.trim();
+        if (profile !== "engineering") expect(turn.skills).toEqual([]);
+        expect(turn.systemPrompt).toBe(mode === "routine" ? `${base}\n\n${CHARTER}` : base);
         if (mode === "conversation") {
           expect(turn.prompt).toBe("What changed today?");
           return;
@@ -558,16 +561,6 @@ describe("Vector-owned prompting in every profile and mode", () => {
     expect(turn.session).toBe(sessionPath);
     expectNoPaperclipPromptText(turn.prompt);
     expect(runData(turn.prompt)).toMatchObject({ executionStage: { allowedActions: ["approve", "request_changes"] } });
-  });
-
-  it("removes bundled Paperclip skill links an earlier release left in the Pi skills home", async () => {
-    const skillsHome = path.join(harness.root, ".pi", "agent", "skills");
-    const oldRelease = path.join(harness.root, "old-release", "server", "skills");
-    await fs.mkdir(path.join(oldRelease, "paperclip"), { recursive: true });
-    await fs.mkdir(path.join(skillsHome, "owner-skill"), { recursive: true });
-    await fs.symlink(path.join(oldRelease, "paperclip"), path.join(skillsHome, "paperclip"));
-    await runTurn({ profile: "engineering", context: MODES.task!() });
-    expect((await fs.readdir(skillsHome)).sort()).toEqual(["owner-skill"]);
   });
 
   it("fails the run visibly when the release instructions file cannot be read", async () => {

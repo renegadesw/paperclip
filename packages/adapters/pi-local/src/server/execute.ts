@@ -1,3 +1,4 @@
+import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -45,10 +46,9 @@ import {
   resolveLegacyPaperclipDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
   renderTemplate,
-  renderPaperclipWakePrompt,
-  selectPaperclipTaskMarkdown,
+  selectPaperclipPromptSections,
+  selectInitialCommunicationGuidance,
   isPaperclipRecoveryWakePayload,
-  stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
   runChildProcess,
@@ -72,10 +72,12 @@ import { appendVectorVoiceContext } from "./vector-voice-context.js";
 import {
   isBundledPaperclipSkill,
   isVectorOwnedPromptInstallation,
-  removeBundledPaperclipSkillLinks,
   renderVectorRunData,
 } from "./vector-compact-prompt.js";
-import { resolveVectorPlainConversationMessage } from "./vector-plain-conversation.js";
+import {
+  readPaperclipConnectorSkillInstructions,
+  resolveVectorPlainConversationMessage,
+} from "./vector-plain-conversation.js";
 import {
   buildPiRpcPrompt,
   parseVectorIngressImages,
@@ -588,6 +590,7 @@ async function readSavedSessionCwd(input: {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
   const vectorIngressImages = parseVectorIngressImages(context.vectorIngressImages);
   const sensitiveImageData = vectorIngressImages.map((image) => image.data);
@@ -606,6 +609,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE
       : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
+  const hasCustomPromptTemplate = !vectorOwnedPrompt && asString(config.promptTemplate, "").trim().length > 0;
   const deploymentPiCommand = process.env.PAPERCLIP_VECTOR_PI_COMMAND?.trim() || undefined;
   const command = asString(config.command, deploymentPiCommand ?? "pi");
   const configuredModel = asString(config.model, "").trim();
@@ -670,24 +674,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // operational skill remains mounted explicitly below, even while Pi's
   // ambient skill discovery is disabled.
   const runtimeSkillConfig = vectorProfilePolicy.useBundledPaperclipSkillsOnly ? {} : config;
+  // Restricted Vector profiles (standard, staging, production) get no bundled
+  // Paperclip skill: their prompt is the deployment's alone. Engineering keeps
+  // the operational skill its release role files direct agents to read.
+  const excludeBundledPaperclipSkills = vectorOwnedPrompt && vectorProfilePolicy.restricted;
   const piSkillEntries = await readPaperclipRuntimeSkillEntries(runtimeSkillConfig, __moduleDir);
   const desiredPiSkillNames = resolveLegacyPaperclipDesiredSkillNames(
     runtimeSkillConfig,
     piSkillEntries,
   );
-  if (!executionTargetIsRemote && vectorOwnedPrompt) {
-    // Bundled Paperclip skills are Paperclip prompt text: never mount them in
-    // a Vector installation, and drop links an earlier release left behind.
-    // Resolved per run (the same path as PI_AGENT_SKILLS_DIR in production).
-    const piAgentSkillsDir = path.join(os.homedir(), ".pi", "agent", "skills");
-    const removedSkills = await removeBundledPaperclipSkillLinks(
-      piAgentSkillsDir,
-      piSkillEntries.filter(isBundledPaperclipSkill).map((entry) => entry.runtimeName),
-    );
-    for (const skillName of removedSkills) {
-      await onLog("stderr", `[paperclip] Removed bundled Paperclip Pi skill "${skillName}" from ${piAgentSkillsDir}\n`);
-    }
-  } else if (!executionTargetIsRemote && !vectorProfilePolicy.restricted) {
+  if (!executionTargetIsRemote && !vectorProfilePolicy.restricted) {
     await ensurePiSkillsInjected(onLog, piSkillEntries, desiredPiSkillNames);
   }
 
@@ -722,7 +718,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const linkedIssueIds = Array.isArray(context.issueIds)
     ? context.issueIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
-  const wakePayloadJson = stringifyPaperclipWakePayload(context.paperclipWake);
   const issueWorkMode = readPaperclipIssueWorkModeFromContext(context);
     
   if (wakeTaskId) env.PAPERCLIP_TASK_ID = wakeTaskId;
@@ -732,7 +727,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (approvalId) env.PAPERCLIP_APPROVAL_ID = approvalId;
   if (approvalStatus) env.PAPERCLIP_APPROVAL_STATUS = approvalStatus;
   if (linkedIssueIds.length > 0) env.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
-  if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
   refreshPaperclipWorkspaceEnvForExecution({
     env,
     envConfig,
@@ -812,7 +806,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const injectedSkillKeys = new Set(desiredPiSkillNames);
     const skillBinDirs = piSkillEntries
       .filter((entry) => injectedSkillKeys.has(entry.key) && entry.source.length > 0)
-      .filter((entry) => !vectorOwnedPrompt || !isBundledPaperclipSkill(entry))
+      .filter((entry) => !excludeBundledPaperclipSkills || !isBundledPaperclipSkill(entry))
       .map((entry) => path.join(entry.source, "bin"));
     const vectorEmbeddedRpc = executionMode === "rpc"
       && process.env.PAPERCLIP_DATABASE_PROFILE?.trim() === "vector-embedded";
@@ -883,14 +877,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let remoteSkillsDir: string | null = null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
 
-    const skillsDirOptions = { excludeBundledPaperclipSkills: vectorOwnedPrompt };
-    if ((vectorProfilePolicy.restricted || vectorOwnedPrompt) && !executionTargetIsRemote) {
-      localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig, skillsDirOptions);
+    if (vectorProfilePolicy.restricted && !executionTargetIsRemote) {
+      localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig, { excludeBundledPaperclipSkills });
     }
 
     if (executionTargetIsRemote) {
       try {
-        localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig, skillsDirOptions);
+        localSkillsDir = await buildPiSkillsDir(runtimeSkillConfig, { excludeBundledPaperclipSkills });
         await onLog(
           "stdout",
           `[paperclip] Syncing workspace and Pi runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
@@ -1095,14 +1088,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : "";
     const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
 
-    let renderedSystemPromptExtension: string;
-    let userPrompt: string;
-    let promptMetrics: Record<string, number>;
-    let commandNotes: string[];
-    if (vectorOwnedPrompt) {
-      // System prompt: the release instructions plus the signed Vector OS
-      // persona/role/workload prompts, verbatim. User prompt: the user's plain
-      // message, or the run's Paperclip state as data. Nothing else.
+    // Vector conversation turns reach Pi as the user's plain message, like the
+    // legacy `pi --mode rpc` chat. It needs the agent's own instructions; any
+    // turn this cannot reproduce exactly keeps the Paperclip wake prompt.
+    const vectorPlainConversation = resolveVectorPlainConversationMessage({
+      vectorProfile: process.env.PAPERCLIP_VECTOR_PROFILE,
+      context,
+    });
+    // Vector installations: the system prompt is the release instructions plus
+    // the signed Vector OS persona/role/workload prompts, verbatim; the prompt
+    // is the user's plain message or the run's Paperclip state as data.
+    const vectorPrompt = vectorOwnedPrompt ? await (async () => {
       const signedVectorPrompt = [context.vectorWorkloadLaunch, context.vectorRoleTurn, context.vectorPersonaTurn]
         .some((value) => Object.keys(parseObject(value)).length > 0);
       let instructionsContents = "";
@@ -1128,43 +1124,65 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           "A Vector installation runs only with its deployment-owned prompt.",
         );
       }
-      // Conversation turns reach Pi as the user's plain message, like the legacy
-      // `pi --mode rpc` chat; Pi's own session file carries the history.
-      const vectorPlainConversation = resolveVectorPlainConversationMessage({
-        vectorProfile: process.env.PAPERCLIP_VECTOR_PROFILE,
-        context,
-      });
-      let systemPrompt = appendVectorWorkloadSystemPrompt(instructionsContents, context.vectorWorkloadLaunch, { vectorOwnedOnly: true });
+      // Engineering release role files resolve ../WORKFLOW.md against this path.
+      const instructionBase = !vectorProfilePolicy.restricted && instructionsContents
+        ? `Instruction base: ${instructionsFileDir}`
+        : "";
+      let systemPrompt = joinPromptSections([instructionsContents, instructionBase]);
+      systemPrompt = appendVectorWorkloadSystemPrompt(systemPrompt, context.vectorWorkloadLaunch, { vectorOwnedOnly: true });
       systemPrompt = appendVectorRoleSystemPrompt(systemPrompt, context.vectorRoleTurn, { vectorOwnedOnly: true });
       systemPrompt = appendVectorPersonaSystemPrompt(systemPrompt, context.vectorPersonaTurn, { vectorOwnedOnly: true });
-      renderedSystemPromptExtension = appendVectorVoiceContext(systemPrompt, context.vectorVoiceActive);
+      systemPrompt = appendVectorVoiceContext(systemPrompt, context.vectorVoiceActive);
       const plainMessage = vectorPlainConversation.plain ? vectorPlainConversation.message : null;
       const runData = plainMessage === null ? renderVectorRunData(context) : "";
-      userPrompt = plainMessage ?? runData;
-      promptMetrics = {
-        systemPromptChars: renderedSystemPromptExtension.length,
-        promptChars: userPrompt.length,
-        bootstrapPromptChars: 0,
-        wakePromptChars: 0,
-        runDataChars: runData.length,
-        taskContextChars: 0,
-        sessionHandoffChars: 0,
-        heartbeatPromptChars: 0,
-        vectorOwnedPrompt: 1,
+      const userPrompt = plainMessage ?? runData;
+      return {
+        systemPrompt,
+        userPrompt,
+        promptMetrics: {
+          systemPromptChars: systemPrompt.length,
+          promptChars: userPrompt.length,
+          bootstrapPromptChars: 0,
+          wakePromptChars: 0,
+          runDataChars: runData.length,
+          taskContextChars: 0,
+          sessionHandoffChars: 0,
+          heartbeatPromptChars: 0,
+          vectorOwnedPrompt: 1,
+        },
+        commandNotes: [
+          ...preparedRuntimeConfig.notes,
+          plainMessage !== null
+            ? "Vector conversation turn: sent the user's message verbatim with the deployment-owned instructions as the system prompt."
+            : "Vector run: deployment-owned instructions as the system prompt and the Paperclip run state as data; no Paperclip prompt text.",
+          ...(resolvedInstructionsFilePath ? [`Loaded agent instructions from ${resolvedInstructionsFilePath}`] : []),
+        ],
       };
-      commandNotes = [
-        ...preparedRuntimeConfig.notes,
-        plainMessage !== null
-          ? "Vector conversation turn: sent the user's message verbatim with the deployment-owned instructions as the system prompt."
-          : "Vector run: deployment-owned instructions as the system prompt and the Paperclip run state as data; no Paperclip prompt text.",
-        ...(resolvedInstructionsFilePath ? [`Loaded agent instructions from ${resolvedInstructionsFilePath}`] : []),
-      ];
-    } else {
-      let systemPromptExtension = "";
-      let instructionsReadFailed = false;
-      if (resolvedInstructionsFilePath) {
-        try {
-          const instructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
+    })() : null;
+
+    let plainConversationMessage: string | null = null;
+    // Connector skill docs move from the wake prompt to the system prompt so
+    // the user message stays verbatim.
+    const plainConversationSystemBase = (instructionsContents: string) => {
+      const connectorSkillInstructions = readPaperclipConnectorSkillInstructions(context.paperclipWake);
+      return joinPromptSections([
+        instructionsContents,
+        connectorSkillInstructions ? `## Assigned connector skills\n\n${connectorSkillInstructions}` : "",
+      ]);
+    };
+
+    let systemPromptExtension = "";
+    let instructionsReadFailed = false;
+    if (resolvedInstructionsFilePath) {
+      try {
+        const instructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
+        if (vectorPlainConversation.plain) {
+          plainConversationMessage = vectorPlainConversation.message;
+          // The Vector release instructions carry no relative file references,
+          // so neither the path directive nor Paperclip's heartbeat/conversation
+          // template is appended.
+          systemPromptExtension = plainConversationSystemBase(instructionsContents);
+        } else {
           systemPromptExtension =
             `${instructionsContents}\n\n` +
             `The above agent instructions were loaded from ${resolvedInstructionsFilePath}. ` +
@@ -1172,79 +1190,84 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             (context.conversationMode === true
               ? DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE
               : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE);
-        } catch (err) {
-          instructionsReadFailed = true;
-          const reason = err instanceof Error ? err.message : String(err);
-          await onLog(
-            "stdout",
-            `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`,
-          );
-          // Fall back to base prompt template
-          systemPromptExtension = promptTemplate;
         }
-      } else {
+      } catch (err) {
+        instructionsReadFailed = true;
+        const reason = err instanceof Error ? err.message : String(err);
+        await onLog(
+          "stdout",
+          `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`,
+        );
+        // Fall back to base prompt template
         systemPromptExtension = promptTemplate;
       }
-
-      const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
-      const templateData = {
-        agentId: agent.id,
-        companyId: agent.companyId,
-        runId,
-        company: { id: agent.companyId },
-        agent,
-        run: { id: runId, source: "on_demand" },
-        context,
-      };
-      renderedSystemPromptExtension = renderTemplate(systemPromptExtension, templateData);
-      const renderedBootstrapPrompt =
-        !canResumeSession && bootstrapPromptTemplate.trim().length > 0
-          ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
-          : "";
-      const taskContextNote = context.conversationMode === true
-        ? selectPaperclipTaskMarkdown(context, { resumedSession: canResumeSession })
-        : "";
-      const wakePrompt = renderPaperclipWakePrompt(context.paperclipWake, {
-        conversationMode: context.conversationMode === true,
-        resumedSession: canResumeSession,
-        suppressIssueDescription: taskContextNote.length > 0,
-      });
-      const shouldUseResumeDeltaPrompt = canResumeSession && wakePrompt.length > 0;
-      const renderedHeartbeatPrompt = shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
-        ? ""
-        : renderTemplate(promptTemplate, templateData);
-      const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-      userPrompt = joinPromptSections([
-        renderedBootstrapPrompt,
-        wakePrompt,
-        taskContextNote,
-        sessionHandoffNote,
-        renderedHeartbeatPrompt,
-      ]);
-      promptMetrics = {
-        systemPromptChars: renderedSystemPromptExtension.length,
-        promptChars: userPrompt.length,
-        bootstrapPromptChars: renderedBootstrapPrompt.length,
-        wakePromptChars: wakePrompt.length,
-        taskContextChars: taskContextNote.length,
-        sessionHandoffChars: sessionHandoffNote.length,
-        heartbeatPromptChars: renderedHeartbeatPrompt.length,
-      };
-
-      commandNotes = [...preparedRuntimeConfig.notes];
-      if (resolvedInstructionsFilePath && instructionsReadFailed) {
-        commandNotes.push(
-          `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
-        );
-      } else if (resolvedInstructionsFilePath) {
-        commandNotes.push(
-          `Loaded agent instructions from ${resolvedInstructionsFilePath}`,
-          `Appended instructions + path directive to system prompt (relative references from ${instructionsFileDir}).`,
-        );
-      }
+    } else if (
+      vectorPlainConversation.plain &&
+      (Object.keys(parseObject(context.vectorPersonaTurn)).length > 0 ||
+        Object.keys(parseObject(context.vectorRoleTurn)).length > 0)
+    ) {
+      // No instructions file (restricted agents without a release asset): the
+      // admitted persona/role appended below is the agent's instructions.
+      plainConversationMessage = vectorPlainConversation.message;
+      systemPromptExtension = plainConversationSystemBase("");
+    } else {
+      systemPromptExtension = promptTemplate;
     }
 
-    const buildArgs = (sessionFile: string): string[] => {
+    systemPromptExtension = appendVectorWorkloadSystemPrompt(
+      systemPromptExtension,
+      context.vectorWorkloadLaunch,
+    );
+    systemPromptExtension = appendVectorRoleSystemPrompt(
+      systemPromptExtension,
+      context.vectorRoleTurn,
+    );
+    systemPromptExtension = appendVectorPersonaSystemPrompt(
+      systemPromptExtension,
+      context.vectorPersonaTurn,
+    );
+
+    const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
+    const templateData = {
+      agentId: agent.id,
+      companyId: agent.companyId,
+      runId,
+      company: { id: agent.companyId },
+      agent,
+      run: { id: runId, source: "on_demand" },
+      context,
+    };
+    const renderedSystemPromptExtension = vectorPrompt?.systemPrompt ?? appendVectorVoiceContext(
+      renderTemplate(systemPromptExtension, templateData), context.vectorVoiceActive,
+    );
+    const plainConversation = plainConversationMessage !== null;
+    const systemOwnsDefaultPolicy = !hasCustomPromptTemplate || Boolean(resolvedInstructionsFilePath && !instructionsReadFailed);
+    const sessionHandoffNote = plainConversation ? "" : asString(context.paperclipSessionHandoffMarkdown, "").trim();
+    const vectorImageNote = vectorIngressImages.length > 0
+      ? "The image attachments for this turn are supplied natively with this prompt. Do not attempt to download them or request Paperclip API credentials."
+      : "";
+
+    const commandNotes = vectorPrompt?.commandNotes ?? (() => {
+      const notes = [...preparedRuntimeConfig.notes];
+      if (plainConversationMessage !== null) {
+        notes.push("Vector conversation turn: sent the user's message verbatim with the agent instructions as the system prompt (no Paperclip wake or heartbeat prompt).");
+      }
+      if (!resolvedInstructionsFilePath) return notes;
+      if (instructionsReadFailed) {
+        notes.push(
+          `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
+        );
+        return notes;
+      }
+      notes.push(`Loaded agent instructions from ${resolvedInstructionsFilePath}`);
+      if (plainConversation) return notes;
+      notes.push(
+        `Appended instructions + path directive to system prompt (relative references from ${instructionsFileDir}).`,
+      );
+      return notes;
+    })();
+
+    const buildArgs = (sessionFile: string, userPrompt: string): string[] => {
       const args: string[] = [];
 
       args.push("--mode", executionMode);
@@ -1283,7 +1306,44 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (vectorIngressImages.length > 0 && executionMode !== "rpc") {
         throw new Error("Vector ingress images require Pi RPC execution mode");
       }
-      const args = buildArgs(sessionFile);
+      const attemptResumedSession = canResumeSession && sessionFile === sessionPath;
+      const attemptSections = selectPaperclipPromptSections(context, {
+        resumedSession: attemptResumedSession,
+        includeCommunicationGuidance: false,
+        includeExecutionContract: systemOwnsDefaultPolicy ? false : undefined,
+      });
+      const attemptBootstrapPrompt = !plainConversation && !attemptResumedSession && bootstrapPromptTemplate.trim().length > 0
+        ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
+        : "";
+      const attemptWakePrompt = plainConversation ? "" : attemptSections.wakePrompt;
+      const attemptRenderedHeartbeatPrompt = plainConversation || attemptResumedSession && attemptWakePrompt.length > 0
+        || isPaperclipRecoveryWakePayload(context.paperclipWake)
+        || !hasCustomPromptTemplate
+        ? ""
+        : renderTemplate(promptTemplate, templateData);
+      const attemptBaseUserPrompt = joinPromptSections([
+        plainConversationMessage,
+        attemptBootstrapPrompt,
+        attemptWakePrompt,
+        plainConversation ? "" : attemptSections.taskContextNote,
+        sessionHandoffNote,
+        vectorImageNote,
+        attemptRenderedHeartbeatPrompt,
+      ]);
+      const userPrompt = vectorPrompt?.userPrompt ?? joinPromptSections([
+        plainConversation ? "" : selectInitialCommunicationGuidance(context, { resumedSession: attemptResumedSession }),
+        attemptBaseUserPrompt,
+      ]);
+      const promptMetrics = vectorPrompt?.promptMetrics ?? {
+        systemPromptChars: renderedSystemPromptExtension.length,
+        promptChars: userPrompt.length,
+        bootstrapPromptChars: attemptBootstrapPrompt.length,
+        wakePromptChars: attemptWakePrompt.length,
+        taskContextChars: plainConversation ? 0 : attemptSections.taskContextNote.length,
+        sessionHandoffChars: sessionHandoffNote.length,
+        heartbeatPromptChars: attemptRenderedHeartbeatPrompt.length,
+      };
+      const args = buildArgs(sessionFile, userPrompt);
       if (onMeta) {
         await onMeta({
           adapterType: "pi_local",
@@ -1351,6 +1411,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ),
       );
       const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, processCommand, processArgs, {
+        onProcessStopped: providerStop.beginInvocation(),
         cwd,
         env: processEnv,
         inheritProcessEnv: !vectorEmbeddedRpc,
@@ -1501,11 +1562,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       return toResult(initial);
     } finally {
-      await Promise.all([
-        paperclipBridge?.stop(),
-        restoreRemoteWorkspace?.(),
-        localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-      ]);
+      try {
+        await providerStop.collectBeforeRestore();
+      } finally {
+        await Promise.all([
+          paperclipBridge?.stop(),
+          restoreRemoteWorkspace?.(),
+          localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
+        ]);
+      }
     }
   } finally {
     await Promise.all([

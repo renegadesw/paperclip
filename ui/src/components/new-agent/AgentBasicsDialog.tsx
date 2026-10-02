@@ -1,3 +1,6 @@
+import { useCompany } from "@/context/CompanyContext";
+import { useAgentAppearanceDraft } from "@/hooks/useAgentAppearanceDraft";
+import { AgentCharacter } from "../AgentCharacter";
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Check, ChevronRight } from "lucide-react";
@@ -17,7 +20,6 @@ import {
   DialogDescription,
   DialogTitle,
 } from "../ui/dialog";
-import { PillGuy } from "../onboarding/PillGuy";
 
 export type AgentBasics = {
   name: string;
@@ -80,6 +82,12 @@ export function AdapterMark({
     </>
   );
 }
+function AgentBasicsCharacter() {
+  const { selectedCompanyId } = useCompany();
+  const { appearance } = useAgentAppearanceDraft(`${selectedCompanyId}:new-agent`);
+  return <AgentCharacter appearance={appearance} state="sleepy" muted size={256} className="size-48" trackingScope="page" />;
+}
+
 export function AgentBasicsDialog({
   open,
   onClose,
@@ -167,7 +175,7 @@ export function AgentBasicsDialog({
         >
           <div className="flex min-h-0 flex-col gap-7 overflow-y-auto px-6 pb-8 sm:px-10">
             <div className="flex flex-col items-center gap-4 text-center">
-              <PillGuy state="dormant" className="size-16" />
+              {open && <AgentBasicsCharacter />}
               <div className="space-y-2">
                 <DialogTitle className="text-3xl font-semibold tracking-tight">
                   {step === "name"
@@ -219,7 +227,7 @@ export function AgentBasicsDialog({
                     {error.message}
                   </p>
                 )}
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                <div className={cn("grid grid-cols-2 gap-3", choices.length !== 4 && "sm:grid-cols-3")}>
                   {choices.map((adapter) => {
                     const display = getAdapterDisplay(adapter.type);
                     return (
@@ -267,6 +275,7 @@ export function AgentBasicsDialog({
                     >
                       <option value="codex">Codex (app server)</option>
                       <option value="claude">Claude (ACPX)</option>
+                      <option value="grok">Grok Build (ACPX)</option>
                       <option value="opencode">OpenCode</option>
                     </select>
                   </label>

@@ -13,6 +13,16 @@ Shared enum constants live in `packages/shared/src/constants.ts`. Use those
 constants when code needs a reusable domain, but treat the generated telemetry
 types as the final authority for emitted first-party telemetry shapes.
 
+## Vector delivery policy
+
+Paperclip Cloud is prohibited in every Vector runtime profile. Runtime telemetry
+configuration always resolves to disabled, regardless of environment or saved
+preferences. Hosted telemetry endpoints and their fallback are removed. Direct
+client construction supports only an explicitly supplied IP loopback endpoint
+for local diagnostics; requests refuse redirects. This does not enable runtime
+telemetry. No event names, dimensions, generated contracts, or retention rules
+change. The privacy impact is removal of outgoing first-party collection.
+
 ## Public Sources
 
 Use these files when reviewing or changing telemetry code:
@@ -77,6 +87,12 @@ in the generated contract. Its `legacy_inherited_restriction` dimension is
 `true` only when stored migration provenance preserves a legacy resolver-policy
 restriction. It is `false` for canonical new writes. This dimension describes
 policy provenance. It does not contain user content or an identifier.
+
+Emit `interaction.resolved` only after the complete decision transaction commits.
+Conversational answers include the card outcome, source-message reference, and
+activity audit in that transaction. A rollback or matching retry must not emit
+a resolution event. This changes emission timing only: message text, comment IDs,
+and user IDs remain in the instance database and are not added to telemetry.
 
 Use `trackInteractionCreated()` and `trackInteractionResolved()` from
 `events.ts` to emit these events. The generated contract remains the authority
@@ -196,3 +212,13 @@ When a new event carries only enums, booleans, counts, or coarse buckets and
 no token material or PII, assign it to `operational_enum_count` in
 `EVENT_RETENTION_CLASS`. If no existing class fits, define a new class in
 `RETENTION_DAYS` and document it here.
+
+## GitHub-synced skills
+
+The legacy import endpoint retains `skill.imported` with its existing `source_type`.
+For source-managed GitHub skills, `skill_ref` is omitted, including public sources:
+the saved repository may be private and its key contains user-authored names.
+Source discovery, selection, and refresh add no first-party telemetry events.
+Repository URLs, paths, commits, connection IDs, names, and file contents stay out
+of these telemetry dimensions. Review this suppression in privacy review alongside
+changes to the legacy import caller; the event schema and envelope are unchanged.

@@ -19,7 +19,7 @@ function makeClient(
 ) {
   return {
     client: new TelemetryClient(
-      { enabled: true, endpoint: "http://localhost:9999/ingest", ...config },
+      { enabled: true, endpoint: "http://127.0.0.1:9999/ingest", ...config },
       stateFactory,
       "0.0.0-test",
       random,
@@ -442,50 +442,18 @@ describe("TelemetryClient batched retry + backoff", () => {
     client.stop();
   });
 
-  // Issue 1 (PR #9946): a transient upstream 5xx on the primary endpoint must
-  // fall through to the healthy secondary endpoint instead of returning early.
-  it("falls through to the secondary endpoint on a transient 5xx", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 503 }) // primary endpoint: transient
-      .mockResolvedValueOnce({ ok: true }); // secondary endpoint: healthy
-    vi.stubGlobal("fetch", fetchMock);
-    // Empty endpoint => the two built-in DEFAULT_ENDPOINTS are used.
-    const { client } = makeClient(undefined, { endpoint: "" });
-
-    client.track("install.started", {});
-    await client.flush();
-
-    // Both endpoints tried within a single attempt; delivered on the secondary,
-    // so no retry is queued.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(120_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    client.stop();
-  });
-
-  // Issue 1 (PR #9946): when every endpoint returns a transient 5xx the status
-  // is still surfaced as retryable (not swallowed).
-  it("surfaces the transient status for retry when all endpoints 5xx", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 502 }) // primary
-      .mockResolvedValueOnce({ ok: false, status: 502 }) // secondary
-      .mockResolvedValue({ ok: true }); // retry succeeds
-    vi.stubGlobal("fetch", fetchMock);
-    const { client } = makeClient(undefined, {
-      endpoint: "",
-      backoff: { baseDelayMs: 1_000, maxDelayMs: 30_000, maxAttempts: 5, jitterRatio: 0.25 },
-    });
-
-    client.track("install.started", {});
-    await client.flush();
-    expect(fetchMock).toHaveBeenCalledTimes(2); // both endpoints 502 -> queued for retry
-
-    await vi.advanceTimersByTimeAsync(1_000); // attempt 2 -> ok on primary
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    client.stop();
-  });
+  it.each(["", "https://telemetry.paperclip.ing/ingest", "https://example.test/ingest", "http://localhost:9999/ingest"])(
+    "never sends or retries with a missing or hosted endpoint %s", async (endpoint) => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const { client } = makeClient(undefined, { enabled: true, endpoint });
+      client.track("install.started", {});
+      await client.flush();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fetchMock).not.toHaveBeenCalled();
+      client.stop();
+    },
+  );
 
   // Issue 3 (PR #9946): an out-of-range `Retry-After` hint is clamped to
   // maxDelayMs rather than overflowing the timer range into a near-immediate

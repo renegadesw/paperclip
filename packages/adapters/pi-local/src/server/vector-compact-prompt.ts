@@ -1,5 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import {
   asString,
   normalizePaperclipWakePayload,
@@ -22,37 +20,9 @@ export function isVectorOwnedPromptInstallation(
   return isVectorInstallationProfile(profile) || isVectorPiInstallation(env);
 }
 
-/** Bundled Paperclip skills are Paperclip-authored prompt text. */
+/** Bundled Paperclip skills are Paperclip-authored prompt text; engineering opts in. */
 export function isBundledPaperclipSkill(entry: Pick<PaperclipSkillEntry, "key">): boolean {
   return entry.key.trim().toLowerCase().startsWith("paperclipai/paperclip/");
-}
-
-/**
- * Earlier releases symlinked bundled Paperclip skills into the agent's
- * shared Pi skills home, where Pi discovers them on every launch. Remove only
- * symlinks named for a bundled skill that point into a `skills/` directory;
- * user-owned directories and files are never touched.
- */
-export async function removeBundledPaperclipSkillLinks(
-  skillsHome: string,
-  bundledNames: string[],
-): Promise<string[]> {
-  const removed: string[] = [];
-  for (const name of new Set(bundledNames)) {
-    const target = path.join(skillsHome, name);
-    let link: string;
-    try {
-      if (!(await fs.lstat(target)).isSymbolicLink()) continue;
-      link = await fs.readlink(target);
-    } catch {
-      continue;
-    }
-    const resolved = path.resolve(skillsHome, link);
-    if (path.basename(resolved) !== name || path.basename(path.dirname(resolved)) !== "skills") continue;
-    await fs.unlink(target);
-    removed.push(name);
-  }
-  return removed;
 }
 
 function pruneEmpty(value: unknown): unknown {

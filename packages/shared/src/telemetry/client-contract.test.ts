@@ -31,7 +31,7 @@ function makeClient(
   random: () => number = () => 0.5,
 ) {
   return new TelemetryClient(
-    { enabled: true, endpoint: "http://localhost:9999/ingest", ...config },
+    { enabled: true, endpoint: "http://127.0.0.1:9999/ingest", ...config },
     stateFactory,
     "0.0.0-test",
     random,

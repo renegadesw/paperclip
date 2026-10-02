@@ -1,4 +1,5 @@
 import {
+  asString,
   normalizePaperclipWakePayload,
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -137,4 +138,13 @@ export function resolveVectorPlainConversationMessage(input: {
     bodies.push(body.trim());
   }
   return { plain: true, message: bodies.join("\n\n") };
+}
+
+/**
+ * Connector skills are deployment-owned capability docs (e.g. the GitHub
+ * connection). The wake prompt normally carries them; a plain turn moves them
+ * to the system prompt so the user message stays verbatim.
+ */
+export function readPaperclipConnectorSkillInstructions(paperclipWake: unknown): string {
+  return asString(parseObject(paperclipWake).connectorSkillInstructions, "").trim();
 }

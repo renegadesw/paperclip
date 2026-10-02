@@ -1,11 +1,7 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isBundledPaperclipSkill,
   isVectorOwnedPromptInstallation,
-  removeBundledPaperclipSkillLinks,
   renderVectorRunData,
 } from "./vector-compact-prompt.js";
 
@@ -68,25 +64,5 @@ describe("renderVectorRunData", () => {
   it("names the wake reason when the run has no wake payload", () => {
     expect(parse(renderVectorRunData({ wakeReason: "timer" }))).toEqual({ reason: "timer" });
     expect(parse(renderVectorRunData({}))).toEqual({ reason: "heartbeat" });
-  });
-});
-
-describe("removeBundledPaperclipSkillLinks", () => {
-  it("removes only bundled-skill symlinks into a skills directory", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vector-skill-links-"));
-    try {
-      const home = path.join(root, "home");
-      const bundled = path.join(root, "release", "skills");
-      await fs.mkdir(path.join(bundled, "paperclip"), { recursive: true });
-      await fs.mkdir(path.join(root, "elsewhere", "paperclip-board"), { recursive: true });
-      await fs.mkdir(path.join(home, "para-memory-files"), { recursive: true });
-      await fs.symlink(path.join(bundled, "paperclip"), path.join(home, "paperclip"));
-      await fs.symlink(path.join(root, "elsewhere", "paperclip-board"), path.join(home, "paperclip-board"));
-      const removed = await removeBundledPaperclipSkillLinks(home, ["paperclip", "paperclip-board", "para-memory-files", "absent"]);
-      expect(removed).toEqual(["paperclip"]);
-      expect((await fs.readdir(home)).sort()).toEqual(["paperclip-board", "para-memory-files"]);
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
   });
 });

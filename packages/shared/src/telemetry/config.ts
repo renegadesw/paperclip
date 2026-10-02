@@ -1,7 +1,5 @@
 import type { TelemetryBackoffConfig, TelemetryConfig } from "./types.js";
 
-const CI_ENV_VARS = ["CI", "CONTINUOUS_INTEGRATION", "BUILD_NUMBER", "GITHUB_ACTIONS", "GITLAB_CI"];
-
 /**
  * Single source of truth for telemetry soft caps + backoff. Kept as config
  * *defaults* (not hardcoded flush logic) so later work reads config, not
@@ -59,28 +57,12 @@ export function resolveCaps(overrides?: TelemetryConfigOverrides): ResolvedTelem
   };
 }
 
-function isCI(): boolean {
-  return CI_ENV_VARS.some((key) => process.env[key] === "true" || process.env[key] === "1");
-}
-
 export function resolveTelemetryConfig(
   fileConfig?: { enabled?: boolean } & TelemetryConfigOverrides,
 ): TelemetryConfig {
   const caps = resolveCaps(fileConfig);
 
-  if (process.env.PAPERCLIP_TELEMETRY_DISABLED === "1") {
-    return { enabled: false, ...caps };
-  }
-  if (process.env.DO_NOT_TRACK === "1") {
-    return { enabled: false, ...caps };
-  }
-  if (isCI()) {
-    return { enabled: false, ...caps };
-  }
-  if (fileConfig?.enabled === false) {
-    return { enabled: false, ...caps };
-  }
-
-  const endpoint = process.env.PAPERCLIP_TELEMETRY_ENDPOINT || undefined;
-  return { enabled: true, endpoint, ...caps };
+  // First-party Paperclip telemetry is permanently disabled in the Vector fork.
+  // Neither config files nor environment variables can opt it back in.
+  return { enabled: false, ...caps };
 }

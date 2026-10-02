@@ -33,3 +33,12 @@ The resulting artifact keeps history routes, API calls, WebSockets, service
 worker scope, plugin UI resources, and static assets below that prefix. The
 HTTP reverse proxy must remove the prefix before forwarding to Paperclip's
 root-mounted server routes and must return the SPA index for deep-link paths.
+## Editor dependency identity
+
+Keep the root and workspace overrides for `@codemirror/state`,
+`@codemirror/view`, and `@lezer/common` aligned. CodeMirror requires shared
+extension identity, while Lezer parsers and syntax highlighters require shared
+`NodeProp` IDs. Multiple Lezer copies can crash code-block highlighting with
+`tags is not iterable`. `src/lib/codemirror-single-instance.test.ts` checks the
+installed dependency graph and highlights sample code through the editor's real
+language dependencies. GitHub Actions owns regeneration of `pnpm-lock.yaml`.

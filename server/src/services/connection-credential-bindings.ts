@@ -2,7 +2,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { type Db, toolConnections, companySecretBindings, connectionGrants, companySecrets, userSecretDefinitions } from "@paperclipai/db";
 import type { ToolCredentialSecretRef } from "@paperclipai/shared";
 import { secretService } from "./secrets.js";
-function credentialRefConfigPath(ref: { name: string }): string { return ref.name.startsWith("credentials.") ? ref.name : `credentials.${ref.name}`; }
+import { connectionCredentialConfigPath as credentialRefConfigPath } from "./connection-credentials.js";
 export async function syncConnectionCredentialBindings(
     db: Db | Parameters<Parameters<Db["transaction"]>[0]>[0],
     connection: typeof toolConnections.$inferSelect,
@@ -21,12 +21,15 @@ export async function syncConnectionCredentialBindings(
       );
     // A metadata edit or pause/resume must retain declarations for every
     // active personal/dedicated grant, not just connection-owned credentials.
-    const activeGrants = await dbClient.select({ refs: connectionGrants.credentialSecretRefs })
+    const activeGrants = await dbClient.select({ id: connectionGrants.id, kind: connectionGrants.kind, refs: connectionGrants.credentialSecretRefs })
       .from(connectionGrants).where(and(
         eq(connectionGrants.companyId, connection.companyId),
         eq(connectionGrants.connectionId, connection.id),
         eq(connectionGrants.status, "active"),
       ));
+    const dedicatedPaths = new Map(activeGrants.filter((grant) => grant.kind === "agent")
+      .flatMap((grant) => grant.refs.map((ref) =>
+        [`${ref.secretId}:${ref.configPath}`, `grants.${grant.id}.${ref.configPath}`] as const)));
     const rawBindings = [
       ...connection.credentialRefs.map((ref) => ({
         secretId: ref.secretId,
@@ -49,6 +52,9 @@ export async function syncConnectionCredentialBindings(
     // than one personal grant can reference the same client registration.
     // Binding rows are unique per secret/config path, so collapse those mirrors
     // before replacing the durable projection declarations.
+    for (const ref of rawBindings) {
+      ref.configPath = dedicatedPaths.get(`${ref.secretId}:${ref.configPath}`) ?? ref.configPath;
+    }
     const bindings = [...new Map(rawBindings.map((ref) => [
       `${ref.secretId}:${ref.configPath}`,
       ref,
