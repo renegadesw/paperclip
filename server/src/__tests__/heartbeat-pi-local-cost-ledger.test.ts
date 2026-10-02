@@ -17,6 +17,17 @@ import { heartbeatService } from "../services/heartbeat.js";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
+// Vector installations run only with release-owned instructions under
+// <release>/paperclip/profile-assets/<profile>/; the release Pi command is
+// <release>/runtime/bin/pi.
+async function stageVectorRelease(root: string, profile: string): Promise<string> {
+  await fs.mkdir(path.join(root, "runtime", "bin"), { recursive: true });
+  const file = path.join(root, "paperclip", "profile-assets", profile, "agent", "AGENTS.md");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, "# Vector agent\n\nDeployment-owned instructions.\n", "utf8");
+  return file;
+}
+
 async function writeUsagePi(commandPath: string): Promise<void> {
   await fs.writeFile(commandPath, `#!/usr/bin/env node
 if (process.argv.includes("--list-models")) {
@@ -77,9 +88,10 @@ describeEmbeddedPostgres("pi_local RPC cost ledger", () => {
   });
 
   it("records input/output tokens, model, and cost for a Standard pi_local RPC run", async () => {
-    const commandPath = path.join(root, "pi");
+    const commandPath = path.join(root, "runtime", "bin", "pi");
     const workspace = path.join(root, "workspace");
     await fs.mkdir(workspace, { recursive: true });
+    const instructionsFilePath = await stageVectorRelease(root, "standard");
     await writeUsagePi(commandPath);
     Object.assign(process.env, {
       PAPERCLIP_VECTOR_PROFILE: "standard",
@@ -104,6 +116,7 @@ describeEmbeddedPostgres("pi_local RPC cost ledger", () => {
       adapterType: "pi_local",
       adapterConfig: {
         command: commandPath,
+        instructionsFilePath,
         cwd: workspace,
         model: "router/Qwen3.8-Flash",
         executionMode: "rpc",

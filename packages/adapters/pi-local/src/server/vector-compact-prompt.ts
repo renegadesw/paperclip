@@ -1,18 +1,99 @@
-/** Keep the deployment's own role instructions; do not layer a second generic
- * Paperclip heartbeat contract over them. Other profiles remain unchanged. */
-export function useCompactVectorTaskPrompt(
+import fs from "node:fs/promises";
+import path from "node:path";
+import {
+  asString,
+  normalizePaperclipWakePayload,
+  type PaperclipSkillEntry,
+} from "@paperclipai/adapter-utils/server-utils";
+import { isVectorPiInstallation } from "./vector-profile-policy.js";
+import { isVectorInstallationProfile } from "./vector-plain-conversation.js";
+
+// Inside a Vector installation the deployment's own Vector OS prompt is the
+// only prompt prose Pi receives: the release instructions file plus the
+// signed persona/role/workload prompts Vector OS admits. Every profile and
+// every mode (conversation, task, routine) is covered, with no opt-out.
+// Paperclip run state still reaches Pi, but as data only. Outside a Vector
+// installation the adapter keeps the upstream Paperclip prompts.
+
+export function isVectorOwnedPromptInstallation(
   profile: string | undefined,
-  config: Record<string, unknown>,
-  context: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  // Plain chat and interaction/chat fallbacks retain their existing contracts.
-  if (context.conversationMode === true) return false;
-  if (!profile?.trim()) return false;
-  if (config.promptMode === "full") return false;
-  if (config.promptMode === "compact") return true;
-  return ["engineering", "standard"].includes(profile.trim().toLowerCase());
+  return isVectorInstallationProfile(profile) || isVectorPiInstallation(env);
 }
 
-export const COMPACT_VECTOR_TASK_FALLBACK =
-  "Work only on the assigned request. Obey the supplied review, recovery and authority constraints. " +
-  "Return verified evidence and the required task disposition; never claim an unconfirmed action succeeded.";
+/** Bundled Paperclip skills are Paperclip-authored prompt text. */
+export function isBundledPaperclipSkill(entry: Pick<PaperclipSkillEntry, "key">): boolean {
+  return entry.key.trim().toLowerCase().startsWith("paperclipai/paperclip/");
+}
+
+/**
+ * Earlier releases symlinked bundled Paperclip skills into the agent's
+ * shared Pi skills home, where Pi discovers them on every launch. Remove only
+ * symlinks named for a bundled skill that point into a `skills/` directory;
+ * user-owned directories and files are never touched.
+ */
+export async function removeBundledPaperclipSkillLinks(
+  skillsHome: string,
+  bundledNames: string[],
+): Promise<string[]> {
+  const removed: string[] = [];
+  for (const name of new Set(bundledNames)) {
+    const target = path.join(skillsHome, name);
+    let link: string;
+    try {
+      if (!(await fs.lstat(target)).isSymbolicLink()) continue;
+      link = await fs.readlink(target);
+    } catch {
+      continue;
+    }
+    const resolved = path.resolve(skillsHome, link);
+    if (path.basename(resolved) !== name || path.basename(path.dirname(resolved)) !== "skills") continue;
+    await fs.unlink(target);
+    removed.push(name);
+  }
+  return removed;
+}
+
+function pruneEmpty(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const items = value.map(pruneEmpty).filter((item) => item !== undefined);
+    return items.length > 0 ? items : undefined;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value)
+      .map(([key, item]) => [key, pruneEmpty(item)] as const)
+      .filter(([, item]) => item !== undefined);
+    return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+  }
+  if (value === null || value === undefined || value === false || value === "") return undefined;
+  return value;
+}
+
+function fenced(text: string, info: string): string {
+  const longest = Math.max(2, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length));
+  const fence = "`".repeat(longest + 1);
+  return `${fence}${info}\n${text}\n${fence}`;
+}
+
+/**
+ * The run's Paperclip state (issue, comments, review stage, recovery,
+ * continuation, authority constraints, session handoff) as one JSON data
+ * block, with no Paperclip instruction prose around it.
+ */
+export function renderVectorRunData(context: Record<string, unknown>): string {
+  const wake = normalizePaperclipWakePayload(context.paperclipWake);
+  const reason = asString(context.wakeReason, "").trim() || asString(context.wakeSource, "").trim();
+  // The server's handoff note is data bullets plus one line of Paperclip
+  // instruction prose; only the bullets are run data.
+  const sessionHandoff = asString(context.paperclipSessionHandoffMarkdown, "")
+    .split("\n")
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2).trim());
+  const run = pruneEmpty({
+    ...(wake ?? { reason: reason || "heartbeat" }),
+    sessionHandoff,
+  }) ?? {};
+  const json = JSON.stringify({ run }, null, 2).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  return fenced(json, "json");
+}

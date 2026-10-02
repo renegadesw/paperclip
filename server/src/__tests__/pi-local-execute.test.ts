@@ -5,6 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import { execute } from "@paperclipai/adapter-pi-local/server";
 
+// Vector installations run only with release-owned instructions under
+// <release>/paperclip/profile-assets/<profile>/; the release Pi command is
+// <release>/runtime/bin/pi.
+async function stageVectorRelease(root: string, profile: string): Promise<string> {
+  await fs.mkdir(path.join(root, "runtime", "bin"), { recursive: true });
+  const file = path.join(root, "paperclip", "profile-assets", profile, "agent", "AGENTS.md");
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, "# Vector agent\n\nDeployment-owned instructions.\n", "utf8");
+  return file;
+}
+
 async function writeFakePiCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 if (process.argv.includes("--list-models")) {
@@ -140,11 +151,12 @@ describe("pi_local execute", () => {
   it("keeps Pi-echoed image bytes out of logs, metadata, and result JSON", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-image-redaction-"));
     const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "pi");
+    const commandPath = path.join(root, "runtime", "bin", "pi");
     const argsDumpPath = path.join(root, "args.json");
     const promptDumpPath = path.join(root, "prompt.json");
     const stdinClosedPath = path.join(root, "stdin-closed");
     await fs.mkdir(workspace, { recursive: true });
+    const instructionsFilePath = await stageVectorRelease(root, "standard");
     await writeRpcPiCommand(commandPath, argsDumpPath, promptDumpPath, stdinClosedPath, undefined, true);
 
     const previousHome = process.env.HOME;
@@ -165,7 +177,7 @@ describe("pi_local execute", () => {
         },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
-          command: commandPath, cwd: workspace, model: "google/gemini-3-flash-preview",
+          command: commandPath, instructionsFilePath, cwd: workspace, model: "google/gemini-3-flash-preview",
           executionMode: "rpc", promptTemplate: "Describe the supplied image.",
         },
         context: { vectorIngressImages: [{ type: "image", data, mimeType: "image/jpeg" }] },
@@ -194,12 +206,13 @@ describe("pi_local execute", () => {
   it("keeps vector-embedded database and controller secrets out of the spawned RPC process", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-env-isolation-"));
     const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "pi");
+    const commandPath = path.join(root, "runtime", "bin", "pi");
     const argsDumpPath = path.join(root, "args.json");
     const promptDumpPath = path.join(root, "prompt.json");
     const stdinClosedPath = path.join(root, "stdin-closed");
     const envDumpPath = path.join(root, "env.json");
     await fs.mkdir(workspace, { recursive: true });
+    const instructionsFilePath = await stageVectorRelease(root, "standard");
     await writeRpcPiCommand(
       commandPath,
       argsDumpPath,
@@ -240,7 +253,7 @@ describe("pi_local execute", () => {
           taskKey: null,
         },
         config: {
-          command: commandPath,
+          command: commandPath, instructionsFilePath,
           cwd: workspace,
           model: "router/Qwen3.8-Flash",
           executionMode: "rpc",
@@ -297,12 +310,13 @@ describe("pi_local execute", () => {
   it("runs a complete Pi turn through stdio RPC and closes stdin after settlement", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-rpc-"));
     const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "pi");
+    const commandPath = path.join(root, "runtime", "bin", "pi");
     const argsDumpPath = path.join(root, "args.json");
     const promptDumpPath = path.join(root, "prompt.json");
     const stdinClosedPath = path.join(root, "stdin-closed");
     const attackerSkillDir = path.join(root, "attacker-skill");
     await fs.mkdir(workspace, { recursive: true });
+    const instructionsFilePath = await stageVectorRelease(root, "standard");
     await fs.mkdir(attackerSkillDir, { recursive: true });
     await fs.writeFile(path.join(attackerSkillDir, "SKILL.md"), "# attacker skill\n", "utf8");
     await writeRpcPiCommand(commandPath, argsDumpPath, promptDumpPath, stdinClosedPath);
@@ -332,7 +346,7 @@ describe("pi_local execute", () => {
           taskKey: null,
         },
         config: {
-          command: commandPath,
+          command: commandPath, instructionsFilePath,
           cwd: workspace,
           model: "google/gemini-3-flash-preview",
           executionMode: "rpc",
@@ -368,7 +382,10 @@ describe("pi_local execute", () => {
       expect(args.at(-1)).not.toBe("Work the RPC task.");
 
       const prompt = JSON.parse(await fs.readFile(promptDumpPath, "utf8")) as Record<string, unknown>;
-      expect(prompt).toMatchObject({ type: "prompt", message: "Work the RPC task." });
+      // A Vector installation ignores agent prompt templates; Pi gets the run state as data.
+      expect(prompt).toMatchObject({ type: "prompt" });
+      expect(String(prompt.message)).toContain('"reason": "heartbeat"');
+      expect(String(prompt.message)).not.toContain("Work the RPC task.");
       expect(String(prompt.id)).toContain("run-pi-rpc");
 
       expect(events.map((event) => event.eventType)).toEqual([
@@ -396,13 +413,14 @@ describe("pi_local execute", () => {
   it("launches an approved packaged extension tool while keeping Pi built-ins unavailable", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-extension-rpc-"));
     const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "pi");
+    const commandPath = path.join(root, "runtime", "bin", "pi");
     const extensionPath = path.join(root, "vector-chat.ts");
     const argsDumpPath = path.join(root, "args.json");
     const promptDumpPath = path.join(root, "prompt.json");
     const stdinClosedPath = path.join(root, "stdin-closed");
     const extensionContents = "export default function vectorChat() {}\n";
     await fs.mkdir(workspace, { recursive: true });
+    const instructionsFilePath = await stageVectorRelease(root, "standard");
     await fs.writeFile(extensionPath, extensionContents, "utf8");
     await writeRpcPiCommand(commandPath, argsDumpPath, promptDumpPath, stdinClosedPath);
 
@@ -432,7 +450,7 @@ describe("pi_local execute", () => {
         },
         runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: {
-          command: commandPath,
+          command: commandPath, instructionsFilePath,
           cwd: workspace,
           model: "google/gemini-3-flash-preview",
           executionMode: "rpc",

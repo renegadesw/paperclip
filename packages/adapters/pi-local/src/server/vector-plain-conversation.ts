@@ -1,5 +1,4 @@
 import {
-  asString,
   normalizePaperclipWakePayload,
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -12,7 +11,8 @@ import {
 // heartbeat template, bootstrap template or session handoff note.
 //
 // Anything this cannot reproduce exactly from the inline wake comments falls
-// back to the Paperclip wake prompt, so the model never loses a request.
+// back to the run state as data (renderVectorRunData), so the model never
+// loses a request.
 
 const VECTOR_ROLE_TURN_MARKER = "[VECTOR_ROLE_TURN_V1]\n";
 const VECTOR_WORKLOAD_LAUNCH_MARKER = "[VECTOR_WORKLOAD_LAUNCH_V1]\n";
@@ -137,13 +137,4 @@ export function resolveVectorPlainConversationMessage(input: {
     bodies.push(body.trim());
   }
   return { plain: true, message: bodies.join("\n\n") };
-}
-
-/**
- * Connector skills are deployment-owned capability docs (e.g. the GitHub
- * connection). The wake prompt normally carries them; a plain turn moves them
- * to the system prompt so the user message stays verbatim.
- */
-export function readPaperclipConnectorSkillInstructions(paperclipWake: unknown): string {
-  return asString(parseObject(paperclipWake).connectorSkillInstructions, "").trim();
 }
