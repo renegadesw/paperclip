@@ -995,7 +995,7 @@ const VIRTUAL_SEARCH_TOOLS: ToolGatewayDescriptor = {
   name: "search_tools",
   displayName: "Search available tools",
   description:
-    "Search the tools available through this Paperclip gateway without loading every target tool into the tool list.",
+    "Search available Paperclip tools by connection identifier and/or action keywords. All query words must match; spaces, hyphens, and underscores are interchangeable. Returns target names and schemas without loading the entire catalog.",
   parametersSchema: {
     type: "object",
     properties: {
@@ -2836,19 +2836,24 @@ export function createToolGatewayService(
     const params = asRecord(parameters) ?? {};
     const query =
       typeof params.query === "string" ? params.query.trim().toLowerCase() : "";
+    const queryTerms = query.split(/[\s_-]+/u).filter(Boolean);
     const limit = Math.max(1, Math.min(50, Number(params.limit ?? 10) || 10));
     const tools = (await searchableOnDemandTools(session))
       .filter((tool) => {
-        if (!query) return true;
-        return [
+        if (queryTerms.length === 0) return true;
+        const searchableText = [
           tool.name,
           tool.displayName,
           tool.description,
           tool.applicationKey,
           tool.upstreamToolName,
+          tool.connectionId,
         ]
           .filter((value): value is string => typeof value === "string")
-          .some((value) => value.toLowerCase().includes(query));
+          .join(" ")
+          .toLowerCase()
+          .replace(/[\s_-]+/gu, " ");
+        return queryTerms.every((term) => searchableText.includes(term));
       })
       .slice(0, limit)
       .map((tool) => ({
