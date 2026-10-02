@@ -2337,6 +2337,36 @@ rl.on("line", (line) => {
     } finally { await fake.close(); }
   });
 
+  it("keeps per-agent tools discoverable after a credential-less health sweep and validates the agent grant", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const fake = await startFakeRemoteMcpServer((fakeRequest) => ({
+      body: { jsonrpc: "2.0", id: fakeRequest.body?.id,
+        result: { content: [{ type: "text", text: "dedicated connected" }] } },
+    }));
+    try {
+      const { connection } = await createRemoteMcpTool(db, company.id, {
+        url: fake.url, toolName: "whoami", riskLevel: "read",
+      });
+      await db.update(toolConnections).set({ credentialPolicy: "per_agent", healthStatus: "failed" })
+        .where(eq(toolConnections.id, connection.id));
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const tool = (await gateway.listToolsForSession(session.token)).find((item) => item.connectionId === connection.id)!;
+      expect(tool).toBeTruthy();
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
+        .rejects.toMatchObject({ status: 409, reasonCode: "agent_authorization_required" });
+      expect(fake.requests).toHaveLength(0);
+      await db.insert(connectionGrants).values({ companyId: company.id, connectionId: connection.id,
+        kind: "agent", subjectAgentId: agent.id, credentialSecretRefs: [], status: "active", isDefault: false });
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
+        .resolves.toMatchObject({ status: "completed", result: { content: "dedicated connected" } });
+      expect(fake.requests).toHaveLength(1);
+    } finally { await fake.close(); }
+  });
+
   it("creates a personal authorization card and resumes after the user grant exists", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
