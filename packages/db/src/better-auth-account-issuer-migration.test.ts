@@ -47,11 +47,12 @@ describe("account issuer schema", () => {
     expect(issuer).toBeDefined();
     expect(issuer?.notNull).toBe(true);
 
-    // Better Auth declares `(issuer, accountId)` unique on the account model
-    // and resolves accounts by that pair.
+    // Vector scopes Better Auth's issuer/account pair to the installation.
+    // Standalone uses the single empty-string installation namespace.
     const unique = config.indexes.find((index) => index.config.name === UNIQUE_INDEX);
     expect(unique?.config.unique).toBe(true);
     expect(unique?.config.columns.map((column) => (column as { name: string }).name)).toEqual([
+      "vector_installation_id",
       "issuer",
       "account_id",
     ]);

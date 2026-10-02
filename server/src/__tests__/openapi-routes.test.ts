@@ -103,6 +103,11 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
   "POST /api/internal/vector/v1/sessions/events",
   "POST /api/internal/vector/v1/sessions/list",
   "POST /api/internal/vector/v1/sessions/transcript",
+  "POST /api/internal/vector/v1/sessions/runtime",
+  "POST /api/internal/vector/v1/sessions/import-legacy-pi-context",
+  "POST /api/internal/vector/v1/sessions/branches/list",
+  "POST /api/internal/vector/v1/sessions/branches/fork",
+  "POST /api/internal/vector/v1/sessions/branches/switch",
   // This endpoint is authenticated by the provider signature rather than by a
   // Paperclip board/agent credential. It intentionally stays out of the public
   // board API document, while this exact exclusion keeps route coverage honest.

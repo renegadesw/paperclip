@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 
-function worker(development = false) {
+function worker(development = false, scopePath = "/") {
   const handlers = new Map<string, (event: unknown) => void>();
   const put = vi.fn();
   const match = vi.fn();
@@ -11,7 +11,11 @@ function worker(development = false) {
   const fetch = vi.fn().mockResolvedValue(new Response("public asset"));
   const source = readFileSync(new URL("../../public/sw.js", import.meta.url), "utf8");
   vm.runInNewContext(development ? source : source.replace("__PAPERCLIP_BUILD_ID__", "fixture-production"), {
-    self: { location: { origin: "https://example.test" }, addEventListener: (type: string, fn: (event: unknown) => void) => handlers.set(type, fn) },
+    self: {
+      location: { origin: "https://example.test" },
+      registration: { scope: `https://example.test${scopePath}` },
+      addEventListener: (type: string, fn: (event: unknown) => void) => handlers.set(type, fn),
+    },
     URL, Response, fetch, caches: { keys: async () => ["paperclip-old", "paperclip-current"], open: async () => ({ put, delete: remove, match }), match },
   });
   const request = (cache: RequestCache = "default", pathname = "/extension/history") => {
@@ -23,6 +27,20 @@ function worker(development = false) {
 }
 
 describe("service worker privacy boundaries", () => {
+  it("caches only public assets inside the board scope and bypasses its API", async () => {
+    const w = worker(false, "/__paperclip/");
+    expect(w.request("default", "/__paperclip/api/companies")).not.toHaveBeenCalled();
+    expect(w.request("default", "/__paperclip/@vite/client")).not.toHaveBeenCalled();
+    await w.request("default", "/__paperclip/assets/index-AbCd1234.js").mock.calls[0]![0];
+    expect(w.put).toHaveBeenCalledOnce();
+    w.put.mockClear();
+    await w.request("default", "/assets/index-AbCd1234.js").mock.calls[0]![0];
+    expect(w.put).not.toHaveBeenCalled();
+    w.fetch.mockRejectedValue(new Error("offline"));
+    w.match.mockResolvedValue(new Response("stale unscoped asset"));
+    expect((await w.request("default", "/assets/index-AbCd1234.js").mock.calls[0]![0]).type).toBe("error");
+    expect(w.match).not.toHaveBeenCalled();
+  });
   it.each([
     "/@fs/tmp/runner/vite-cache/deps/@assistant-ui_react.js?v=fixture",
     "/@vite/client", "/@id/__x00__virtual:module", "/src/main.tsx", "/node_modules/.vite/deps/react.js",
