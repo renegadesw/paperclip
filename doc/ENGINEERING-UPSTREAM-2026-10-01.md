@@ -12,9 +12,12 @@ no PR or workflow dispatch is part of this update.
 - Connector repair baseline: `fix/personal-pat-run-credentials`,
   `cc8bf4f4c7536d77c251f5594975064342ab34bb`.
 - Upstream default branch: `paperclipai/paperclip:master`,
-  `41c18aa443fe791fa67b27eef28fd7239f5e9d5d`.
+  `f07f8d959970d95b22a4084fcd27b648309c5162`.
 - Initial upstream merge: `67ebed8a5271713181b110a6f8c4fd5561b1deb9`;
-  the final upstream advance updates Storybook only.
+  the subsequent `41c18aa443fe791fa67b27eef28fd7239f5e9d5d` and
+  `f07f8d959970d95b22a4084fcd27b648309c5162` advances update Storybook
+  development dependencies only. Dependencies, typecheck and build were
+  refreshed after the final advance.
 - Existing connector repair session: `01a0f617-4858-7ff3-a256-1cb557a7ad58`.
   Its clean, pushed repair commits are included as ancestors. Final identity
   naming repair: `0ea25a79a9b7adc6a7126d5333be47149b1481b3`; engineering
