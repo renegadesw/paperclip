@@ -1,3 +1,4 @@
+import { installationTokens } from "./github-installation-bundle.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { ASANA_CONNECTOR_SCOPES, isAsanaConnectorProfileId, type AsanaConnectorProfileId } from "@paperclipai/shared";
 import { BROWSER_USE_TOOLS } from "@paperclipai/shared";
@@ -2615,6 +2616,12 @@ export async function loadGitHubGrantMetadata(
   webhookHealth: "pending";
   tokenKind?: "installation";
 }> {
+ const bundled = installationTokens(accessToken);
+ if (bundled) {
+  const metadata = await Promise.all(bundled.map((entry) => loadGitHubGrantMetadata(entry.token, request, appSlug, { installationId: entry.id })));
+  const first = metadata[0]!;
+  return { ...first, installationCount: metadata.length, repositoryCount: metadata.reduce((n,m) => n+m.repositoryCount,0), installationIds: metadata.flatMap((m) => m.installationIds), installationOwnerLogins: metadata.flatMap((m) => m.installationOwnerLogins), repositories: metadata.flatMap((m) => m.repositories), accessRevision: createHash("sha256").update(metadata.map((m) => m.accessRevision).join(":")).digest("hex") };
+ }
   let resolvedAppSlug = appSlug;
   const accessRefreshStartedAt = new Date().toISOString();
   const github = async (
