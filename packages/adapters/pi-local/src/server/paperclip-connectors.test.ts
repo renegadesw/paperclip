@@ -155,6 +155,7 @@ describe("Paperclip connector delivery for Pi", () => {
     expect(JSON.parse(String(request[1]!.body))).toMatchObject({ method: "tools/call", params: { name: "create_pull_request", arguments: { title: "Fix" } } });
     const denied = await registered[0]!.execute("call-2", { title: "deny" });
     expect(denied.content[0].text).toBe("create_pull_request refused: approval required");
+    expect(denied.isError).toBe(true);
   });
 });
 

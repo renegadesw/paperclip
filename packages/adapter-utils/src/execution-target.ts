@@ -1728,6 +1728,7 @@ printf '\0PAPERCLIP_GIT_CONTEXT_END\0'
 export async function prepareGitHubOperationLaunchers(input: {
   runId: string; target: AdapterExecutionTarget | null | undefined; cwd: string; env: Record<string, string>;
   toolsOnly?: boolean;
+  blockRctl?: boolean;
 }): Promise<Record<string, string>> {
   const remote = input.target?.kind === "remote" ? input.target : null;
   const directory = githubOperationLauncherDirectory(input);
@@ -1747,7 +1748,7 @@ export async function prepareGitHubOperationLaunchers(input: {
     // Remote launchers live beneath the checkout. Pin their own package scope
     // so an enclosing project's "type": "module" cannot reinterpret require().
     ["package.json", '{"type":"commonjs"}\n'],
-    ...["git", "gh", ...(input.toolsOnly ? ["rctl"] : [])].map((name) => [name, githubLauncherSource({ toolsOnly: input.toolsOnly })] as const),
+    ...["git", "gh", ...((input.toolsOnly || input.blockRctl) ? ["rctl"] : [])].map((name) => [name, githubLauncherSource({ toolsOnly: input.toolsOnly || name === "rctl" })] as const),
     ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) => [name, profile] as const),
   ]);
   if (remote) {
@@ -1761,7 +1762,7 @@ export async function prepareGitHubOperationLaunchers(input: {
         timeoutMs: 15_000, shellCommand: adapterExecutionTargetShellCommand(remote),
       });
     }
-    const permissions = await runner.execute({ command: "sh", args: ["-c", `chmod 700 ${shellQuote(directory)}/git ${shellQuote(directory)}/gh${input.toolsOnly ? ` ${shellQuote(directory)}/rctl` : ""} && mkdir -p ${shellQuote(configDirectory)}`], cwd: remote.remoteCwd, timeoutMs: 15_000 });
+    const permissions = await runner.execute({ command: "sh", args: ["-c", `chmod 700 ${shellQuote(directory)}/git ${shellQuote(directory)}/gh${input.toolsOnly || input.blockRctl ? ` ${shellQuote(directory)}/rctl` : ""} && mkdir -p ${shellQuote(configDirectory)}`], cwd: remote.remoteCwd, timeoutMs: 15_000 });
     if (permissions.exitCode !== 0) throw new Error("Could not prepare managed GitHub launchers");
   } else {
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });

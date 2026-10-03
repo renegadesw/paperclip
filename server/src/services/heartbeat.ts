@@ -21613,9 +21613,13 @@ export function heartbeatService(
           allowStandingDelegation: false,
         },
       );
-      const githubToolsOnly = process.env.PAPERCLIP_VECTOR_PROFILE === "engineering";
+      // Pi engineering needs managed workspace Git, using the same selected
+      // Paperclip connection and per-operation broker as other local adapters.
+      // Never fall back to host credentials on the engineering profile.
+      const engineeringProfile = process.env.PAPERCLIP_VECTOR_PROFILE === "engineering";
+      const githubToolsOnly = engineeringProfile && agent.adapterType !== "pi_local";
       const useHostGitHub =
-        !githubToolsOnly && !githubSelection.configured &&
+        !engineeringProfile && !githubToolsOnly && !githubSelection.configured &&
         trustPreset.kind === "standard" &&
         ["local", "ssh"].includes(
           selectedEnvironmentForConfig?.driver ?? "local",
@@ -22844,6 +22848,7 @@ export function heartbeatService(
           native: agent.adapterType === "paperclip_runner",
           githubConfigured: githubSelection.configured,
           toolsOnly: githubToolsOnly,
+          blockRctl: engineeringProfile,
           agentId: agent.id,
           runId: run.id,
           target: executionTarget,

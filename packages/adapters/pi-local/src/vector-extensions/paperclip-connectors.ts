@@ -106,11 +106,11 @@ export default function (pi: ExtensionAPI) {
           // A gateway denial or approval hold is the tool's answer; return it
           // so the model can adjust instead of ending the turn.
           const message = typeof payload.error.message === "string" ? payload.error.message : "denied";
-          return { content: [{ type: "text" as const, text: `${tool.upstreamName} refused: ${message}` }], details: payload.error };
+          return { content: [{ type: "text" as const, text: `${tool.upstreamName} refused: ${message}` }], details: payload.error, isError: true };
         }
         const result = payload?.result ?? {};
         const text = textOf(result.content) || JSON.stringify(result.structuredContent ?? result);
-        return { content: [{ type: "text" as const, text }], details: result };
+        return { content: [{ type: "text" as const, text }], details: result, ...(result.isError ? { isError: true } : {}) };
       },
     });
   }

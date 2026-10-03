@@ -72,7 +72,7 @@ export const FUNKYDEV_CAPABILITY_INVENTORY: readonly FunkyDevCapability[] = [
     capability: "github",
     tools: [],
     status: "external",
-    dependency: "Paperclip's assigned GitHub connector tools are the only GitHub access path. Organization GitHub App and personal PAT connections retain separate grants and audit. Shell git/gh authentication is disabled; rctl is not an alternate GitHub credential source.",
+    dependency: "Assigned GitHub connector tools and engineering Pi managed Git launchers use Paperclip-selected connections. Organization GitHub App and personal PAT retain separate grants and audit; the launcher strips ambient host credentials and captures run-scoped credentials per operation. rctl remains connector-only.",
   },
   {
     capability: "personal-memory",

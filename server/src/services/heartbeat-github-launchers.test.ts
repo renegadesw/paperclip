@@ -11,6 +11,30 @@ import { prepareHeartbeatGitHubLaunchers } from "./heartbeat-github-launchers.js
 const target = { kind: "remote" as const, transport: "sandbox" as const, providerKey: "daytona", remoteCwd: "/workspace" };
 
 describe("heartbeat GitHub launcher lifetime", () => {
+  it("gives engineering Pi managed Git authority while retaining the DB shell deny wrapper", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "paperclip-pi-git-"));
+    const mint = vi.fn(() => "run-git-capability");
+    let result;
+    try {
+      result = await prepareHeartbeatGitHubLaunchers({
+        native: false, githubConfigured: true, toolsOnly: false, blockRctl: true,
+        agentId: "pi-agent", runId: "pi-run", target: null, cwd: root,
+        env: { PATH: process.env.PATH ?? "", GH_TOKEN: "host-secret" },
+        brokerUrl: "http://127.0.0.1:3100", createBrokerToken: mint,
+      });
+      expect(mint).toHaveBeenCalledOnce();
+      expect(result.env.PAPERCLIP_GITHUB_BROKER_TOKEN).toBe("run-git-capability");
+      expect(result.env.GH_TOKEN).toBe("");
+      const bin = result.env.PAPERCLIP_GITHUB_LAUNCHER_DIR;
+      expect(await readFile(path.join(bin, "git"), "utf8")).toContain("x-paperclip-github-capability");
+      expect(await readFile(path.join(bin, "gh"), "utf8")).toContain("credential.helper");
+      await expect(promisify(execFile)(path.join(bin, "rctl"), ["--version"], { env: { ...process.env, ...result.env } }))
+        .rejects.toMatchObject({ code: 126 });
+    } finally {
+      if (result?.cleanupLocation) await cleanupGitHubOperationLaunchers(result.cleanupLocation);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it.each([false, true])("stages engineering deny wrappers without minting a shell capability (native: %s)", async (native) => {
     const mint = vi.fn(() => "must-not-be-issued");
     const prepare = vi.fn(async (input) => input.env);

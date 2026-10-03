@@ -445,8 +445,9 @@ export async function filterResolvedGitHubConnectionsForRun<T extends {
   responsibleUserId?: string | null;
   connections: T[];
 }): Promise<T[]> {
-  // Engineering agents use separate connector tools for every assigned identity;
-  // there is no single exported shell credential to select in this profile.
+  // Engineering keeps every assigned connector identity available. Pi workspace
+  // Git separately captures the existing managed identity per operation; that
+  // selection must not remove the owner PAT or other granted connector tools.
   if (process.env.PAPERCLIP_VECTOR_PROFILE === "engineering") return input.connections;
   const githubConnections = input.connections.filter((connection) => {
     const config = connection.config && typeof connection.config === "object"

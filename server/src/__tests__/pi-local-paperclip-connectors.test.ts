@@ -28,6 +28,10 @@ if (process.argv.includes("--list-models")) {
 }
 fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync(${JSON.stringify(envPath)}, JSON.stringify(process.env));
+if (process.argv.includes("json")) {
+  console.log(JSON.stringify({type: "turn_end", message: {role: "assistant", content: [{type: "text", text: "ok"}]}, toolResults: []}));
+  process.exit(0);
+}
 let handled = false;
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -70,7 +74,7 @@ async function withGateway<T>(fn: (url: string, calls: string[]) => Promise<T>):
   }
 }
 
-async function runPi(profile: string, options: { servers?: Array<{ name: string; url: string; token: string; connectionId: string }>; env?: Record<string, string> }) {
+async function runPi(profile: string, options: { servers?: Array<{ name: string; url: string; token: string; connectionId: string }>; env?: Record<string, string>; executionMode?: "json" | "rpc" }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-connectors-"));
   const workspace = path.join(root, "workspace");
   const commandPath = path.join(root, "runtime", "bin", "pi");
@@ -97,7 +101,7 @@ async function runPi(profile: string, options: { servers?: Array<{ name: string;
         instructionsFilePath,
         cwd: workspace,
         model: "router/Qwen3.8-Flash",
-        executionMode: "rpc",
+        executionMode: options.executionMode ?? "rpc",
         promptTemplate: "Work.",
         ...(options.env ? { env: options.env } : {}),
       },
@@ -134,7 +138,7 @@ describe("pi_local Paperclip connector delivery", () => {
         "Bearer gateway-run-token notifications/initialized",
         "Bearer gateway-run-token tools/list",
       ]);
-      expect(toolsArg(args)).toEqual(["create_pull_request"]);
+      expect(toolsArg(args)).toEqual(["paperclip", "create_pull_request"]);
       expect(args).toContain("--no-builtin-tools");
       const extension = args[args.lastIndexOf("--extension") + 1] ?? "";
       expect(path.basename(extension)).toMatch(/^paperclip-connectors\.(js|ts)$/);
@@ -144,9 +148,10 @@ describe("pi_local Paperclip connector delivery", () => {
     });
   });
 
-  it("delivers nothing extra when no connection is granted", async () => {
+  it("delivers coordination without external tools when no connection is granted", async () => {
     const { args, env } = await runPi("standard", {});
-    expect(args).toContain("--no-tools");
+    expect(toolsArg(args)).toEqual(["paperclip"]);
+    expect(args).toContain("--no-builtin-tools");
     expect(args.join(" ")).not.toContain("paperclip-connectors");
     expect(env).not.toHaveProperty("PAPERCLIP_CONNECTOR_TOOLS_FILE");
   });
@@ -178,5 +183,21 @@ describe("pi_local Paperclip connector delivery", () => {
         GIT_CONFIG_GLOBAL: "/dev/null",
       });
     });
+  });
+});
+
+
+describe("Pi transport coordination parity", () => {
+  it.each(["json", "rpc"] as const)("delivers the same native coordination and scoped environment in %s mode", async (executionMode) => {
+    const prior = process.env.PAPERCLIP_DATABASE_URL;
+    process.env.PAPERCLIP_DATABASE_URL = "server-secret-not-for-pi";
+    try {
+      const { result, args, env } = await runPi("engineering", { executionMode, env: { PAPERCLIP_API_URL: "http://127.0.0.1:3100" } });
+      expect(result.exitCode).toBe(0);
+      expect(toolsArg(args)).toContain("paperclip");
+      expect(args.join(" ")).toMatch(/paperclip-coordination\.(ts|js)/);
+      expect(env).toMatchObject({ PAPERCLIP_API_KEY: "run-token", PAPERCLIP_COMPANY_ID: "company-1", PAPERCLIP_AGENT_ID: "agent-1", PAPERCLIP_API_URL: "http://localhost:3100" });
+      expect(env).not.toHaveProperty("PAPERCLIP_DATABASE_URL");
+    } finally { if (prior === undefined) delete process.env.PAPERCLIP_DATABASE_URL; else process.env.PAPERCLIP_DATABASE_URL = prior; }
   });
 });

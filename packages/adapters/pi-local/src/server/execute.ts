@@ -94,8 +94,8 @@ const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 // The connector extension ships inside this adapter package (dist/ in the
 // runtime, src/ under test); agent config cannot choose it.
-async function resolvePaperclipConnectorExtensionPath(): Promise<string> {
-  for (const candidate of ["paperclip-connectors.js", "paperclip-connectors.ts"]) {
+async function resolvePaperclipConnectorExtensionPath(name = "paperclip-connectors"): Promise<string> {
+  for (const candidate of [`${name}.js`, `${name}.ts`]) {
     const resolved = path.resolve(__moduleDir, "..", "vector-extensions", candidate);
     if (await fs.stat(resolved).then((stat) => stat.isFile(), () => false)) return resolved;
   }
@@ -777,6 +777,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (connectorServers.length > 0 && executionTargetIsRemote) {
       await onLog("stderr", "[paperclip] Paperclip connector tools are not delivered to remote Pi targets.\n");
     }
+    if (!executionTargetIsRemote && env.PAPERCLIP_API_KEY && env.PAPERCLIP_API_URL && env.PAPERCLIP_COMPANY_ID) {
+      vectorProfilePolicy = withPaperclipConnectorTools(vectorProfilePolicy,
+        await resolvePaperclipConnectorExtensionPath("paperclip-coordination"), ["paperclip"]);
+    }
     const connectorTools = await prepareConnectorTools(
       connectorServers,
       ["read", "bash", "edit", "write", "grep", "find", "ls", ...vectorPiPolicyToolNames(vectorProfilePolicy), ...(ctx.vectorToolAuthority?.tools ?? [])],
@@ -808,10 +812,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       .filter((entry) => injectedSkillKeys.has(entry.key) && entry.source.length > 0)
       .filter((entry) => !excludeBundledPaperclipSkills || !isBundledPaperclipSkill(entry))
       .map((entry) => path.join(entry.source, "bin"));
-    const vectorEmbeddedRpc = executionMode === "rpc"
-      && process.env.PAPERCLIP_DATABASE_PROFILE?.trim() === "vector-embedded";
+    const vectorEmbeddedRuntime = process.env.PAPERCLIP_DATABASE_PROFILE?.trim() === "vector-embedded";
     const mergedEnv = ensurePathInEnv(
-      vectorEmbeddedRpc
+      vectorEmbeddedRuntime
         ? projectVectorEmbeddedPiEnvironment(process.env, env, { githubLaunchers: vectorProfilePolicy.profile === "engineering" })
         : { ...process.env, ...env },
     );
@@ -962,7 +965,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         loggedEnv = buildInvocationEnvForLogs(env, {
           runtimeEnv: Object.fromEntries(
             Object.entries(ensurePathInEnv(
-              vectorEmbeddedRpc
+              vectorEmbeddedRuntime
                 ? projectVectorEmbeddedPiEnvironment(process.env, env, { githubLaunchers: vectorProfilePolicy.profile === "engineering" })
                 : { ...process.env, ...env },
             )).filter(
@@ -1400,7 +1403,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const processArgs = executionMode === "rpc"
         ? ["-e", PI_RPC_TURN_SUPERVISOR, command, JSON.stringify(args), vectorSessionCaptureNonce]
         : args;
-      const processEnvSource = executionTargetIsRemote && vectorEmbeddedRpc
+      const processEnvSource = executionTargetIsRemote && vectorEmbeddedRuntime
         ? ensurePathInEnv(projectVectorEmbeddedPiEnvironment(process.env, env, { githubLaunchers: vectorProfilePolicy.profile === "engineering" }))
         : executionTargetIsRemote
           ? env
@@ -1414,7 +1417,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         onProcessStopped: providerStop.beginInvocation(),
         cwd,
         env: processEnv,
-        inheritProcessEnv: !vectorEmbeddedRpc,
+        inheritProcessEnv: !vectorEmbeddedRuntime,
         stdin: executionMode === "rpc" ? rpcPrompt : undefined,
         timeoutSec,
         graceSec,

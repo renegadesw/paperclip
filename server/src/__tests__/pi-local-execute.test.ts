@@ -372,8 +372,8 @@ describe("pi_local execute", () => {
       expect(args).toContain("rpc");
       expect(args).not.toContain("-p");
       expect(args).toContain("--no-builtin-tools");
-      expect(args).not.toContain("--tools");
-      expect(args).toContain("--no-tools");
+      expect(args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2)).toEqual(["--tools", "paperclip"]);
+      expect(args).not.toContain("--no-tools");
       expect(args).toContain("--no-extensions");
       expect(args).toContain("--no-skills");
       expect(args).toContain("--no-context-files");
@@ -468,7 +468,7 @@ describe("pi_local execute", () => {
       expect(args).not.toContain("--no-tools");
       expect(args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2)).toEqual([
         "--tools",
-        "vector_chat_read",
+        "vector_chat_read,paperclip",
       ]);
       expect(args.slice(args.indexOf("--extension"), args.indexOf("--extension") + 2)).toEqual([
         "--extension",

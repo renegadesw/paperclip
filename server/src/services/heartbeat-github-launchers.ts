@@ -39,7 +39,7 @@ export async function prepareHeartbeatGitHubLaunchers(
   });
   try {
     return {
-      env: await prepareLaunchers({ ...location, cwd: input.cwd, env, toolsOnly: input.toolsOnly }),
+      env: await prepareLaunchers({ ...location, cwd: input.cwd, env, toolsOnly: input.toolsOnly, blockRctl: input.blockRctl }),
       cleanupLocation: anonymous ? null : location,
     };
   } catch (error) {
