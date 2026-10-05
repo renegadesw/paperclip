@@ -319,12 +319,22 @@ export interface ToolGatewaySession {
   responsibleUserId?: string | null;
   /** Captured by the controller for this request, never accepted from tool arguments. */
   identityContextId?: string | null;
+  /** Controller-validated native execution; never a Paperclip heartbeat run. */
+  nativeSessionId?: string;
+  nativeInstallationId?: string;
   /** Set only after verifying the signed approved action. */
   approvedSlackInvocationId?: string;
   /** Set only after the signed review is verified. */
   approvedInvocationId?: string;
   createdAt: Date;
   expiresAt: Date;
+}
+
+// Native sessions retain connector policies/grants, never the retired control
+// plane's task/plugin/chat execution surfaces. The lookup filter also protects
+// nested run_tool resolution, not merely the visible discovery list.
+function nativeConnectorAllowed(session: ToolGatewaySession, tool: ToolGatewayDescriptor): boolean {
+  return !session.nativeSessionId || ["provider_rest", "mcp_remote_http", "mcp_local_stdio"].includes(tool.providerType);
 }
 
 export type ToolGatewayRuntimeSlot = ToolRuntimeSlotView;
@@ -1034,6 +1044,10 @@ const VIRTUAL_TOOLS = [VIRTUAL_SEARCH_TOOLS, VIRTUAL_RUN_TOOL];
 export function createToolGatewayService(
   db: Db,
   options: {
+    /** Private parent-process seam. Must revalidate native lifecycle, owner and
+     * immutable company/source-agent mapping on EVERY call. No HTTP/tool input
+     * may supply this resolver or its returned identity. */
+    nativeSessionResolver?: (token: string) => Promise<ToolGatewaySession | null>;
     pluginToolDispatcher?: PluginToolDispatcher;
     deploymentMode?: DeploymentMode;
     deploymentExposure?: DeploymentExposure;
@@ -1705,6 +1719,8 @@ export function createToolGatewayService(
           runId: input.runId,
           gatewaySessionId: input.session?.id ?? null,
           identityContextId: input.session?.identityContextId ?? null,
+          nativeSessionId: input.session?.nativeSessionId ?? null,
+          nativeInstallationId: input.session?.nativeInstallationId ?? null,
           gatewayId: input.session?.gatewayId ?? null,
           gatewayPublicId: input.session?.gatewayPublicId ?? null,
           gatewayName: input.session?.gatewayName ?? null,
@@ -1746,6 +1762,8 @@ export function createToolGatewayService(
       runId: input.runId,
       issueId: input.issueId,
       details: {
+        nativeSessionId: input.session?.nativeSessionId ?? null,
+        nativeInstallationId: input.session?.nativeInstallationId ?? null,
         gatewaySessionId: input.session?.id ?? null,
         gatewayId: input.session?.gatewayId ?? null,
         gatewayPublicId: input.session?.gatewayPublicId ?? null,
@@ -1826,6 +1844,17 @@ export function createToolGatewayService(
         "Tool gateway session is expired or invalid",
         "session_invalid",
       );
+    }
+    if (token.startsWith("native:")) {
+      const session = await options.nativeSessionResolver?.(token);
+      if (!session || session.nativeSessionId !== token.slice(7) || !session.nativeInstallationId
+          || !session.companyId || !session.agentId || session.actorType !== "agent"
+          || session.actorId !== session.agentId || !session.responsibleUserId
+          || session.runId !== null || session.gatewayId || session.issueId || session.projectId
+          || session.expiresAt.getTime() <= Date.now()) {
+        throw new ToolGatewayHttpError(401,"Native tool session is unavailable","native_session_unavailable");
+      }
+      return session;
     }
     if (namedGatewayTokenId(token)) {
       return namedGatewaySessionFromBearer({
@@ -2039,10 +2068,12 @@ export function createToolGatewayService(
         Object.keys(metadata).length > 0 ||
         input.metadata ||
         input.session.projectId ||
-        input.session.identityContextId
+        input.session.identityContextId || input.session.nativeSessionId
           ? {
               ...metadata,
               identityContextId: input.session.identityContextId ?? null,
+              nativeSessionId: input.session.nativeSessionId ?? null,
+              nativeInstallationId: input.session.nativeInstallationId ?? null,
               gatewayId: input.session.gatewayId ?? null,
               gatewayName: input.session.gatewayName ?? null,
               projectId: input.session.projectId ?? null,
@@ -2670,6 +2701,7 @@ export function createToolGatewayService(
           (candidate.providerType !== "paperclip_self" &&
             candidate.providerType !== "paperclip_plugin"),
       )
+      .filter((candidate) => nativeConnectorAllowed(session, candidate))
       .find((candidate) => candidate.name === toolName);
     if (!tool) {
       throw new ToolGatewayHttpError(
@@ -2890,7 +2922,7 @@ export function createToolGatewayService(
       ...allTools(),
       ...await githubBotToolsForSession(db, session),
       ...await slackToolsForSession(db, session),
-      ...allConnectedTools.filter((tool) => !isOnDemandRemoteTool(tool)),
+      ...allConnectedTools.filter((tool) => !!session.nativeSessionId || !isOnDemandRemoteTool(tool)),
     ].filter(
       (tool) =>
         session.agentId ||
@@ -2898,7 +2930,7 @@ export function createToolGatewayService(
           tool.providerType !== "paperclip_plugin"),
     );
     const decisions = await Promise.all(
-      tools.map(async (tool) => {
+      tools.filter(tool => nativeConnectorAllowed(session,tool)).map(async (tool) => {
         const decision = await policyService.decide(
           policyInputForTool({ session, tool }),
         );
