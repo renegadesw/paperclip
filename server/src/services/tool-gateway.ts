@@ -2922,7 +2922,7 @@ export function createToolGatewayService(
     if (session.agentId) {
       await assertAgentInCompany(session.companyId, session.agentId);
     }
-    const guestBotConnection = await githubGuestBotConnectionForSession(db, session);
+    const guestBotConnection = session.nativeSessionId ? null : await githubGuestBotConnectionForSession(db, session);
     const allConnectedTools = (await connectedMcpToolsForCompany(
       session.companyId,
     )).filter(tool => !guestBotConnection || !tool.connectionId || (tool.connectionId === guestBotConnection && tool.providerType === "paperclip_github_chat"));
