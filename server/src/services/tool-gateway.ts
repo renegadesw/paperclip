@@ -34,6 +34,10 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+// The private native sidecar must use this module's ESM dependency graph.
+// These packages expose import-only entry points in the pinned runtime.
+export { createDb } from "@paperclipai/db";
+export { sql } from "drizzle-orm";
 import {
   agents,
   approvals,
