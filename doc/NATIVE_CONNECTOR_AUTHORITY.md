@@ -9,7 +9,12 @@ For every `native:<session-id>` operation, the resolver checks the current nativ
 session, owner, organization, immutable source-agent mapping and installation
 ownership. The returned execution uses the original source agent's assignments,
 policies and credential grants, `actorType=agent`, and `runId=null`. Its actual
-native session and installation identifiers are included in the audit metadata.
+native session, installation and canonical owner identifiers are included in
+the audit metadata. The retained Vector ingress used the source installation's
+board principal for connector grants, separately from the conversation owner.
+The resolver preserves that existing active company membership as the tool
+principal. It never creates memberships, changes grants or substitutes another
+user's authorization when the installed source membership is unavailable.
 The resolver must refuse paused, stopped, held, terminated or revoked sessions.
 
 Native discovery and execution allow only connected REST, remote MCP and local
