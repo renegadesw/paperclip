@@ -31,13 +31,19 @@ describe('private native connector authentication',()=>{
  });
  it('discovers native connectors without consulting retired chat factories',async()=>{
   let selects=0;
+  const audits:Record<string,any>[]=[];
   const db={select:()=>{
    const rows=selects++===0?[{companyId:'company'}]:[];
    const query:any=new Proxy({}, {get(_target,key){return key==='then'?(resolve:any)=>resolve(rows):()=>query;}});
    return query;
-  }} as never;
+  },insert:()=>({values:(value:Record<string,any>)=>{
+   audits.push(value);
+   const query:any=new Proxy({}, {get(_target,key){return key==='then'?(resolve:any)=>resolve([{id:'00000000-0000-0000-0000-000000000001'}]):()=>query;}});
+   return query;
+  }})} as never;
   const gateway=createToolGatewayService(db,{nativeSessionResolver:async()=>session()});
   const tools=await gateway.listToolsForSession('native:actual');
   expect(tools.every(tool=>['provider_rest','mcp_remote_http','mcp_local_stdio'].includes(tool.providerType))).toBe(true);
+  expect(audits.find(value=>value.details?.nativeSessionId==='actual')).toMatchObject({actorType:'agent',actorId:'source-agent',details:{nativeSessionId:'actual',nativeInstallationId:'fd-native',nativeOwnerId:'canonical-owner',runId:null}});
  });
 });
