@@ -687,6 +687,23 @@ describe("Vector installation provisioning", () => {
       await expect(reconcileVectorRoutines(port, parsed, now)).resolves.toBeUndefined();
     });
 
+    it("keeps an operator pause on a Vector schedule routine, but fails closed on its sealed fields", async () => {
+      const { manifest } = await funkyServerFixture("production");
+      const parsed = vectorInstallationManifestSchema.parse(manifest);
+      const port = memoryRoutinePort();
+      await reconcileVectorRoutines(port, parsed, now);
+      const rollup = port.routines.find((row) => row.originId === "fa_rollup_query_themes")!;
+      rollup.status = "paused";
+      await expect(reconcileVectorRoutines(port, parsed, now)).resolves.toBeUndefined();
+      expect(rollup.status).toBe("paused");
+
+      rollup.concurrencyPolicy = "always_enqueue";
+      await expect(reconcileVectorRoutines(port, parsed, now)).rejects.toThrow("immutable field vectorScheduleRoutine differs");
+      rollup.concurrencyPolicy = "coalesce_if_active";
+      await expect(reconcileVectorRoutines(port, parsed, now)).resolves.toBeUndefined();
+      expect(rollup.status).toBe("paused");
+    });
+
     it("refuses to archive a row at a retired id that is not the retired routine", async () => {
       const { manifest } = await funkyServerFixture("staging");
       const parsed = vectorInstallationManifestSchema.parse(manifest);
