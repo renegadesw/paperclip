@@ -38,6 +38,7 @@ import type { Db } from "@paperclipai/db";
 // These packages expose import-only entry points in the pinned runtime.
 export { createDb } from "@paperclipai/db";
 export { sql } from "drizzle-orm";
+export { toolAccessService } from "./tool-access.js";
 import {
   agents,
   approvals,
