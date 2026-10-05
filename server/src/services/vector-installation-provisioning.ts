@@ -1518,6 +1518,10 @@ export async function reconcileVectorRoutines(
   }
 
   for (const seed of vectorScheduleRoutineSeeds(manifest)) {
+    // Pausing a schedule routine is an operator decision made on the board, as
+    // it is for research routines: a paused routine stops waking its Vector
+    // schedule. Sealing status refused every reinstall after an operator pause
+    // (prod1, 2026-10-05). Everything else stays sealed.
     await ensureSealedRoutine(port, "vectorScheduleRoutine", {
       id: seed.routineId,
       companyId: seed.companyId,
@@ -1532,7 +1536,7 @@ export async function reconcileVectorRoutines(
       activityGateScope: "company",
       originKind: VECTOR_SCHEDULE_ROUTINE_ORIGIN_KIND,
       originId: seed.scheduleKey,
-    });
+    }, ["status"]);
     await ensureSealedTrigger(port, "vectorScheduleRoutineTrigger", {
       id: seed.triggerId,
       companyId: seed.companyId,
