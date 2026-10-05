@@ -2701,8 +2701,9 @@ export function createToolGatewayService(
     const connectedTools = await connectedMcpToolsForCompany(session.companyId);
     const hasOnDemandTargets = connectedTools.some(isOnDemandRemoteTool);
     const virtualTools = hasOnDemandTargets ? VIRTUAL_TOOLS : [];
-    const githubBotTools = await githubBotToolsForSession(db, session);
-    const tool = [...allTools(), ...connectedTools, ...virtualTools, ...githubBotTools, ...await slackToolsForSession(db, session)]
+    const githubBotTools = session.nativeSessionId ? [] : await githubBotToolsForSession(db, session);
+    const slackTools = session.nativeSessionId ? [] : await slackToolsForSession(db, session);
+    const tool = [...allTools(), ...connectedTools, ...virtualTools, ...githubBotTools, ...slackTools]
       .filter(
         (candidate) =>
           session.agentId ||
@@ -2719,7 +2720,7 @@ export function createToolGatewayService(
         { tool: toolName },
       );
     }
-    const guestBotConnection = await githubGuestBotConnectionForSession(db, session);
+    const guestBotConnection = session.nativeSessionId ? null : await githubGuestBotConnectionForSession(db, session);
     if (guestBotConnection && tool.connectionId && (tool.connectionId !== guestBotConnection || tool.providerType !== "paperclip_github_chat"))
       throw new ToolGatewayHttpError(403, "Sponsored GitHub runs can only use their bot's governed connection; sponsorship does not grant personal credentials", "guest_connection_denied");
     if (process.env.PAPERCLIP_VECTOR_PROFILE !== "engineering" &&
@@ -2928,8 +2929,8 @@ export function createToolGatewayService(
     const onDemandTargets = allConnectedTools.filter(isOnDemandRemoteTool);
     const tools = [
       ...allTools(),
-      ...await githubBotToolsForSession(db, session),
-      ...await slackToolsForSession(db, session),
+      ...(session.nativeSessionId ? [] : await githubBotToolsForSession(db, session)),
+      ...(session.nativeSessionId ? [] : await slackToolsForSession(db, session)),
       ...allConnectedTools.filter((tool) => !!session.nativeSessionId || !isOnDemandRemoteTool(tool)),
     ].filter(
       (tool) =>
