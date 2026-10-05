@@ -326,6 +326,7 @@ export interface ToolGatewaySession {
   /** Controller-validated native execution; never a Paperclip heartbeat run. */
   nativeSessionId?: string;
   nativeInstallationId?: string;
+  nativeOwnerId?: string;
   /** Set only after verifying the signed approved action. */
   approvedSlackInvocationId?: string;
   /** Set only after the signed review is verified. */
@@ -1725,6 +1726,7 @@ export function createToolGatewayService(
           identityContextId: input.session?.identityContextId ?? null,
           nativeSessionId: input.session?.nativeSessionId ?? null,
           nativeInstallationId: input.session?.nativeInstallationId ?? null,
+          nativeOwnerId: input.session?.nativeOwnerId ?? null,
           gatewayId: input.session?.gatewayId ?? null,
           gatewayPublicId: input.session?.gatewayPublicId ?? null,
           gatewayName: input.session?.gatewayName ?? null,
@@ -1768,6 +1770,7 @@ export function createToolGatewayService(
       details: {
         nativeSessionId: input.session?.nativeSessionId ?? null,
         nativeInstallationId: input.session?.nativeInstallationId ?? null,
+        nativeOwnerId: input.session?.nativeOwnerId ?? null,
         gatewaySessionId: input.session?.id ?? null,
         gatewayId: input.session?.gatewayId ?? null,
         gatewayPublicId: input.session?.gatewayPublicId ?? null,
@@ -1851,7 +1854,7 @@ export function createToolGatewayService(
     }
     if (token.startsWith("native:")) {
       const session = await options.nativeSessionResolver?.(token);
-      if (!session || session.nativeSessionId !== token.slice(7) || !session.nativeInstallationId
+      if (!session || session.nativeSessionId !== token.slice(7) || !session.nativeInstallationId || !session.nativeOwnerId
           || !session.companyId || !session.agentId || session.actorType !== "agent"
           || session.actorId !== session.agentId || !session.responsibleUserId
           || session.runId !== null || session.gatewayId || session.issueId || session.projectId
@@ -2078,6 +2081,7 @@ export function createToolGatewayService(
               identityContextId: input.session.identityContextId ?? null,
               nativeSessionId: input.session.nativeSessionId ?? null,
               nativeInstallationId: input.session.nativeInstallationId ?? null,
+              nativeOwnerId: input.session.nativeOwnerId ?? null,
               gatewayId: input.session.gatewayId ?? null,
               gatewayName: input.session.gatewayName ?? null,
               projectId: input.session.projectId ?? null,

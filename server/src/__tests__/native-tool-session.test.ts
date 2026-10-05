@@ -2,12 +2,12 @@ import {describe,it,expect,vi} from 'vitest';
 import {createToolGatewayService,type ToolGatewaySession} from '../services/tool-gateway.js';
 
 describe('private native connector authentication',()=>{
- const session=():ToolGatewaySession=>({id:'native:actual',token:'',companyId:'company',agentId:'source-agent',runId:null,issueId:null,projectId:null,actorType:'agent',actorId:'source-agent',responsibleUserId:'canonical-owner',nativeSessionId:'actual',nativeInstallationId:'fd-native',createdAt:new Date(),expiresAt:new Date(Date.now()+60000)});
+ const session=():ToolGatewaySession=>({id:'native:actual',token:'',companyId:'company',agentId:'source-agent',runId:null,issueId:null,projectId:null,actorType:'agent',actorId:'source-agent',responsibleUserId:'local-board:source-installation',nativeOwnerId:'canonical-owner',nativeSessionId:'actual',nativeInstallationId:'fd-native',createdAt:new Date(),expiresAt:new Date(Date.now()+60000)});
  it('refuses native tokens when the trusted resolver is absent',async()=>{
   const gateway=createToolGatewayService({} as never);
   await expect(gateway.listToolsForSession('native:actual')).rejects.toMatchObject({status:401,reasonCode:'native_session_unavailable'});
  });
- it.each([{runId:'invented-run'},{actorType:'system'},{actorId:'another-agent'},{nativeSessionId:'other'},{responsibleUserId:null},{gatewayId:'gateway'},{expiresAt:new Date(0)}])('refuses an inconsistent native identity snapshot %j',async change=>{
+ it.each([{runId:'invented-run'},{actorType:'system'},{actorId:'another-agent'},{nativeSessionId:'other'},{nativeOwnerId:null},{responsibleUserId:null},{gatewayId:'gateway'},{expiresAt:new Date(0)}])('refuses an inconsistent native identity snapshot %j',async change=>{
   const gateway=createToolGatewayService({} as never,{nativeSessionResolver:async()=>({...session(),...change} as ToolGatewaySession)});
   await expect(gateway.listToolsForSession('native:actual')).rejects.toMatchObject({status:401,reasonCode:'native_session_unavailable'});
  });
