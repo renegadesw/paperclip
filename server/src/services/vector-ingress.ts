@@ -1,5 +1,17 @@
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   agentWakeupRequests,
   agents,
@@ -8,6 +20,8 @@ import {
   issueAttachments,
   issueComments,
   issues,
+  vectorIngressConversations,
+  vectorIngressTurns,
   type Db,
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
@@ -23,6 +37,17 @@ export interface VectorIngressScope {
   companyId: string;
   agentId: string;
   externalSessionId: string;
+  ownerId?: string;
+  installationId?: string;
+  profileId?: string;
+}
+
+export interface VectorIngressOwnerScope {
+  companyId: string;
+  agentId: string;
+  ownerId: string;
+  installationId: string;
+  profileId: string;
 }
 
 export interface VectorIngressTurnInput extends VectorIngressScope {
@@ -40,6 +65,23 @@ export interface VectorIngressEventsInput extends VectorIngressScope {
   limit?: number;
 }
 
+export interface VectorIngressCursorPosition {
+  at: string;
+  rank: 0 | 1 | 2;
+  id: string;
+}
+
+export interface VectorIngressInventoryInput extends VectorIngressOwnerScope {
+  after?: VectorIngressCursorPosition;
+  limit?: number;
+}
+
+export interface VectorIngressTranscriptInput extends VectorIngressOwnerScope {
+  externalSessionId: string;
+  after?: VectorIngressCursorPosition;
+  limit?: number;
+}
+
 export interface VectorIngressHeartbeat {
   wakeup: ReturnType<typeof heartbeatService>["wakeup"];
   cancelRun: ReturnType<typeof heartbeatService>["cancelRun"];
@@ -54,6 +96,22 @@ const VECTOR_PRESENTATION_EVENT_TYPES = [
   "usage",
   "error",
   "agent_settled",
+] as const;
+
+const VECTOR_TRANSCRIPT_EVENT_TYPES = [
+  "assistant_delta",
+  "tool_call",
+  "tool_result",
+  "usage",
+  "error",
+] as const;
+
+const TERMINAL_RUN_STATUSES = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "interrupted",
 ] as const;
 
 function eventPayloadRecord(payload: unknown): Record<string, unknown> {
@@ -92,6 +150,13 @@ function projectVectorEventPayload(eventType: string, payload: unknown) {
   }
 }
 
+function projectVectorTranscriptMessage(
+  eventType: string,
+  _message: string | null,
+): string | null {
+  return eventType === "error" ? "Agent run failed" : null;
+}
+
 export interface VectorIngressTurnResult {
   companyId: string;
   agentId: string;
@@ -116,10 +181,33 @@ export function vectorConversationOwnerId(input: VectorIngressScope): string {
     .update(input.companyId)
     .update("\0")
     .update(input.agentId)
+    .update("\0");
+  if (input.ownerId?.trim()) {
+    digest
+      .update(input.installationId?.trim() ?? "")
+      .update("\0")
+      .update(input.profileId?.trim() ?? "")
+      .update("\0")
+      .update(input.ownerId.trim())
+      .update("\0");
+  }
+  digest.update(input.externalSessionId);
+  return `vector:${digest.digest("base64url")}`;
+}
+
+export function vectorIngressOwnerSha256(input: VectorIngressOwnerScope): string {
+  return createHash("sha256")
+    .update("paperclip-vector-ingress-owner/v1\0")
+    .update(input.companyId)
     .update("\0")
-    .update(input.externalSessionId)
-    .digest("base64url");
-  return `vector:${digest}`;
+    .update(input.agentId)
+    .update("\0")
+    .update(input.installationId.trim())
+    .update("\0")
+    .update(input.profileId.trim())
+    .update("\0")
+    .update(input.ownerId.trim())
+    .digest("hex");
 }
 
 function sorted(values: readonly string[]) {
@@ -130,6 +218,19 @@ function sameStrings(left: readonly string[], right: readonly string[]) {
   const a = sorted(left);
   const b = sorted(right);
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function hasCompleteOwnerScope(
+  scope: VectorIngressScope,
+): scope is VectorIngressScope & VectorIngressOwnerScope {
+  const fields = [scope.ownerId, scope.installationId, scope.profileId];
+  const complete = fields.every((value) => Boolean(value?.trim()));
+  if (!complete && fields.some((value) => Boolean(value?.trim()))) {
+    throw conflict("Vector owner scope is incomplete", {
+      code: "vector_ingress_owner_scope_incomplete",
+    });
+  }
+  return complete;
 }
 
 export function vectorIngressService(
@@ -168,6 +269,44 @@ export function vectorIngressService(
     return { issue, ownerId };
   }
 
+  async function bindConversationOwner(
+    scope: VectorIngressScope & VectorIngressOwnerScope,
+    issueId: string,
+  ) {
+    const ownerSha256 = vectorIngressOwnerSha256(scope);
+    await db
+      .insert(vectorIngressConversations)
+      .values({
+        companyId: scope.companyId,
+        agentId: scope.agentId,
+        issueId,
+        installationId: scope.installationId,
+        profileId: scope.profileId,
+        ownerSha256,
+        externalSessionId: scope.externalSessionId,
+      })
+      .onConflictDoNothing();
+    const mapping = await db
+      .select()
+      .from(vectorIngressConversations)
+      .where(eq(vectorIngressConversations.issueId, issueId))
+      .then((rows) => rows[0] ?? null);
+    if (
+      !mapping ||
+      mapping.companyId !== scope.companyId ||
+      mapping.agentId !== scope.agentId ||
+      mapping.installationId !== scope.installationId ||
+      mapping.profileId !== scope.profileId ||
+      mapping.ownerSha256 !== ownerSha256 ||
+      mapping.externalSessionId !== scope.externalSessionId
+    ) {
+      throw conflict("Vector conversation owner binding does not match", {
+        code: "vector_ingress_owner_scope_mismatch",
+      });
+    }
+    return mapping;
+  }
+
   async function requireConversation(scope: VectorIngressScope) {
     await assertTargetAgent(scope);
     const resolved = await getConversation(scope);
@@ -175,10 +314,22 @@ export function vectorIngressService(
     return { issue: resolved.issue, ownerId: resolved.ownerId };
   }
 
+  async function requireOwnedConversation(
+    scope: VectorIngressScope & VectorIngressOwnerScope,
+  ) {
+    const resolved = await requireConversation(scope);
+    const mapping = await bindConversationOwner(scope, resolved.issue.id);
+    return { ...resolved, mapping };
+  }
+
   async function resolveConversation(scope: VectorIngressScope) {
+    hasCompleteOwnerScope(scope);
     const agent = await assertTargetAgent(scope);
     const existing = await getConversation(scope);
     if (existing.issue) {
+      if (hasCompleteOwnerScope(scope)) {
+        await bindConversationOwner(scope, existing.issue.id);
+      }
       return { issue: existing.issue, ownerId: existing.ownerId, created: false };
     }
 
@@ -205,12 +356,15 @@ export function vectorIngressService(
       issueId: issue.id,
       details: { agentId: scope.agentId, source: "vector_ingress" },
     });
+    if (hasCompleteOwnerScope(scope)) {
+      await bindConversationOwner(scope, issue.id);
+    }
     return { issue, ownerId: existing.ownerId, created: true };
   }
 
   async function latestConversationRun(
     scope: VectorIngressScope,
-    issue: Awaited<ReturnType<typeof requireConversation>>["issue"],
+    issue: { id: string },
   ) {
     return db
       .select()
@@ -231,7 +385,9 @@ export function vectorIngressService(
   }
 
   async function status(input: VectorIngressScope) {
-    const { issue } = await requireConversation(input);
+    const { issue } = hasCompleteOwnerScope(input)
+      ? await requireOwnedConversation(input)
+      : await requireConversation(input);
     const run = await latestConversationRun(input, issue);
     return {
       companyId: input.companyId,
@@ -302,8 +458,300 @@ export function vectorIngressService(
     };
   }
 
+  async function inventory(input: VectorIngressInventoryInput) {
+    await assertTargetAgent({ ...input, externalSessionId: "inventory" });
+    const ownerSha256 = vectorIngressOwnerSha256(input);
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 200));
+    const afterAt = input.after ? new Date(input.after.at) : null;
+    if (afterAt && Number.isNaN(afterAt.getTime())) {
+      throw new Error("vector_ingress_invalid_cursor");
+    }
+    const rows = await db
+      .select({
+        externalSessionId: vectorIngressConversations.externalSessionId,
+        mappingCreatedAt: vectorIngressConversations.createdAt,
+        issueId: issues.id,
+        issueIdentifier: issues.identifier,
+        sessionGeneration: issues.conversationSessionGeneration,
+        conversationState: issues.conversationState,
+        issueCreatedAt: issues.createdAt,
+        issueUpdatedAt: issues.updatedAt,
+      })
+      .from(vectorIngressConversations)
+      .innerJoin(
+        issues,
+        and(
+          eq(issues.id, vectorIngressConversations.issueId),
+          eq(issues.companyId, vectorIngressConversations.companyId),
+          eq(issues.conversationAgentId, vectorIngressConversations.agentId),
+        ),
+      )
+      .where(
+        and(
+          eq(vectorIngressConversations.companyId, input.companyId),
+          eq(vectorIngressConversations.agentId, input.agentId),
+          eq(vectorIngressConversations.installationId, input.installationId),
+          eq(vectorIngressConversations.profileId, input.profileId),
+          eq(vectorIngressConversations.ownerSha256, ownerSha256),
+          isNull(issues.hiddenAt),
+          afterAt
+            ? or(
+                gt(vectorIngressConversations.createdAt, afterAt),
+                and(
+                  eq(vectorIngressConversations.createdAt, afterAt),
+                  gt(
+                    vectorIngressConversations.externalSessionId,
+                    input.after!.id,
+                  ),
+                ),
+              )
+            : undefined,
+        ),
+      )
+      .orderBy(
+        asc(vectorIngressConversations.createdAt),
+        asc(vectorIngressConversations.externalSessionId),
+      )
+      .limit(limit + 1);
+    const page = rows.slice(0, limit);
+    const sessions = await Promise.all(
+      page.map(async (row) => {
+        const run = await latestConversationRun(
+          { ...input, externalSessionId: row.externalSessionId },
+          { id: row.issueId },
+        );
+        const live = Boolean(
+          run &&
+            ACTIVE_RUN_STATUSES.includes(
+              run.status as (typeof ACTIVE_RUN_STATUSES)[number],
+            ),
+        );
+        return {
+          externalSessionId: row.externalSessionId,
+          createdAt: row.issueCreatedAt,
+          updatedAt: row.issueUpdatedAt,
+          sessionGeneration: row.sessionGeneration,
+          live,
+          busy: live,
+          done: !live,
+          runStatus: run?.status ?? null,
+        };
+      }),
+    );
+    const last = page.at(-1);
+    const hasMore = rows.length > limit;
+    return {
+      companyId: input.companyId,
+      agentId: input.agentId,
+      sessions,
+      hasMore,
+      nextPosition: hasMore && last
+        ? ({
+            at: last.mappingCreatedAt.toISOString(),
+            rank: 0,
+            id: last.externalSessionId,
+          } satisfies VectorIngressCursorPosition)
+        : null,
+    };
+  }
+
+  type TranscriptCandidate = {
+    at: Date;
+    rank: 0 | 1 | 2;
+    id: string;
+    eventType: string;
+    message: string | null;
+    payload: Record<string, unknown>;
+  };
+
+  function compareTranscriptCandidate(
+    left: TranscriptCandidate,
+    right: TranscriptCandidate,
+  ) {
+    const time = left.at.getTime() - right.at.getTime();
+    if (time !== 0) return time;
+    if (left.rank !== right.rank) return left.rank - right.rank;
+    if (left.rank === 1) return Number(left.id) - Number(right.id);
+    return left.id.localeCompare(right.id);
+  }
+
+  async function transcript(input: VectorIngressTranscriptInput) {
+    const { issue, mapping } = await requireOwnedConversation(input);
+    const limit = Math.max(1, Math.min(input.limit ?? 200, 500));
+    const afterAt = input.after ? new Date(input.after.at) : null;
+    if (afterAt && Number.isNaN(afterAt.getTime())) {
+      throw new Error("vector_ingress_invalid_cursor");
+    }
+    const after = input.after;
+    const commentAfter = !afterAt
+      ? undefined
+      : after!.rank > 0
+        ? gt(issueComments.createdAt, afterAt)
+        : or(
+            gt(issueComments.createdAt, afterAt),
+            and(
+              eq(issueComments.createdAt, afterAt),
+              gt(issueComments.id, after!.id),
+            ),
+          );
+    const eventAfter = !afterAt
+      ? undefined
+      : after!.rank > 1
+        ? gt(heartbeatRunEvents.createdAt, afterAt)
+        : after!.rank < 1
+          ? gte(heartbeatRunEvents.createdAt, afterAt)
+          : or(
+              gt(heartbeatRunEvents.createdAt, afterAt),
+              and(
+                eq(heartbeatRunEvents.createdAt, afterAt),
+                gt(heartbeatRunEvents.id, Number(after!.id)),
+              ),
+            );
+    const terminalAfter = !afterAt
+      ? undefined
+      : after!.rank < 2
+        ? gte(heartbeatRuns.finishedAt, afterAt)
+        : or(
+            gt(heartbeatRuns.finishedAt, afterAt),
+            and(
+              eq(heartbeatRuns.finishedAt, afterAt),
+              gt(heartbeatRuns.id, after!.id),
+            ),
+          );
+    const runScope = and(
+      eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.agentId, input.agentId),
+      or(
+        eq(heartbeatRuns.nativeIssueId, issue.id),
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+      ),
+    );
+    const [comments, runEvents, terminalRuns] = await Promise.all([
+      db
+        .select({
+          id: issueComments.id,
+          body: issueComments.body,
+          createdAt: vectorIngressTurns.createdAt,
+        })
+        .from(vectorIngressTurns)
+        .innerJoin(
+          issueComments,
+          eq(issueComments.id, vectorIngressTurns.commentId),
+        )
+        .where(
+          and(
+            eq(vectorIngressTurns.conversationId, mapping.id),
+            eq(issueComments.issueId, issue.id),
+            isNull(issueComments.deletedAt),
+            commentAfter,
+          ),
+        )
+        .orderBy(asc(issueComments.createdAt), asc(issueComments.id))
+        .limit(limit + 1),
+      db
+        .select({
+          id: heartbeatRunEvents.id,
+          eventType: heartbeatRunEvents.eventType,
+          message: heartbeatRunEvents.message,
+          payload: heartbeatRunEvents.payload,
+          createdAt: heartbeatRunEvents.createdAt,
+        })
+        .from(heartbeatRunEvents)
+        .innerJoin(
+          heartbeatRuns,
+          and(
+            eq(heartbeatRuns.id, heartbeatRunEvents.runId),
+            eq(heartbeatRuns.companyId, heartbeatRunEvents.companyId),
+            eq(heartbeatRuns.agentId, heartbeatRunEvents.agentId),
+          ),
+        )
+        .where(
+          and(
+            runScope,
+            inArray(heartbeatRunEvents.eventType, [
+              ...VECTOR_TRANSCRIPT_EVENT_TYPES,
+            ]),
+            eventAfter,
+          ),
+        )
+        .orderBy(asc(heartbeatRunEvents.createdAt), asc(heartbeatRunEvents.id))
+        .limit(limit + 1),
+      db
+        .select({
+          id: heartbeatRuns.id,
+          status: heartbeatRuns.status,
+          finishedAt: heartbeatRuns.finishedAt,
+        })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            runScope,
+            inArray(heartbeatRuns.status, [...TERMINAL_RUN_STATUSES]),
+            isNotNull(heartbeatRuns.finishedAt),
+            terminalAfter,
+          ),
+        )
+        .orderBy(asc(heartbeatRuns.finishedAt), asc(heartbeatRuns.id))
+        .limit(limit + 1),
+    ]);
+    const candidates: TranscriptCandidate[] = [
+      ...comments.map((comment) => ({
+        at: comment.createdAt,
+        rank: 0 as const,
+        id: comment.id,
+        eventType: "user_turn",
+        message: null,
+        payload: { text: comment.body },
+      })),
+      ...runEvents.map((event) => ({
+        at: event.createdAt,
+        rank: 1 as const,
+        id: String(event.id),
+        eventType: event.eventType,
+        message: projectVectorTranscriptMessage(event.eventType, event.message),
+        payload: projectVectorEventPayload(event.eventType, event.payload),
+      })),
+      ...terminalRuns.map((run) => ({
+        at: run.finishedAt!,
+        rank: 2 as const,
+        id: run.id,
+        eventType: "run_terminal",
+        message: null,
+        payload: {
+          status: run.status,
+          failed: run.status === "failed" || run.status === "timed_out",
+        },
+      })),
+    ].sort(compareTranscriptCandidate);
+    const page = candidates.slice(0, limit);
+    const last = page.at(-1);
+    const hasMore = candidates.length > limit;
+    return {
+      companyId: input.companyId,
+      agentId: input.agentId,
+      externalSessionId: input.externalSessionId,
+      events: page.map((event) => ({
+        eventType: event.eventType,
+        message: event.message,
+        payload: event.payload,
+        createdAt: event.at,
+      })),
+      hasMore,
+      nextPosition: hasMore && last
+        ? ({
+            at: last.at.toISOString(),
+            rank: last.rank,
+            id: last.id,
+          } satisfies VectorIngressCursorPosition)
+        : null,
+    };
+  }
+
   async function addTurn(input: VectorIngressTurnInput) {
     const { issue, ownerId } = await resolveConversation(input);
+    const mapping = hasCompleteOwnerScope(input)
+      ? await bindConversationOwner(input, issue.id)
+      : null;
     const requestedAttachmentIds = [...new Set(input.attachmentIds ?? [])];
     let replayed = false;
 
@@ -355,10 +803,20 @@ export function vectorIngressService(
           );
         }
         replayed = true;
+        if (mapping) {
+          await tx
+            .insert(vectorIngressTurns)
+            .values({
+              conversationId: mapping.id,
+              commentId: existing.id,
+              createdAt: existing.createdAt,
+            })
+            .onConflictDoNothing();
+        }
         return existing;
       }
 
-      return issuesSvc.addComment(
+      const inserted = await issuesSvc.addComment(
         issue.id,
         input.body,
         { userId: responsibleUserId },
@@ -369,6 +827,14 @@ export function vectorIngressService(
         },
         tx,
       );
+      if (mapping) {
+        await tx.insert(vectorIngressTurns).values({
+          conversationId: mapping.id,
+          commentId: inserted.id,
+          createdAt: inserted.createdAt,
+        });
+      }
+      return inserted;
     });
 
     if (!replayed) {
@@ -529,6 +995,8 @@ export function vectorIngressService(
     cancel,
     status,
     events,
+    inventory,
+    transcript,
   };
 }
 
