@@ -8,6 +8,7 @@ import { isNewAgentAdapterAllowed } from "@/lib/new-agent-adapters";
 import { queryKeys } from "@/lib/queryKeys";
 import { getAdapterDisplay } from "@/adapters/adapter-display-registry";
 import { cn } from "@/lib/utils";
+import { paperclipPath } from "@/lib/base-path";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import {
@@ -61,7 +62,7 @@ export function AdapterMark({
   return (
     <>
       <img
-        src={mark.src}
+        src={paperclipPath(mark.src)}
         className={cn(
           "shrink-0 object-contain",
           mark.dark && "dark:hidden",
@@ -71,7 +72,7 @@ export function AdapterMark({
       />
       {mark.dark && (
         <img
-          src={mark.dark}
+          src={paperclipPath(mark.dark)}
           className={cn("hidden shrink-0 object-contain dark:block", className)}
           alt=""
         />

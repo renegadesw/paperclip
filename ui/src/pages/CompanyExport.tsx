@@ -24,6 +24,7 @@ import { toCompanyRelativePath } from "@/lib/company-routes";
 import { cn } from "../lib/utils";
 import { queryKeys } from "../lib/queryKeys";
 import { formatBytes } from "../lib/issue-output";
+import { paperclipApiPath } from "@/lib/base-path";
 import { createZipArchive, estimateZipArchiveSize } from "../lib/zip";
 import {
   type ExportCategoryKey,
@@ -1233,7 +1234,7 @@ export function CompanyExport() {
             selectedFile={selectedFile}
             content={previewContent}
             allFiles={effectiveFiles}
-            orgChartPreviewUrl={`/api/companies/${encodeURIComponent(selectedCompanyId)}/org.svg`}
+            orgChartPreviewUrl={paperclipApiPath(`/companies/${encodeURIComponent(selectedCompanyId)}/org.svg`)}
             onSkillClick={handleSkillClick}
           />
           {exportPreviewMutation.isPending ? (

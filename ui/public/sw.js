@@ -25,7 +25,8 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
 
   // Skip non-GET requests and API calls
-  if (request.method !== "GET" || url.pathname.startsWith("/api")) {
+  const scopePath = new URL(self.registration.scope).pathname.replace(/\/$/, "");
+  if (request.method !== "GET" || url.pathname.startsWith(`${scopePath}/api`)) {
     return;
   }
 
@@ -46,7 +47,7 @@ self.addEventListener("fetch", (event) => {
         // the navigation with "Failed to convert value to 'Response'" instead
         // of showing anything.
         if (request.mode === "navigate") {
-          return (await caches.match("/")) ?? new Response("Offline", { status: 503 });
+          return (await caches.match(`${scopePath}/`)) ?? new Response("Offline", { status: 503 });
         }
         return (await caches.match(request)) ?? Response.error();
       })

@@ -108,12 +108,31 @@ export async function preparePiRuntimeConfig(input: {
   env: Record<string, string>;
   /** Isolate Pi from host/user settings even when no custom provider is configured. */
   forceManagedAgentDir?: boolean;
+  /** Server-redeemed per-run authority. Credentials are written only to the private config file. */
+  vectorProviderAuthority?: {
+    providerId: string;
+    baseUrl: string;
+    api: string;
+    apiKey: string;
+    models: readonly Record<string, unknown>[];
+  };
 }): Promise<PreparedPiRuntimeConfig> {
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
-  const { providers, warning } = parseProviderConfig(
+  const configured = parseProviderConfig(
     input.env.PAPERCLIP_PI_PROVIDERS ?? process.env.PAPERCLIP_PI_PROVIDERS,
     resolveEnv,
   );
+  const providers = input.vectorProviderAuthority
+    ? {
+        [input.vectorProviderAuthority.providerId]: {
+          baseUrl: input.vectorProviderAuthority.baseUrl,
+          api: input.vectorProviderAuthority.api,
+          apiKey: input.vectorProviderAuthority.apiKey,
+          models: input.vectorProviderAuthority.models,
+        },
+      }
+    : configured.providers;
+  const warning = input.vectorProviderAuthority ? null : configured.warning;
   if (!providers && !input.forceManagedAgentDir) {
     return {
       env: input.env,
@@ -124,12 +143,13 @@ export async function preparePiRuntimeConfig(input: {
   }
 
   const agentConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-agent-config-"));
+  await fs.chmod(agentConfigDir, 0o700);
   try {
     if (providers) {
       await fs.writeFile(
         path.join(agentConfigDir, "models.json"),
         `${JSON.stringify({ providers }, null, 2)}\n`,
-        "utf8",
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
       );
     }
   } catch (err) {
@@ -147,7 +167,9 @@ export async function preparePiRuntimeConfig(input: {
     notes: [
       ...(warning ? [warning] : []),
       ...(providers
-        ? [`Injected ${Object.keys(providers).length} custom Pi provider(s) from PAPERCLIP_PI_PROVIDERS into a managed models.json: ${Object.keys(providers).join(", ")}.`]
+        ? [input.vectorProviderAuthority
+            ? `Injected the run-scoped Vector provider into a managed models.json: ${input.vectorProviderAuthority.providerId}.`
+            : `Injected ${Object.keys(providers).length} custom Pi provider(s) from PAPERCLIP_PI_PROVIDERS into a managed models.json: ${Object.keys(providers).join(", ")}.`]
         : ["Isolated Pi from host/user settings with a managed empty agent config directory."]),
     ],
     agentConfigDir,

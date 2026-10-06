@@ -222,26 +222,29 @@ When authoring migrations or one-time backfills:
 
 ## Vector shared-database runtime ownership
 
-The `vector-embedded` deployment profile currently permits exactly one running
-Paperclip server process per Vector application database. At startup the server
-reserves a dedicated PostgreSQL session and takes a well-known advisory lock
-before constructing its ordinary database pools. A second process refuses to
-start with `vector_runtime_already_owned`. The reserved client's connection-loss
-notification stops the server rather than allowing a replacement database
-session to continue without ownership. Graceful shutdown explicitly unlocks and
-closes the reserved session.
+The `vector-embedded` profile requires direct authentication as the shared,
+restricted `paperclip_runtime` role. Startup verifies the full policy inventory,
+foreign-reference guards and installation ownership before opening runtime
+pools or starting services. Privileged/owner credentials, inherited roles,
+schema creation authority and accessible outside grants are rejected. Runtime
+startup must not receive `DATABASE_MIGRATION_URL`.
 
-The lock uses `DATABASE_MIGRATION_URL` when configured because advisory locks
-require a session-capable direct PostgreSQL connection. A deployment whose
-runtime `DATABASE_URL` uses transaction pooling must provide a direct migration
-URL to the same Vector application database.
+Every physical pool connection carries the fixed company and installation
+context. Company rows use restrictive RLS; formerly global execution/settings,
+auth and preference rows are installation-scoped. Migrations 0283/0284 preserve
+the standalone empty-string namespace while separating Vector installations.
+The synthetic local board identity is namespaced by installation as well.
 
-The durable installation/profile/company admission binding is an additional
-omission-safe startup guard, not multi-install execution support. Running
-independent Paperclip processes against the same `llm` schema remains blocked by
-the singleton and unsupported until installation identity scopes scheduling,
-work claiming, recovery, reaping, cancellation, and related queries end to end.
-The standalone deployment profile is unchanged.
+A reserved, session-capable runtime connection takes a shared compatibility gate
+that excludes older unscoped servers, plus an exclusive company/installation
+lock. Separate installations can coexist; duplicate owners and legacy/scoped
+overlap fail with `vector_runtime_already_owned`. Losing the reserved connection
+stops the server. Transaction-mode poolers are not supported for this ownership
+connection. No migration credentials are used for holding runtime ownership.
+
+Database-level concurrency tests are not live three-host acceptance. Enroll the
+role/credentials, install the exact paired Vector artifact, and prove actual
+service startup, dispatch, cancellation and recovery before production cutover.
 
 ## Cloud runtime identity singleton
 
@@ -458,6 +461,42 @@ Hosted AWS provider notes live in [SECRETS-AWS-PROVIDER.md](./SECRETS-AWS-PROVID
 Migration `0274_agent_chat.sql` adds conversation identity/state and session generation/boundary columns to `issues`, plus idempotent client request IDs and processed session-boundary generations to `issue_comments`. The company/agent/user unique index resolves concurrent first writes to one issue. A check constraint preserves the assigned-agent identity and prevents terminal conversation status. Comment request IDs are unique per issue and user. There is no separate chat/message store. Provider sessions continue to use `agent_task_sessions`; `/new` removes only the matching conversation session, and session writers fence stale generations against the issue row.
 
 ## Legacy controller ownership
+
+### Vector shared-role installation
+
+`installVectorRuntimeIsolation` in `@paperclipai/db` is an explicit privileged
+installation step for an already migrated `vector-embedded` database. It creates
+one shared `paperclip_runtime` role, initially NOLOGIN without credentials. It
+never runs implicitly at server boot. All relations remain in `llm` in Vector's
+existing application database; the parent-owned todo/question tables and other
+Vector relations are untouched.
+
+The installer classifies every exported Paperclip relation, installs restrictive
+company/installation RLS policies, and adds SECURITY INVOKER foreign-reference
+checks. It refuses elevated roles, role memberships, schema creation authority,
+and accessible grants outside its relation inventory. Runtime pools can carry
+fixed `vectorRuntimeScope` connection options; missing/mismatched ownership
+fails closed. Session GUCs protect against accidentally unfiltered application
+queries, not a malicious trusted host deliberately changing its own scope.
+
+Real PostgreSQL tests cover concurrent unfiltered claims, routine inventory,
+restart/reaper updates, wrong-company writes, foreign-key links, permissive-policy
+composition, and preservation of unrelated Vector data.
+
+All 213 child-owned relations are classified; the two Vector-parent relations
+are excluded. An unknown unscoped upstream relation fails closed. No active
+quarantine is left. Environments, settings, plugin jobs, auth, announcements and
+preferences are covered. Plugin-provided schema migrations do not receive
+privileged credentials; plugins requiring new database namespaces need a
+separate reviewed offline provisioning path.
+
+The application-database owner installs the policies after schema migrations.
+If that owner cannot create PostgreSQL roles, the database administrator must
+first enroll the single shared role and credential through the normal secret
+store. The application owner must never be substituted as the runtime login.
+Rollback to the legacy Vector runtime is independent of these new tables;
+rollback to an older Paperclip binary needs its matching schema because the
+global uniqueness contracts changed.
 
 Legacy run claims atomically record `controller_boot_id`, a database-clock
 `controller_lease_expires_at`, and `execution_stage` before workspace provisioning.

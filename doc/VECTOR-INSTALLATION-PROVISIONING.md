@@ -1,7 +1,7 @@
 # Vector installation provisioning
 
-Vector's native release may provision one installation-owned company and root
-agent before the Paperclip server starts. Provisioning also creates the durable
+Vector's native release may provision one installation-owned company and a
+stable agent roster before the Paperclip server starts. Provisioning also creates the durable
 installation/profile/company ownership binding used by startup admission. The
 supported entrypoint is:
 
@@ -23,13 +23,54 @@ argv, stdout receipt, or error output.
 The manifest pins stable UUIDs, installation/profile identity, Pi adapter type,
 RPC execution mode, model, thinking level, workspace, release-owned
 instructions, runtime heartbeat policy, permissions, and the deployment tool
-policy. The instructions asset is checked against its manifest SHA-256 in the
-staged release. The stored adapter path points through the installation's
-stable `current` symlink so it survives release-directory renames and rollback.
+policy for the root agent and any additional roster agents. Every instructions
+asset is checked against its manifest SHA-256 in the staged release. Stored
+adapter paths point through the installation's stable `current` symlink so they
+survive release-directory renames and rollback. Supported profiles are
+`engineering`, `standard`, and `staging`; only engineering may declare ambient
+Pi built-ins or extensions.
+
+Roster shape is profile-closed rather than a shared superset:
+
+- `engineering` provisions the FunkyDev software org and no Funky workload
+  catalog: FunkyDev (role `engineer`) is the primary agent and reports to no
+  agent; every other seat (for example department managers, their engineers,
+  and QA) must report to an agent declared before it;
+- `standard` provisions exactly the Standard Chat agent and no Funky workload catalog;
+- `staging` provisions exactly Funky analyst, Scout, and Advisor plus all seven
+  current Vector workload contracts.
+
+The optional `workloads` catalog records the exact relationship between stable
+Vector workload keys and roster agents. Paperclip-owned work may use ordinary
+issues. A workload whose authority remains Vector's database must declare
+`runtimeAuthority: "vector_lease_triple"` and a credential-free, default-off
+bridge contract. Its imported `vector_jobs` schedule must also remain disabled.
+The canonical catalog digest and each agent's assigned workload keys are stored
+in agent metadata, so an edited task/tool/schedule mapping is immutable drift
+instead of a silent behavioral change.
+
+Each agent may declare `reportsTo`, the id of its manager. It must name an
+agent declared earlier in the manifest, which rules out self-references,
+forward references, unknown ids, and cycles, and makes manifest order the
+creation order: a manager is always created (or re-pointed) before its reports.
+When the roster owns its hierarchy (always on engineering; on another profile
+once any agent declares a manager) `reportsTo` is a sealed agent field: it is
+set on create, rewritten on a revision upgrade, and a board edit of it is drift
+at the same revision. A flat roster that never declares it is unchanged: the
+field is neither written nor asserted, and its roster digest is identical to
+the one recorded before the field existed. A null `reportsTo` never enters the
+roster digest.
+
+A revision upgrade updates the kept agents in manifest order, creates the new
+ones, and terminates agents this installation provisioned under an older
+revision that the manifest no longer declares. Operator-owned adapterConfig
+keys and grants attached to an agent (such as FunkyDev's GitHub connection)
+are not provisioning fields and survive the upgrade. The receipt's `agentIds`
+lists the whole roster in manifest order; `agentId` is the primary agent.
 
 Reconciliation is intentionally strict:
 
-- first application creates the company, ownership binding, and agent atomically;
+- first application creates the company, ownership binding, and complete roster atomically;
 - retry returns the same company and agent IDs without creating duplicates;
 - a name owned by another stable ID is an identity collision;
 - an installation ID, profile, or company ownership mismatch is immutable drift;
@@ -40,6 +81,9 @@ Reconciliation is intentionally strict:
   before database mutation;
 - failures print only `Vector provisioning failed` from the CLI boundary.
 
-This entrypoint provisions only the declared company and agent. It does not
-import Vector Scout, Advisors, legacy tasks, routines, schedules, transcripts,
-or the remaining FunkyDev callback-backed tools.
+This entrypoint provisions only the declared company, agents, and workload
+contract metadata. It does not claim or settle Vector tasks, enable imported
+schedules, create Paperclip routines for Vector lease queues, import historical
+transcripts, or add the remaining FunkyDev callback-backed tools. See
+`VECTOR-ROSTER-WORKLOAD-PARITY.md` for the exact current mapping and cutover
+gaps.

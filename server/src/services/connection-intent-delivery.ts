@@ -1,3 +1,4 @@
+import { isLocalBoardUserId } from "../local-board-identity.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { and, eq, isNull, lte, asc, notInArray, desc, sql } from "drizzle-orm";
 import { connectionIntentDeliveries, issueThreadInteractions, issues, agentWakeupRequests, companyMemberships, heartbeatRuns, chatConversations, chatEndpoints, type Db } from "@paperclipai/db";
@@ -124,7 +125,7 @@ export function connectionIntentDeliveryService(db: Db, heartbeat: Pick<Heartbea
       return;
     }
     const userId = interaction.addresseeUserId;
-    if (userId !== "local-board") {
+    if (!isLocalBoardUserId(userId)) {
       const [membership] = await db.select().from(companyMemberships).where(and(
         eq(companyMemberships.companyId, claimed.companyId), eq(companyMemberships.principalType, "user"),
         eq(companyMemberships.principalId, userId ?? ""), eq(companyMemberships.status, "active"),

@@ -62,6 +62,10 @@ describeEmbeddedPostgres("vector-embedded database profile", () => {
       await applyPendingMigrations(database.connectionString, "standalone");
 
       await sql.unsafe(`
+        -- The fork's operator tables explicitly use llm even in standalone.
+        -- Keep that prior installation intact in its own namespace while this
+        -- fixture exercises a fresh embedded layout and colliding public names.
+        ALTER SCHEMA llm RENAME TO prior_paperclip_llm;
         CREATE SCHEMA os;
         CREATE SCHEMA llm;
         CREATE TABLE os.vector_profile_guard (id integer PRIMARY KEY, value text NOT NULL);
@@ -80,7 +84,7 @@ describeEmbeddedPostgres("vector-embedded database profile", () => {
           relation.relkind AS relation_kind
         FROM pg_class relation
         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname IN ('os', 'public')
+        WHERE namespace.nspname IN ('os', 'public', 'prior_paperclip_llm')
         ORDER BY namespace.nspname, relation.relname, relation.relkind
       `;
 
@@ -140,7 +144,7 @@ describeEmbeddedPostgres("vector-embedded database profile", () => {
           relation.relkind AS relation_kind
         FROM pg_class relation
         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname IN ('os', 'public')
+        WHERE namespace.nspname IN ('os', 'public', 'prior_paperclip_llm')
         ORDER BY namespace.nspname, relation.relname, relation.relkind
       `;
       expect(outsideAfter).toEqual(outsideBefore);

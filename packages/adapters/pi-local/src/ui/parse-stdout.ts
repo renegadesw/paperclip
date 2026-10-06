@@ -36,14 +36,57 @@ function extractTextContent(content: string | Array<{ type: string; text?: strin
   return { text, thinking };
 }
 
-// Track pending tool calls for proper toolUseId matching
-let pendingToolCalls = new Map<string, { toolName: string; args: unknown }>();
+type PiParserState = {
+  // Pending tool calls, for toolName on results that omit it.
+  pendingToolCalls: Map<string, { toolName: string; args: unknown }>;
+  // Tool results already rendered from tool_execution_end.
+  renderedToolResults: Set<string>;
+  // What the current assistant message has already put on screen. Pi streams
+  // each block as *_delta events, then repeats it whole in *_end, again in
+  // message_end, again in turn_end, and the last message once more in
+  // agent_end. Only the first rendering may reach the transcript; the rest
+  // are the same text. Scoped to one message (reset on message_start), so a
+  // shared parser never suppresses a message it has not seen.
+  renderedText: boolean;
+  renderedThinking: boolean;
+};
+
+function createState(): PiParserState {
+  return { pendingToolCalls: new Map(), renderedToolResults: new Set(), renderedText: false, renderedThinking: false };
+}
+
+function resetMessage(state: PiParserState): void {
+  state.renderedText = false;
+  state.renderedThinking = false;
+}
+
+const defaultState = createState();
+
+function resetAll(state: PiParserState): void {
+  state.pendingToolCalls.clear();
+  state.renderedToolResults.clear();
+  resetMessage(state);
+}
 
 export function resetParserState(): void {
-  pendingToolCalls.clear();
+  resetAll(defaultState);
 }
 
 export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
+  return parseLineWithState(defaultState, line, ts);
+}
+
+/** Per-transcript parser: isolated state, reset between builds. */
+export function createPiStdoutParser(): { parseLine: (line: string, ts: string) => TranscriptEntry[]; reset: () => void } {
+  const state = createState();
+  return {
+    parseLine: (line, ts) => parseLineWithState(state, line, ts),
+    reset: () => resetAll(state),
+  };
+}
+
+function parseLineWithState(state: PiParserState, line: string, ts: string): TranscriptEntry[] {
+  const pendingToolCalls = state.pendingToolCalls;
   const parsed = asRecord(safeJsonParse(line));
   if (!parsed) {
     // Non-JSON line, treat as raw stdout
@@ -61,6 +104,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
 
   // Agent lifecycle
   if (type === "agent_start") {
+    resetAll(state);
     return [{ kind: "system", ts, text: "🚀 Pi agent started" }];
   }
 
@@ -72,16 +116,8 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
     if (messages && messages.length > 0) {
       const lastMessage = messages[messages.length - 1];
       if (lastMessage?.role === "assistant") {
-        const content = lastMessage.content as string | Array<{ type: string; text?: string; thinking?: string }>;
-        const { text, thinking } = extractTextContent(content);
-        
-        if (thinking) {
-          entries.push({ kind: "thinking", ts, text: thinking });
-        }
-        if (text) {
-          entries.push({ kind: "assistant", ts, text });
-        }
-        
+        // The last message's thinking and text were already rendered by
+        // its message_update/message_end events; agent_end only repeats them.
         // Extract usage
         const usage = asRecord(lastMessage.usage);
         if (usage) {
@@ -122,27 +158,20 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
   }
 
   if (type === "turn_end") {
-    const message = asRecord(parsed.message);
+    // turn_end repeats the turn's assistant message (already rendered by
+    // message_update/message_end) and its tool results (already rendered by
+    // tool_execution_end). Only a result that never had its own
+    // tool_execution_end is new here.
     const toolResults = parsed.toolResults as Array<Record<string, unknown>> | undefined;
     
     const entries: TranscriptEntry[] = [];
-    
-    if (message) {
-      const content = message.content as string | Array<{ type: string; text?: string; thinking?: string }>;
-      const { text, thinking } = extractTextContent(content);
-      
-      if (thinking) {
-        entries.push({ kind: "thinking", ts, text: thinking });
-      }
-      if (text) {
-        entries.push({ kind: "assistant", ts, text });
-      }
-    }
     
     // Process tool results - match with pending tool calls
     if (toolResults) {
       for (const tr of toolResults) {
         const toolCallId = asString(tr.toolCallId, `tool-${Date.now()}`);
+        if (state.renderedToolResults.has(toolCallId)) continue;
+        state.renderedToolResults.add(toolCallId);
         const content = tr.content;
         const isError = tr.isError === true;
         
@@ -180,6 +209,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
 
   // Message streaming
   if (type === "message_start") {
+    resetMessage(state);
     return [];
   }
 
@@ -192,6 +222,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
       if (msgType === "thinking_delta") {
         const delta = asString(assistantEvent.delta);
         if (delta) {
+          state.renderedThinking = true;
           return [{ kind: "thinking", ts, text: delta, delta: true }];
         }
       }
@@ -200,22 +231,25 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
       if (msgType === "text_delta") {
         const delta = asString(assistantEvent.delta);
         if (delta) {
+          state.renderedText = true;
           return [{ kind: "assistant", ts, text: delta, delta: true }];
         }
       }
       
-      // Handle thinking end - emit full thinking block
+      // thinking_end/text_end carry the whole block again. Render it only
+      // when the block was not streamed (a provider that sends no deltas).
       if (msgType === "thinking_end") {
         const content = asString(assistantEvent.content);
-        if (content) {
+        if (content && !state.renderedThinking) {
+          state.renderedThinking = true;
           return [{ kind: "thinking", ts, text: content }];
         }
       }
       
-      // Handle text end - emit full text block
       if (msgType === "text_end") {
         const content = asString(assistantEvent.content);
-        if (content) {
+        if (content && !state.renderedText) {
+          state.renderedText = true;
           return [{ kind: "assistant", ts, text: content }];
         }
       }
@@ -225,21 +259,23 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
 
   if (type === "message_end") {
     const message = asRecord(parsed.message);
-    if (message) {
+    // Only assistant messages are the agent speaking. A user message_end is
+    // the prompt (the chat already shows it); a toolResult message_end
+    // repeats tool_execution_end. Neither is assistant output.
+    if (message && message.role === "assistant") {
       const content = message.content as string | Array<{ type: string; text?: string; thinking?: string }>;
       const { text, thinking } = extractTextContent(content);
       
       const entries: TranscriptEntry[] = [];
       
-      // Emit final thinking block if present
-      if (thinking) {
+      // The complete message, rendered only for blocks nothing streamed.
+      if (thinking && !state.renderedThinking) {
         entries.push({ kind: "thinking", ts, text: thinking });
       }
-      
-      // Emit final text block if present
-      if (text) {
+      if (text && !state.renderedText) {
         entries.push({ kind: "assistant", ts, text });
       }
+      resetMessage(state);
       
       return entries;
     }
@@ -295,6 +331,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
     
     // Clean up pending call
     pendingToolCalls.delete(toolCallId);
+    state.renderedToolResults.add(toolCallId);
     
     return [{
       kind: "tool_result",

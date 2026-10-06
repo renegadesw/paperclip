@@ -19,6 +19,24 @@ afterEach(async () => {
 });
 
 describeEmbeddedPostgres("vector-embedded runtime ownership", () => {
+  it("allows distinct installations, excludes duplicate owners and fences legacy servers in both directions", async () => {
+    const database = await startEmbeddedPostgresTestDatabase("paperclip-scoped-owners-");
+    cleanups.push(database.cleanup);
+    const a = { companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", installationId: "funkydev-t480" };
+    const b = { companyId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", installationId: "standard-stecke1" };
+    const first = await acquireVectorRuntimeOwnership(database.connectionString, a);
+    cleanups.push(() => first.release());
+    const second = await acquireVectorRuntimeOwnership(database.connectionString, b);
+    cleanups.push(() => second.release());
+    await expect(acquireVectorRuntimeOwnership(database.connectionString, a)).rejects.toBeInstanceOf(VectorRuntimeOwnershipError);
+    await expect(acquireVectorRuntimeOwnership(database.connectionString)).rejects.toBeInstanceOf(VectorRuntimeOwnershipError);
+    await first.release();
+    await second.release();
+    const legacy = await acquireVectorRuntimeOwnership(database.connectionString);
+    cleanups.push(() => legacy.release());
+    await expect(acquireVectorRuntimeOwnership(database.connectionString, b)).rejects.toBeInstanceOf(VectorRuntimeOwnershipError);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
   it(
     "allows the first owner and clearly rejects a second server process",
     async () => {

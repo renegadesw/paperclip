@@ -171,3 +171,36 @@ export function oauthEndpointDisplayHost(value: unknown): string | null {
     return null;
   }
 }
+
+/**
+ * Browser paths a self-hosted connector broker's host (Vector OS) serves on the
+ * board's own origin, outside the Paperclip mount. A loopback broker may return
+ * one as a sign-in "authorization URL" when no provider trip is needed.
+ */
+export const SELF_HOSTED_BROKER_RELAY_PREFIX = "/__connector/";
+
+/**
+ * A rooted relative path under SELF_HOSTED_BROKER_RELAY_PREFIX, normalized, or
+ * undefined. No scheme, host, protocol-relative `//`, backslash, whitespace,
+ * control character, fragment, or dot segment that escapes the prefix.
+ */
+export function selfHostedBrokerRelayPath(value: string): string | undefined {
+  if (
+    value.length > 2048
+    || !value.startsWith(SELF_HOSTED_BROKER_RELAY_PREFIX)
+    || value.includes("//")
+    || value.includes("\\")
+    || /[\u0000-\u0020\u007f]/.test(value)
+    || value.includes("#")
+  ) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(value, "http://relay.invalid");
+  } catch {
+    return undefined;
+  }
+  if (parsed.origin !== "http://relay.invalid" || !parsed.pathname.startsWith(SELF_HOSTED_BROKER_RELAY_PREFIX)) {
+    return undefined;
+  }
+  return `${parsed.pathname}${parsed.search}`;
+}

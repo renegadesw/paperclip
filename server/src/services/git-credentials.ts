@@ -11,6 +11,7 @@ import {
 } from "@paperclipai/db";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { isGitHubDotCom } from "./github-fetch.js";
+import { managedAccessTokenRefreshWindowMs } from "./github-installation-identity.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
 
@@ -491,8 +492,11 @@ export async function resolveManagedGitHubCredential(
     const refreshedAt = grant.providerTenant?.oauth?.refreshedAt;
     const expiryMs = typeof expiresAt === "string" ? Date.parse(expiresAt) : Number.NaN;
     const refreshedMs = typeof refreshedAt === "string" ? Date.parse(refreshedAt) : Number.NaN;
+    // The token is exported into the run's git/gh environment, so it must
+    // outlive the run where possible; installation tokens live only an hour.
+    const refreshWindowMs = managedAccessTokenRefreshWindowMs(grant.providerTenant, "export");
     if (Number.isFinite(expiryMs) && (
-      expiryMs <= Date.now() + 60 * 60_000
+      expiryMs <= Date.now() + refreshWindowMs
       || !Number.isFinite(refreshedMs)
       || refreshedMs <= Date.now() - 30 * 24 * 60 * 60_000
     )) {
@@ -500,6 +504,7 @@ export async function resolveManagedGitHubCredential(
         companyId,
         connectionId: grant.connectionId,
         grantId: grant.id,
+        refreshWindowMs,
         actor: { actorType: "system", actorId: "workspace-git-credential" },
         issueId: context.issueId,
         heartbeatRunId: context.heartbeatRunId,

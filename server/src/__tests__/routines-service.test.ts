@@ -35,6 +35,8 @@ import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
 import { routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
+import type { VectorWorkloadRoutineDispatcher } from "../services/vector-workload-routine-dispatch.ts";
+import type { VectorScheduleRoutineDispatcher } from "../services/vector-schedule-routine-dispatch.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -109,6 +111,8 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         contextSnapshot?: Record<string, unknown>;
       },
     ) => Promise<unknown>;
+    vectorWorkloadDispatcher?: VectorWorkloadRoutineDispatcher;
+    vectorScheduleDispatcher?: VectorScheduleRoutineDispatcher;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -157,6 +161,8 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
     const svc = routineService(db, {
       runtimeEnv: opts?.runtimeEnv,
+      vectorWorkloadDispatcher: opts?.vectorWorkloadDispatcher,
+      vectorScheduleDispatcher: opts?.vectorScheduleDispatcher,
       heartbeat: {
         wakeup: async (wakeupAgentId, wakeupOpts) => {
           wakeups.push({ agentId: wakeupAgentId, opts: wakeupOpts });
@@ -245,6 +251,91 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .returning()
       .then((rows) => rows[0]!);
   }
+
+  it("runs Vector workload pumps without creating issues and coalesces overlap", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const dispatch = vi.fn(async () => {
+      await gate;
+      return { claimed: 1, duplicate: false, state: "done" };
+    });
+    const { companyId, routine, svc } = await seedFixture({
+      vectorWorkloadDispatcher: { dispatch },
+    });
+    await db.update(routines).set({
+      originKind: "vector_workload_dispatch",
+      originId: "research",
+    }).where(eq(routines.id, routine.id));
+
+    const firstRun = svc.runRoutine(routine.id, { source: "api" });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1));
+    const overlap = await svc.runRoutine(routine.id, { source: "api" });
+    expect(overlap.status).toBe("coalesced");
+    release();
+    await expect(firstRun).resolves.toMatchObject({ status: "completed", linkedIssueId: null });
+
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      routineId: routine.id,
+      companyId,
+      queue: "research",
+    }));
+    expect(await db.select().from(issues).where(eq(issues.companyId, companyId))).toHaveLength(0);
+    const runs = await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id));
+    expect(runs.map((run) => run.status).sort()).toEqual(["coalesced", "completed"]);
+  });
+
+  it("fails a stale Vector workload pump before dispatching recovery", async () => {
+    const dispatch = vi.fn(async () => ({ claimed: 0, duplicate: false, state: "done" }));
+    const { companyId, routine, svc } = await seedFixture({
+      vectorWorkloadDispatcher: { dispatch },
+    });
+    await db.update(routines).set({
+      originKind: "vector_workload_dispatch",
+      originId: "tasks",
+    }).where(eq(routines.id, routine.id));
+    const staleId = randomUUID();
+    await db.insert(routineRuns).values({
+      id: staleId,
+      companyId,
+      routineId: routine.id,
+      source: "schedule",
+      status: "running",
+      triggeredAt: new Date(Date.now() - 20 * 60 * 1000),
+      updatedAt: new Date(Date.now() - 20 * 60 * 1000),
+    });
+
+    await expect(svc.runRoutine(routine.id, { source: "api" })).resolves.toMatchObject({ status: "completed" });
+    const stale = await db.select().from(routineRuns).where(eq(routineRuns.id, staleId)).then((rows) => rows[0]);
+    expect(stale).toMatchObject({
+      status: "failed",
+      failureReason: "Vector control callback exceeded its bounded dispatch window",
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs a sealed Vector schedule without creating an issue", async () => {
+    const dispatch = vi.fn(async () => ({
+      accepted: false, skipped: true, duplicate: false, state: "skipped", reason: "not_due",
+    }));
+    const { companyId, routine, svc } = await seedFixture({
+      vectorScheduleDispatcher: { dispatch },
+    });
+    await db.update(routines).set({
+      originKind: "vector_schedule_dispatch",
+      originId: "fa_research_daily",
+    }).where(eq(routines.id, routine.id));
+
+    await expect(svc.runRoutine(routine.id, { source: "schedule" })).resolves.toMatchObject({
+      status: "completed",
+      linkedIssueId: null,
+    });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      routineId: routine.id,
+      companyId,
+      scheduleKey: "fa_research_daily",
+    }));
+    expect(await db.select().from(issues).where(eq(issues.companyId, companyId))).toHaveLength(0);
+  });
 
   it("clears transient routine run failures when execution issues resume", async () => {
     const { companyId, issueSvc, routine, svc } = await seedFixture();

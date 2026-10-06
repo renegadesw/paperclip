@@ -49,6 +49,13 @@ agent role names, company permissions, or frontend behavior. Vector OS remains
 responsible for assigning the correct deployment profile to each installed
 runtime; Paperclip enforces the resulting Pi launch surface.
 
+For every `vector-embedded` RPC run, Paperclip also projects the server process
+environment onto a closed child allowlist. The Pi process receives basic host
+execution variables, common model-provider variables, and explicit run/workspace
+capabilities only. Database URLs, migration authority, ingress and tool-bridge
+HMAC secrets, Gleiss credentials, and unknown future server variables are not
+inherited. A spawned-process regression test checks this boundary.
+
 ## Packaged extension hook
 
 Restricted profiles expose no extension tools by default. A future
@@ -65,6 +72,7 @@ The value is a JSON array:
     "path": "/opt/vector/paperclip/extensions/vector-chat.js",
     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "tools": ["vector_chat_read"],
+    "delivery": "callback",
     "permissions": { "filesystem": false, "shell": false }
   }
 ]

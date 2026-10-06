@@ -1,8 +1,10 @@
 import { pgTable, uuid, text, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { vectorInstallationColumn } from "../vector-installation-column.js";
 
 export const instanceUserRoles = pgTable(
   "instance_user_roles",
   {
+    vectorInstallationId: vectorInstallationColumn(),
     id: uuid("id").primaryKey().defaultRandom(),
     userId: text("user_id").notNull(),
     role: text("role").notNull().default("instance_admin"),

@@ -1,6 +1,7 @@
 import * as controllerLeases from "../services/legacy-controller-lease.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { issueService } from "../services/issues.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
@@ -22,6 +23,7 @@ import {
 import {
   activityLog,
   agents,
+  assets,
   agentTaskSessions,
   agentRuntimeState,
   agentWakeupRequests,
@@ -54,6 +56,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueAttachments,
   issueApprovals,
   issueDocuments,
   issuePlanDecompositions,
@@ -76,6 +79,7 @@ import {
   workAssessments,
   workspaceOperations,
 } from "@paperclipai/db";
+import type { StorageService } from "../storage/index.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -562,6 +566,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(documentAnnotationAnchorSnapshots);
     await db.delete(documentAnnotationThreads);
     await db.delete(issueWorkProducts);
+    await db.delete(issueAttachments);
+    await db.delete(assets);
     await db.delete(issueComments);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
@@ -806,6 +812,74 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     return { environmentId, leaseId };
   }
+
+  it("hydrates owned Vector images when a queued run is recovered by another heartbeat instance", async () => {
+    const fixture = await seedRunFixture({
+      adapterType: "pi_local",
+      agentStatus: "idle",
+      runStatus: "queued",
+    });
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const commentId = randomUUID();
+    const assetId = randomUUID();
+    const attachmentId = randomUUID();
+    const objectKey = `${fixture.companyId}/vector-ingress/${fixture.issueId}/test-image`;
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId: fixture.companyId,
+      issueId: fixture.issueId,
+      authorUserId: "responsible-user",
+      authorType: "user",
+      body: "Describe this image",
+    });
+    await db.insert(assets).values({
+      id: assetId,
+      companyId: fixture.companyId,
+      provider: "local_disk",
+      objectKey,
+      contentType: "image/jpeg",
+      byteSize: bytes.length,
+      sha256,
+      originalFilename: `vector-ingress-image-001-${sha256.slice(0, 16)}.jpg`,
+      createdByUserId: "responsible-user",
+    });
+    await db.insert(issueAttachments).values({
+      id: attachmentId,
+      companyId: fixture.companyId,
+      issueId: fixture.issueId,
+      issueCommentId: commentId,
+      assetId,
+    });
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: {
+        issueId: fixture.issueId,
+        wakeCommentId: commentId,
+        vectorIngressImageAttachmentIds: [attachmentId],
+      },
+    }).where(eq(heartbeatRuns.id, fixture.runId));
+
+    const storage = {
+      provider: "local_disk",
+      async getObject(companyId: string, requestedKey: string) {
+        if (companyId !== fixture.companyId || requestedKey !== objectKey) throw new Error("wrong image authority");
+        return { stream: Readable.from([bytes]) };
+      },
+    } as StorageService;
+    let observedImages: unknown;
+    mockAdapterExecute.mockImplementationOnce(async (input) => {
+      observedImages = (input as { context?: Record<string, unknown> }).context?.vectorIngressImages;
+      return {
+        exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Recovered image turn.", provider: "test", model: "test-model",
+      };
+    });
+    const recovered = heartbeatService(db, { vectorImageStorage: storage });
+    await recovered.resumeQueuedRuns();
+    await recovered.drainActiveRunExecutions();
+    expect(observedImages).toEqual([{ type: "image", data: "/9j/AA==", mimeType: "image/jpeg" }]);
+    expect(JSON.stringify(await recovered.getRun(fixture.runId))).not.toContain("/9j/AA==");
+  });
 
   it("does not reap active adapter executions started by another heartbeat service instance", async () => {
     let releaseAdapter: (() => void) | null = null;

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { loadLocalAppBrandAssets, type LocalAppBrandAssets } from "@/lib/app-brand-assets";
 import { cn } from "@/lib/utils";
+import { paperclipPath } from "@/lib/base-path";
 
 const TILE_COLORS = [
   "bg-(--app-logo-tile-1)",
@@ -43,6 +44,7 @@ export function AppLogo({
   size = 36,
   className,
 }: AppLogoProps) {
+  const qualifyLogo = (value: string | null | undefined) => value?.startsWith("/") ? paperclipPath(value) : value;
   const [failedLogoUrls, setFailedLogoUrls] = useState<ReadonlySet<string>>(() => new Set());
   const lookupKey = brandKey?.trim() || name;
   const [localAssetResult, setLocalAssetResult] = useState<{
@@ -57,12 +59,12 @@ export function AppLogo({
   // chance to resolve this provider. Otherwise the browser requests the
   // remote asset during the first render even when a bundled mark exists.
   const resolvedLogoUrl = localLookupComplete
-    ? localAssets?.light ?? (allowRemoteFallback ? logoUrl : null)
+    ? localAssets?.light ?? (allowRemoteFallback ? qualifyLogo(logoUrl) : null)
     : null;
   const resolvedDarkLogoUrl = localLookupComplete
     ? localAssets
       ? localAssets.dark ?? localAssets.light
-      : (allowRemoteFallback ? darkLogoUrl : null)
+      : (allowRemoteFallback ? qualifyLogo(darkLogoUrl) : null)
     : null;
   const lightLogoUrlForRender = resolvedLogoUrl && !failedLogoUrls.has(resolvedLogoUrl)
     ? resolvedLogoUrl

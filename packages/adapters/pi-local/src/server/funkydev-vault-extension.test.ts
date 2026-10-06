@@ -15,7 +15,7 @@ describe("bundled FunkyDev Vault extension contract", () => {
   it("pins the packaged source digest and checks real paths before reads", async () => {
     const source = await fs.readFile(extensionUrl);
     expect(createHash("sha256").update(source).digest("hex")).toBe(
-      "b1620c829005975722da51115dd57ab17783b76523a90f3abe3cbab043525ce9",
+      "8dd309b9ed85d93b85329bc0b0c1965e3947cf650ee54b233149b1b53d60fbb9",
     );
     expect(source.toString("utf8")).toContain("fs.realpath(candidate)");
   });

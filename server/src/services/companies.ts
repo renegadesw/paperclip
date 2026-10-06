@@ -39,7 +39,6 @@ import { isCloudManagedInstance } from "./cloud-instance.js";
 import {
   MAX_ISSUE_PREFIX_ATTEMPTS,
   deriveIssuePrefixBase,
-  isIssuePrefixConflict,
   issuePrefixSuffixForAttempt,
   pickAvailableIssuePrefix,
   rekeyCompanyIssueIdentifiers,
@@ -279,15 +278,16 @@ export function companyService(db: Db) {
     let suffix = 1;
     while (suffix <= MAX_ISSUE_PREFIX_ATTEMPTS) {
       const candidate = `${base}${issuePrefixSuffixForAttempt(suffix)}`;
-      try {
-        const rows = await db
-          .insert(companies)
-          .values({ ...data, issuePrefix: candidate })
-          .returning();
-        return rows[0];
-      } catch (error) {
-        if (!isIssuePrefixConflict(error)) throw error;
-      }
+      // Avoid aborting an enclosing provisioning transaction when two
+      // installation names derive the same prefix (e.g. Vector Engineering
+      // and Vector Standard Chat). Only this unique key is retryable; an
+      // identity collision or other constraint failure still propagates.
+      const rows = await db
+        .insert(companies)
+        .values({ ...data, issuePrefix: candidate })
+        .onConflictDoNothing({ target: companies.issuePrefix })
+        .returning();
+      if (rows[0]) return rows[0];
       suffix += 1;
     }
     throw new Error("Unable to allocate unique issue prefix");

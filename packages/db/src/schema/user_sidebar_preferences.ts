@@ -1,8 +1,10 @@
 import { pgTable, uuid, text, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
+import { vectorInstallationColumn } from "../vector-installation-column.js";
 
 export const userSidebarPreferences = pgTable(
   "user_sidebar_preferences",
   {
+    vectorInstallationId: vectorInstallationColumn(),
     id: uuid("id").primaryKey().defaultRandom(),
     userId: text("user_id").notNull(),
     companyOrder: jsonb("company_order").$type<string[]>().notNull().default([]),

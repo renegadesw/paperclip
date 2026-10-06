@@ -1,7 +1,8 @@
 import { getPageVisibility, getVisibilityHeaderValue } from "@/lib/page-visibility";
 import { tenantSessionRecovery } from "@/lib/tenant-session-recovery";
+import { paperclipApiPath, qualifyPublicPaths } from "@/lib/base-path";
 
-const BASE = "/api";
+const BASE = paperclipApiPath();
 
 export class ApiError extends Error {
   status: number;
@@ -66,7 +67,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     );
   }
   if (res.status === 204) return undefined as T;
-  return res.json();
+  return res.json().then((payload) => qualifyPublicPaths(payload) as T);
 }
 
 // --- In-tab request coalescing for identical safe GETs -----------------------

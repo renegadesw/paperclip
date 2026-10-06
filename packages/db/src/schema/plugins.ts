@@ -9,6 +9,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { PluginCategory, PluginStatus, PaperclipPluginManifestV1 } from "@paperclipai/shared";
+import { sql } from "drizzle-orm";
 
 /**
  * `plugins` table — stores one row per installed plugin.
@@ -23,6 +24,8 @@ import type { PluginCategory, PluginStatus, PaperclipPluginManifestV1 } from "@p
 export const plugins = pgTable(
   "plugins",
   {
+    vectorInstallationId: text("vector_installation_id").notNull()
+      .default(sql`coalesce(current_setting('paperclip.installation_id', true), '')`),
     id: uuid("id").primaryKey().defaultRandom(),
     pluginKey: text("plugin_key").notNull(),
     packageName: text("package_name").notNull(),
@@ -39,7 +42,7 @@ export const plugins = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    pluginKeyIdx: uniqueIndex("plugins_plugin_key_idx").on(table.pluginKey),
+    pluginKeyIdx: uniqueIndex("plugins_plugin_key_idx").on(table.vectorInstallationId, table.pluginKey),
     statusIdx: index("plugins_status_idx").on(table.status),
   }),
 );

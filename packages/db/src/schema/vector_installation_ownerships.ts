@@ -4,10 +4,9 @@ import { companies } from "./companies.js";
 /**
  * Immutable ownership of one Vector-managed Paperclip company.
  *
- * This is deliberately narrower than execution isolation. The existing
- * vector-embedded singleton remains the process-level scheduler guard; this
- * binding prevents a process from starting against another installation's
- * provisioned company while later execution-path scoping is audited.
+ * Runtime pools use this immutable binding in their restrictive RLS policies.
+ * The runtime role can read but cannot rewrite it. Startup also verifies the
+ * profile and agent roster before acquiring installation-scoped ownership.
  */
 export const vectorInstallationOwnerships = pgTable(
   "vector_installation_ownerships",

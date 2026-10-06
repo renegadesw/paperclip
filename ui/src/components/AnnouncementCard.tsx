@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useAnnouncementAnimation } from "@/hooks/useAnnouncementAnimation";
+import { paperclipApiPath } from "@/lib/base-path";
 
 export interface AnnouncementCardProps {
   announcement: Announcement;
@@ -30,7 +31,7 @@ function Action({ action, primary, onClick }: { action: AnnouncementAction; prim
 export function AnnouncementCard({ announcement, onDismiss, imageSrc, animationSrc, className }: AnnouncementCardProps) {
   const titleId = useId();
   const [failedImage, setFailedImage] = useState<string | null>(null);
-  const src = imageSrc ?? `/api/announcements/${encodeURIComponent(announcement.id)}/image`;
+  const src = imageSrc ?? paperclipApiPath(`/announcements/${encodeURIComponent(announcement.id)}/image`);
   const showImage = Boolean(announcement.image && failedImage !== src);
   const animationDocument = useAnnouncementAnimation(announcement, animationSrc);
   const showAnimation = Boolean(animationDocument);

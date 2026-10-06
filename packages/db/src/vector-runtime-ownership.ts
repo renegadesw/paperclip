@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { createHash } from "node:crypto";
 
 // Two stable positive int32 keys make the lock visible and diagnosable in
 // pg_locks without coupling ownership to a table in Vector's application DB.
@@ -11,7 +12,7 @@ export class VectorRuntimeOwnershipError extends Error {
   constructor() {
     super(
       "The vector-embedded Paperclip runtime is already owned by another server process. " +
-        "Only one Paperclip process may use this shared Vector database until installation-scoped scheduling is implemented.",
+        "Another process owns this installation, or a legacy unscoped process owns the shared database.",
     );
     this.name = "VectorRuntimeOwnershipError";
   }
@@ -28,16 +29,17 @@ export type VectorRuntimeOwnership = {
 };
 
 /**
- * Holds the temporary vector-embedded singleton gate on one reserved backend.
- *
- * This is intentionally not multi-install ownership. It prevents two server
- * processes sharing Vector's `llm` schema from claiming each other's work
- * until installation identity is carried through scheduling, claiming, and
- * recovery queries.
+ * The unscoped call retains the legacy exclusive database-wide gate. A scoped
+ * caller must first pass assertVectorRuntimeIsolation, then shares that gate
+ * (excluding legacy servers) and exclusively owns its company/installation.
  */
 export async function acquireVectorRuntimeOwnership(
   connectionString: string,
+  scope?: { companyId: string; installationId: string },
 ): Promise<VectorRuntimeOwnership> {
+  const scopedKey = scope ? createHash("sha256")
+    .update(`paperclip-vector-owner-v1\0${scope.companyId}\0${scope.installationId}`)
+    .digest().readBigInt64BE().toString() : null;
   let released = false;
   let acquired = false;
   let ownershipLost = false;
@@ -71,13 +73,23 @@ export async function acquireVectorRuntimeOwnership(
   let reserved: Awaited<ReturnType<typeof client.reserve>> | null = null;
   try {
     reserved = await client.reserve();
-    const rows = await reserved<{ acquired: boolean }[]>`
+    const rows = scope ? await reserved<{ acquired: boolean }[]>`
+      SELECT pg_try_advisory_lock_shared(
+        ${VECTOR_RUNTIME_LOCK_CLASS_ID}, ${VECTOR_RUNTIME_LOCK_OBJECT_ID}
+      ) AS acquired
+    ` : await reserved<{ acquired: boolean }[]>`
       SELECT pg_try_advisory_lock(
         ${VECTOR_RUNTIME_LOCK_CLASS_ID},
         ${VECTOR_RUNTIME_LOCK_OBJECT_ID}
       ) AS acquired
     `;
     if (rows[0]?.acquired !== true) throw new VectorRuntimeOwnershipError();
+    if (scopedKey !== null) {
+      const scoped = await reserved<{ acquired: boolean }[]>`
+        SELECT pg_try_advisory_lock(${scopedKey}::bigint) AS acquired
+      `;
+      if (!scoped[0]?.acquired) throw new VectorRuntimeOwnershipError();
+    }
     acquired = true;
   } catch (error) {
     reserved?.release();
@@ -92,12 +104,8 @@ export async function acquireVectorRuntimeOwnership(
       released = true;
       try {
         if (!ownershipLost) {
-          await reserved!`
-            SELECT pg_advisory_unlock(
-              ${VECTOR_RUNTIME_LOCK_CLASS_ID},
-              ${VECTOR_RUNTIME_LOCK_OBJECT_ID}
-            )
-          `;
+          // This dedicated reserved backend holds only the gates acquired above.
+          await reserved!`SELECT pg_advisory_unlock_all()`;
         }
       } finally {
         reserved!.release();

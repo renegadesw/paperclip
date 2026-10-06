@@ -5,6 +5,9 @@ import path from "node:path";
 const require = createRequire(import.meta.url);
 
 function resolveNativePackageName(): string | null {
+  if (process.platform === "darwin" && (process.arch === "arm64" || process.arch === "x64")) {
+    return `darwin-${process.arch}`;
+  }
   if (process.platform !== "linux") return null;
 
   switch (process.arch) {
@@ -80,6 +83,34 @@ export async function prepareEmbeddedPostgresNativeRuntime(): Promise<void> {
   const libDir = path.join(nativeRoot, "native", "lib");
   if (!(await pathExists(libDir))) return;
 
-  prependPathEnv("LD_LIBRARY_PATH", libDir);
-  await ensureLinuxSharedLibraryAliases(libDir);
+  if (process.platform === "darwin") {
+    await ensureDarwinSharedLibraryAliases(libDir);
+  } else {
+    prependPathEnv("LD_LIBRARY_PATH", libDir);
+    await ensureLinuxSharedLibraryAliases(libDir);
+  }
+}
+
+// The npm native bundle contains versioned files but may omit the major-version
+// install-name symlinks that dyld follows between the bundled libraries.
+export async function ensureDarwinSharedLibraryAliases(libDir: string): Promise<string[]> {
+  const entries = await fs.readdir(libDir, { withFileTypes: true });
+  const created: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const match = /^(lib.+?)\.(\d+)(?:\.\d+)*\.dylib$/.exec(entry.name);
+    if (!match) continue;
+    for (const alias of [`${match[1]}.dylib`, `${match[1]}.${match[2]}.dylib`]) {
+      if (alias === entry.name) continue;
+      const aliasPath = path.join(libDir, alias);
+      try {
+        await fs.symlink(entry.name, aliasPath);
+        created.push(aliasPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw error;
+      }
+    }
+  }
+  return created;
 }

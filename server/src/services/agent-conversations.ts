@@ -471,6 +471,7 @@ export async function deliverConversationComments(
       contextSnapshot: Record<string, unknown>;
     },
   ) => Promise<unknown>,
+  contextAugment: Record<string, unknown> = {},
 ) {
   if (!issue.conversationAgentId) return;
   for (;;) {
@@ -496,6 +497,7 @@ export async function deliverConversationComments(
           requestedByActorId: comment.authorUserId,
           payload: { issueId: issue.id, commentId: comment.id },
           contextSnapshot: {
+            ...contextAugment,
             issueId: issue.id,
             taskKey: issue.id,
             commentId: comment.id,

@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { HeartbeatRun } from "@paperclipai/shared";
 import { useNavigate } from "@/lib/router";
+import { paperclipPath } from "@/lib/base-path";
 import { issuesApi } from "../api/issues";
 import { executionWorkspacesApi } from "../api/execution-workspaces";
 import { accessApi } from "../api/access";
@@ -258,7 +259,7 @@ export function RunWorkspaceRecoverySurface({ run }: { run: HeartbeatRun }) {
         <span className="text-xs font-medium text-muted-foreground">Workspace recovery</span>
         {issue?.identifier ? (
           <a
-            href={`/issues/${issue.identifier}`}
+            href={paperclipPath(`/issues/${issue.identifier}`)}
             className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
             onClick={(event) => {
               event.preventDefault();

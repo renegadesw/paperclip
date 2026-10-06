@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "manifestRevision": 8,
+  "installationId": "t480-engineering",
+  "profile": "engineering",
+  "company": {
+    "id": "12d42db4-38df-5ae1-9b10-204b6f2e5d0c",
+    "name": "Vector Engineering",
+    "description": "Vector engineering control plane for the t480 FunkyDev installation.",
+    "budgetMonthlyCents": 0,
+    "mutableFields": []
+  },
+  "agent": {
+    "id": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+    "name": "FunkyDev",
+    "role": "engineer",
+    "title": "Standing Vector engineer",
+    "capabilities": "Repository engineering and operator collaboration through the sealed engineering Pi surface.",
+    "adapterType": "pi_local",
+    "adapterConfig": {
+      "model": "router/Qwen3.8-Flash",
+      "thinking": "high",
+      "executionMode": "rpc",
+      "cwd": "/home/funkydev"
+    },
+    "instructions": {
+      "path": "paperclip/profile-assets/engineering/funkydev/AGENTS.md",
+      "sha256": "1e1ad327615732515987ff6be594a54e5c475be02bc8119180206ce6b3868661"
+    },
+    "runtimeConfig": {
+      "heartbeat": {
+        "enabled": false,
+        "wakeOnDemand": true,
+        "maxConcurrentRuns": 1
+      }
+    },
+    "budgetMonthlyCents": 0,
+    "permissions": {
+      "canCreateAgents": false,
+      "canCreateSkills": false
+    },
+    "mutableFields": [],
+    "operatorOwnedAdapterConfigKeys": ["model", "thinking"]
+  },
+  "toolPolicy": {
+    "profile": "engineering",
+    "builtinTools": [
+      "bash",
+      "edit",
+      "find",
+      "grep",
+      "ls",
+      "read",
+      "write"
+    ],
+    "extensions": [
+      {
+        "name": "funkydev.vault-reference",
+        "tools": [
+          "vault_read",
+          "vault_search"
+        ],
+        "permissions": {
+          "filesystem": true,
+          "shell": false
+        }
+      },
+      {
+        "name": "vector.tool-bridge",
+        "tools": [
+          "ask_user",
+          "memory_forget",
+          "memory_save",
+          "memory_search",
+          "todo_add",
+          "todo_list",
+          "todo_mark_done",
+          "todo_update"
+        ],
+        "permissions": {
+          "filesystem": false,
+          "shell": false
+        }
+      },
+      {
+        "name": "vector.speak",
+        "tools": [
+          "speak"
+        ],
+        "permissions": {
+          "filesystem": false,
+          "shell": false
+        }
+      }
+    ]
+  }
+}

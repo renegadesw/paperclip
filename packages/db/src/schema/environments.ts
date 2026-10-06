@@ -4,6 +4,8 @@ import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizz
 export const environments = pgTable(
   "environments",
   {
+    vectorInstallationId: text("vector_installation_id").notNull()
+      .default(sql`coalesce(current_setting('paperclip.installation_id', true), '')`),
     id: uuid("id").primaryKey().defaultRandom(),
     name: text("name").notNull(),
     description: text("description"),
@@ -18,13 +20,13 @@ export const environments = pgTable(
   (table) => ({
     statusIdx: index("environments_status_idx").on(table.status),
     localDriverIdx: uniqueIndex("environments_local_driver_idx")
-      .on(table.driver)
+      .on(table.vectorInstallationId, table.driver)
       .where(sql`${table.driver} = 'local'`),
     managedSandboxIdx: uniqueIndex("environments_managed_sandbox_idx")
-      .on(table.driver)
+      .on(table.vectorInstallationId, table.driver)
       .where(
         sql`${table.driver} = 'sandbox' AND (${table.metadata} ->> 'managedByPaperclip')::boolean = true`,
       ),
-    nameIdx: uniqueIndex("environments_name_idx").on(table.name),
+    nameIdx: uniqueIndex("environments_name_idx").on(table.vectorInstallationId, table.name),
   }),
 );

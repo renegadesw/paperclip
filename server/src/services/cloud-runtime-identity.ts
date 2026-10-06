@@ -408,7 +408,7 @@ export async function applyCloudRuntimeIdentityAssertion(input: {
         createdAt: now,
         updatedAt: now,
       })
-      .onConflictDoNothing({ target: instanceSettings.singletonKey });
+      .onConflictDoNothing({ target: [instanceSettings.vectorInstallationId, instanceSettings.singletonKey] });
     const durable = await readPersistedIdentity(tx);
     if (!durable || !assertionsEqual(durable, claims)) {
       throw new Error("Cloud runtime identity is already claimed by another assertion");

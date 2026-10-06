@@ -1,3 +1,5 @@
+import { paperclipPath } from "./base-path";
+
 type BrowserLocationLike = Pick<Location, "host" | "hostname" | "port" | "protocol">;
 
 function isWildcardHost(hostname: string): boolean {
@@ -15,6 +17,6 @@ export function buildSameOriginWebSocketUrl(
   location: BrowserLocationLike = window.location,
 ): string {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const normalizedPath = paperclipPath(path.startsWith("/") ? path : `/${path}`);
   return `${protocol}://${browserReachableHost(location)}${normalizedPath}`;
 }

@@ -1,3 +1,4 @@
+import { localBoardUserId } from "../local-board-identity.js";
 import { createHash } from "node:crypto";
 import {
   and,
@@ -13,22 +14,48 @@ import {
   sql,
 } from "drizzle-orm";
 import {
+  agentTaskSessions,
   agentWakeupRequests,
   agents,
+  assets,
   heartbeatRunEvents,
   heartbeatRuns,
   issueAttachments,
   issueComments,
   issues,
   vectorIngressConversations,
+  vectorIngressBranchHeads,
+  vectorIngressBranchTurns,
   vectorIngressTurns,
   type Db,
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
+import { isVectorFunkyServerProfile } from "@paperclipai/adapter-utils/vector-profiles";
 import { deliverConversationComments } from "./agent-conversations.js";
 import { heartbeatService } from "./heartbeat.js";
 import { issueService } from "./issues.js";
 import { logActivity } from "./activity-log.js";
+import type { VectorToolPendingDescriptor } from "./vector-tool-authority.js";
+import type { VectorProviderPendingDescriptor } from "./vector-provider-authority.js";
+import type { StorageService } from "../storage/index.js";
+import {
+  isVectorIngressImageAsset,
+  validateVectorIngressImages,
+  type VectorIngressImageInput,
+} from "./vector-ingress-images.js";
+import {
+  VECTOR_LEGACY_PI_CONTEXT_ORIGIN,
+  type VectorLegacyPiContextImporter,
+  type VectorLegacyPiContextImportResult,
+} from "./vector-legacy-pi-context.js";
+import { vectorIngressOwnerSha256 } from "./vector-ingress-owner.js";
+import {
+  vectorSessionBranchService,
+  type VectorSessionBranchService,
+} from "./vector-session-branches.js";
+
+export { vectorIngressOwnerSha256, type VectorIngressOwnerBinding } from "./vector-ingress-owner.js";
+import type { VectorIngressOwnerBinding } from "./vector-ingress-owner.js";
 
 const VECTOR_INGRESS_ACTOR_ID = "vector-ingress";
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
@@ -51,9 +78,64 @@ export interface VectorIngressOwnerScope {
 }
 
 export interface VectorIngressTurnInput extends VectorIngressScope {
+  voiceActive?: boolean;
   clientRequestId: string;
   body: string;
   attachmentIds?: string[];
+  images?: VectorIngressImageInput[];
+  authorityHandle?: string;
+  authorityTools?: string[];
+  providerAuthorityHandle?: string;
+  launchContext?: VectorWorkloadLaunchContext;
+  roleContext?: VectorRoleTurnContext;
+  personaContext?: VectorPersonaTurnContext;
+  repositoryContext?: VectorRepositoryContext;
+  baseCursor?: number;
+  runtimeSelection?: VectorRuntimeSelection;
+}
+
+export interface VectorRepositoryContext {
+  schemaVersion: 1;
+  repository: string;
+}
+
+export interface VectorRuntimeSelection {
+  model: string;
+  thinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+}
+
+export interface VectorWorkloadLaunchContext {
+  schemaVersion: 1;
+  workloadKey: string;
+  queue: "research" | "tasks";
+  taskId: string;
+  attempt: number;
+  leaseTokenSha256: string;
+  role: string;
+  model: string;
+  tools: string[];
+  noBuiltinTools: boolean;
+  systemPrompt: string;
+  metadata: Record<string, string>;
+}
+
+export interface VectorRoleTurnContext {
+  schemaVersion: 1;
+  role: string;
+  model: string;
+  noBuiltinTools: boolean;
+  systemPrompt: string;
+  metadata: Record<string, string>;
+}
+
+export interface VectorPersonaTurnContext {
+  schemaVersion: 1;
+  personaId: string;
+  personaName: string;
+  personaVersion: string;
+  model: string;
+  noBuiltinTools: true;
+  systemPrompt: string;
 }
 
 export interface VectorIngressCancelInput extends VectorIngressScope {
@@ -63,6 +145,7 @@ export interface VectorIngressCancelInput extends VectorIngressScope {
 export interface VectorIngressEventsInput extends VectorIngressScope {
   afterSeq?: number;
   limit?: number;
+  turnId?: number;
 }
 
 export interface VectorIngressCursorPosition {
@@ -80,6 +163,14 @@ export interface VectorIngressTranscriptInput extends VectorIngressOwnerScope {
   externalSessionId: string;
   after?: VectorIngressCursorPosition;
   limit?: number;
+}
+
+export interface VectorIngressLegacyPiContextInput extends VectorIngressOwnerScope {
+  externalSessionId: string;
+  legacyService: "nexuslink-chat" | "funky";
+  legacyPiSessionId: string;
+  /** Owner of the retained legacy session as read from its own row, not the caller. */
+  legacyOwnerId: string;
 }
 
 export interface VectorIngressHeartbeat {
@@ -207,6 +298,33 @@ function projectVectorTranscriptMessage(
   return eventType === "error" ? "Agent run failed" : null;
 }
 
+export interface VectorIngressToolAuthority {
+  registerPending(input: VectorIngressScope & {
+    issueId: string;
+    commentId: string;
+    authorityHandle: string;
+    allowedTools: readonly string[];
+  }): VectorToolPendingDescriptor;
+  bindRun(input: VectorIngressScope & {
+    issueId: string;
+    runId: string;
+    authorityHandle: string;
+  }): Promise<void>;
+}
+
+export interface VectorIngressProviderAuthority {
+  registerPending(input: VectorIngressScope & {
+    issueId: string;
+    commentId: string;
+    authorityHandle: string;
+  }): VectorProviderPendingDescriptor;
+  bindRun(input: VectorIngressScope & {
+    issueId: string;
+    runId: string;
+    authorityHandle: string;
+  }): Promise<void>;
+}
+
 export interface VectorIngressTurnResult {
   companyId: string;
   agentId: string;
@@ -218,6 +336,9 @@ export interface VectorIngressTurnResult {
   wakeupStatus: string | null;
   sessionGeneration: number;
   replayed: boolean;
+  turnId: number;
+  baseCursor: number;
+  ownerBinding: VectorIngressOwnerBinding | null;
 }
 
 /**
@@ -245,21 +366,6 @@ export function vectorConversationOwnerId(input: VectorIngressScope): string {
   return `vector:${digest.digest("base64url")}`;
 }
 
-export function vectorIngressOwnerSha256(input: VectorIngressOwnerScope): string {
-  return createHash("sha256")
-    .update("paperclip-vector-ingress-owner/v1\0")
-    .update(input.companyId)
-    .update("\0")
-    .update(input.agentId)
-    .update("\0")
-    .update(input.installationId.trim())
-    .update("\0")
-    .update(input.profileId.trim())
-    .update("\0")
-    .update(input.ownerId.trim())
-    .digest("hex");
-}
-
 function sorted(values: readonly string[]) {
   return [...values].sort();
 }
@@ -283,20 +389,39 @@ function hasCompleteOwnerScope(
   return complete;
 }
 
+function ownerBindingOf(
+  mapping: { ownerSha256: string; externalSessionId: string } | null | undefined,
+): VectorIngressOwnerBinding | null {
+  return mapping ? { ownerSha256: mapping.ownerSha256, externalSessionId: mapping.externalSessionId } : null;
+}
+
 export function vectorIngressService(
   db: Db,
   options: {
     heartbeat?: VectorIngressHeartbeat;
     responsibleUserId?: string;
+    toolAuthority?: VectorIngressToolAuthority;
+    providerAuthority?: VectorIngressProviderAuthority;
+    legacyContextImporter?: VectorLegacyPiContextImporter;
+    storage?: StorageService;
+    sessionBranches?: VectorSessionBranchService;
   } = {},
 ) {
   const issuesSvc = issueService(db);
   const heartbeat = options.heartbeat ?? heartbeatService(db);
-  const responsibleUserId = options.responsibleUserId?.trim() || "local-board";
+  const responsibleUserId = options.responsibleUserId?.trim() || localBoardUserId();
+  const sessionBranches = options.sessionBranches ?? vectorSessionBranchService(db);
 
   async function assertTargetAgent(scope: VectorIngressScope) {
     const agent = await db
-      .select({ id: agents.id, name: agents.name, status: agents.status })
+      .select({
+        id: agents.id,
+        name: agents.name,
+        role: agents.role,
+        status: agents.status,
+        adapterConfig: agents.adapterConfig,
+        metadata: agents.metadata,
+      })
       .from(agents)
       .where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)))
       .then((rows) => rows[0] ?? null);
@@ -309,6 +434,221 @@ export function vectorIngressService(
     return agent;
   }
 
+  async function assertWorkloadLaunch(input: VectorIngressTurnInput) {
+    if (!input.launchContext) return;
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector workload launch requires complete owner scope", {
+        code: "vector_workload_owner_scope_required",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const workloads = eventPayloadRecord(metadata.vectorWorkloads);
+    if (
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId
+    ) {
+      throw conflict("Vector workload launch does not match provisioned installation", {
+        code: "vector_workload_installation_mismatch",
+      });
+    }
+    const contracts = Array.isArray(workloads.contracts)
+      ? workloads.contracts.map(eventPayloadRecord)
+      : [];
+    const contract = contracts.find((candidate) => candidate.key === input.launchContext?.workloadKey);
+    if (!contract || contract.runtimeAuthority !== "vector_lease_triple") {
+      throw conflict("Vector workload is not assigned to this agent", {
+        code: "vector_workload_agent_mismatch",
+      });
+    }
+    const expectedQueue = contract.kind === "research_task" ? "research" : "tasks";
+    const expectedTools = Array.isArray(contract.toolSurface)
+      ? contract.toolSurface.filter((value): value is string => typeof value === "string").sort()
+      : [];
+    const actualTools = [...new Set(input.launchContext.tools)].sort();
+    const policyModel = typeof contract.modelPolicy === "string" ? contract.modelPolicy : "";
+    if (
+      agent.role !== input.launchContext.role ||
+      contract.role !== input.launchContext.role ||
+      input.launchContext.queue !== expectedQueue ||
+      !sameStrings(expectedTools, actualTools) ||
+      input.launchContext.tools.length !== actualTools.length ||
+      input.launchContext.model !== policyModel ||
+      input.launchContext.metadata.task_id !== input.launchContext.taskId ||
+      input.launchContext.metadata.attempt !== String(input.launchContext.attempt)
+    ) {
+      throw conflict("Vector workload launch differs from the provisioned contract", {
+        code: "vector_workload_contract_mismatch",
+      });
+    }
+  }
+
+  async function assertRoleTurn(input: VectorIngressTurnInput) {
+    if (!input.roleContext) return;
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector role turn requires complete owner scope", {
+        code: "vector_role_owner_scope_required",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const adapterConfig = eventPayloadRecord(agent.adapterConfig);
+    const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
+    // Role turns are a Funky server surface (staging and production): the
+    // turn must name the target agent's own provisioned role and carry no
+    // builtin tools. Engineering (the FunkyDev software org; FunkyDev's alias
+    // is `pi`) and standard (standard-chat) never accept one.
+    if (
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId ||
+      !isVectorFunkyServerProfile(input.profileId) ||
+      input.roleContext.noBuiltinTools !== true ||
+      agent.role !== input.roleContext.role ||
+      (input.roleContext.model !== "" && input.roleContext.model !== configuredModel)
+    ) {
+      throw conflict("Vector role turn differs from the provisioned agent contract", {
+        code: "vector_role_contract_mismatch",
+      });
+    }
+  }
+
+  async function assertRepositoryContext(input: VectorIngressTurnInput) {
+    if (!input.repositoryContext) return;
+    if (!hasCompleteOwnerScope(input) || input.profileId !== "engineering") {
+      throw conflict("Vector repository context requires engineering owner scope", {
+        code: "vector_repository_scope_mismatch",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const repository = input.repositoryContext.repository;
+    if (
+      input.repositoryContext.schemaVersion !== 1 ||
+      repository.trim() !== repository ||
+      repository.length > 201 ||
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+      repository.split("/").some((part) => part === "." || part === "..") ||
+      // NexusLink repository work reaches only FunkyDev, never another seat of
+      // the engineering org.
+      agent.role !== "engineer" ||
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId ||
+      input.roleContext !== undefined
+    ) {
+      throw conflict("Vector repository context differs from the provisioned engineering contract", {
+        code: "vector_repository_contract_mismatch",
+      });
+    }
+  }
+
+  async function assertPersonaTurn(
+    input: VectorIngressTurnInput,
+    personaContext: VectorPersonaTurnContext,
+  ) {
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector persona turn requires complete owner scope", {
+        code: "vector_persona_owner_scope_required",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const metadata = eventPayloadRecord(agent.metadata);
+    const provisioning = eventPayloadRecord(metadata.vectorProvisioning);
+    const adapterConfig = eventPayloadRecord(agent.adapterConfig);
+    const configuredModel = typeof adapterConfig.model === "string" ? adapterConfig.model : "";
+    if (
+      provisioning.schemaVersion !== 1 ||
+      provisioning.installationId !== input.installationId ||
+      provisioning.profile !== input.profileId ||
+      input.profileId !== "standard" ||
+      agent.role !== "standard-chat" ||
+      !configuredModel.startsWith("router/") ||
+      !/^router\/[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(personaContext.model) ||
+      personaContext.noBuiltinTools !== true
+    ) {
+      throw conflict("Vector persona turn differs from the provisioned agent contract", {
+        code: "vector_persona_contract_mismatch",
+      });
+    }
+  }
+
+  async function assertRuntimeSelection(
+    input: VectorIngressScope,
+    selection: VectorRuntimeSelection,
+  ) {
+    if (!hasCompleteOwnerScope(input) || (input.profileId !== "standard" && input.profileId !== "engineering")) {
+      throw conflict("Vector runtime selection requires an admitted owner scope", {
+        code: "vector_runtime_selection_scope_mismatch",
+      });
+    }
+    const agent = await assertTargetAgent(input);
+    const configured = eventPayloadRecord(agent.adapterConfig);
+    // Runtime selection is a NexusLink control of the primary agent only
+    // (FunkyDev on engineering); the org's other seats keep their seeded or
+    // board-owned model and thinking.
+    if (
+      (input.profileId === "standard"
+        ? agent.role !== "standard-chat"
+        : agent.role !== "engineer") ||
+      typeof configured.model !== "string" ||
+      !configured.model.startsWith("router/") ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(selection.model)
+    ) {
+      throw conflict("Vector runtime selection differs from the provisioned contract", {
+        code: "vector_runtime_selection_contract_mismatch",
+      });
+    }
+  }
+
+  function persistedPersonaContext(raw: unknown): VectorPersonaTurnContext | null {
+    const value = eventPayloadRecord(raw);
+    const keys = Object.keys(value).sort();
+    const expected = ["model", "noBuiltinTools", "personaId", "personaName", "personaVersion", "schemaVersion", "systemPrompt"];
+    if (
+      !sameStrings(keys, expected) || value.schemaVersion !== 1 ||
+      typeof value.personaId !== "string" || typeof value.personaName !== "string" ||
+      typeof value.personaVersion !== "string" || typeof value.model !== "string" ||
+      value.noBuiltinTools !== true || typeof value.systemPrompt !== "string"
+    ) return null;
+    return value as unknown as VectorPersonaTurnContext;
+  }
+
+  async function resolvePersonaTurn(
+    input: VectorIngressTurnInput,
+    issue: { id: string },
+  ): Promise<VectorPersonaTurnContext | null> {
+    const priorRun = await latestConversationRun(input, issue);
+    const prior = persistedPersonaContext(priorRun?.contextSnapshot?.vectorPersonaTurn);
+    const requested = input.personaContext ?? null;
+    if (
+      requested && prior &&
+      (requested.schemaVersion !== prior.schemaVersion ||
+        requested.personaId !== prior.personaId ||
+        requested.personaName !== prior.personaName ||
+        requested.personaVersion !== prior.personaVersion ||
+        requested.model !== prior.model ||
+        requested.noBuiltinTools !== prior.noBuiltinTools ||
+        requested.systemPrompt !== prior.systemPrompt)
+    ) {
+      throw conflict("Vector persona cannot change within an existing conversation", {
+        code: "vector_persona_continuity_mismatch",
+      });
+    }
+    const effective = requested ?? prior;
+    if (!effective && input.profileId === "standard") {
+      throw conflict("Vector standard-chat requires an admitted persona", {
+        code: "vector_persona_required",
+      });
+    }
+    if (effective) await assertPersonaTurn(input, effective);
+    return effective;
+  }
+
   async function getConversation(scope: VectorIngressScope) {
     const ownerId = vectorConversationOwnerId(scope);
     const issue = await issuesSvc.getConversation(
@@ -319,12 +659,35 @@ export function vectorIngressService(
     return { issue, ownerId };
   }
 
+  /**
+   * The engineering session alias of the target agent: `pi` for FunkyDev (the
+   * org's `engineer`), none for the other engineering seats or other profiles.
+   */
+  async function engineeringSessionAlias(scope: VectorIngressScope): Promise<"pi" | null> {
+    if (scope.profileId !== "engineering") return null;
+    const role = await db
+      .select({ role: agents.role })
+      .from(agents)
+      .where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)))
+      .then((rows) => rows[0]?.role ?? null);
+    return role === "engineer" ? "pi" : null;
+  }
+
   async function bindConversationOwner(
     scope: VectorIngressScope & VectorIngressOwnerScope,
     issueId: string,
   ) {
     const ownerSha256 = vectorIngressOwnerSha256(scope);
-    await db
+    const turn = scope as Partial<VectorIngressTurnInput>;
+    // FunkyDev has exactly one session alias, `pi`. A NexusLink todo launch is
+    // an ordinary turn on the profile's primary agent (FunkyDev on engineering,
+    // standard-chat on standard) whose opening message is the todo brief. The
+    // todo binding is this durable externalSessionId mapping plus the
+    // run-scoped Vector tool authority minted for that todo. The other seats
+    // of the engineering org are not FunkyDev and never carry its alias.
+    const alias = await engineeringSessionAlias(scope);
+    const requestedRepository = turn.repositoryContext?.repository ?? null;
+    const inserted = await db
       .insert(vectorIngressConversations)
       .values({
         companyId: scope.companyId,
@@ -334,8 +697,11 @@ export function vectorIngressService(
         profileId: scope.profileId,
         ownerSha256,
         externalSessionId: scope.externalSessionId,
+        sessionRole: alias,
+        repository: requestedRepository,
       })
-      .onConflictDoNothing();
+      .onConflictDoNothing()
+      .returning({ id: vectorIngressConversations.id });
     const mapping = await db
       .select()
       .from(vectorIngressConversations)
@@ -352,6 +718,14 @@ export function vectorIngressService(
     ) {
       throw conflict("Vector conversation owner binding does not match", {
         code: "vector_ingress_owner_scope_mismatch",
+      });
+    }
+    if (
+      (scope.profileId === "engineering" && mapping.sessionRole !== null && mapping.sessionRole !== alias) ||
+      (inserted.length === 0 && requestedRepository !== null && mapping.repository !== requestedRepository)
+    ) {
+      throw conflict("Vector conversation role or repository binding does not match", {
+        code: "vector_ingress_session_binding_mismatch",
       });
     }
     return mapping;
@@ -412,6 +786,63 @@ export function vectorIngressService(
     return { issue, ownerId: existing.ownerId, created: true };
   }
 
+  async function importLegacyPiContext(
+    input: VectorIngressLegacyPiContextInput,
+  ): Promise<VectorLegacyPiContextImportResult & { ownerBinding: VectorIngressOwnerBinding | null }> {
+    const expectedService =
+      input.profileId === "engineering" || input.profileId === "standard"
+        ? "nexuslink-chat"
+        : isVectorFunkyServerProfile(input.profileId)
+          ? "funky"
+          : null;
+    if (!expectedService || input.legacyService !== expectedService) {
+      throw conflict("Vector legacy context profile is not eligible for import", {
+        code: "vector_legacy_context_profile_mismatch",
+      });
+    }
+    if (!options.legacyContextImporter) {
+      throw conflict("Vector legacy context import is unavailable", {
+        code: "vector_legacy_context_unavailable",
+      });
+    }
+    // The retained session must belong to the caller. Vector OS reports the
+    // session row's own owner separately from the authenticated caller, so a
+    // lookup that lost its owner filter is refused here instead of importing
+    // another owner's provider context.
+    if (!input.legacyOwnerId?.trim() || input.legacyOwnerId.trim() !== input.ownerId.trim()) {
+      throw conflict("Vector legacy context belongs to a different owner", {
+        code: "vector_legacy_context_owner_mismatch",
+      });
+    }
+    const { issue } = await resolveConversation(input);
+    const mapping = await bindConversationOwner(input, issue.id);
+    const imported = await options.legacyContextImporter.importContext({ ...input, issueId: issue.id });
+    return { ...imported, ownerBinding: ownerBindingOf(mapping) };
+  }
+
+  async function configureRuntime(
+    input: VectorIngressScope & VectorRuntimeSelection,
+  ) {
+    await assertRuntimeSelection(input, input);
+    if (!hasCompleteOwnerScope(input)) {
+      throw conflict("Vector runtime selection requires owner scope", { code: "vector_runtime_selection_scope_mismatch" });
+    }
+    const { issue } = await resolveConversation(input);
+    const mapping = await bindConversationOwner(input, issue.id);
+    const [updated] = await db.update(vectorIngressConversations).set({
+      model: input.model,
+      thinking: input.thinking,
+    }).where(and(
+      eq(vectorIngressConversations.id, mapping.id),
+      eq(vectorIngressConversations.issueId, issue.id),
+    )).returning({
+      model: vectorIngressConversations.model,
+      thinking: vectorIngressConversations.thinking,
+    });
+    if (!updated) throw notFound("Vector conversation not found");
+    return { companyId: input.companyId, agentId: input.agentId, issueId: issue.id, ...updated, ownerBinding: ownerBindingOf(mapping) };
+  }
+
   async function latestConversationRun(
     scope: VectorIngressScope,
     issue: { id: string },
@@ -435,16 +866,30 @@ export function vectorIngressService(
   }
 
   async function status(input: VectorIngressScope) {
-    const { issue } = hasCompleteOwnerScope(input)
-      ? await requireOwnedConversation(input)
-      : await requireConversation(input);
+    const owned = hasCompleteOwnerScope(input);
+    const resolved = owned ? await requireOwnedConversation(input) : await requireConversation(input);
+    const { issue } = resolved;
+    const mapping = owned ? (resolved as Awaited<ReturnType<typeof requireOwnedConversation>>).mapping : null;
     const run = await latestConversationRun(input, issue);
+    const legacyContextImported = issue.originFingerprint === VECTOR_LEGACY_PI_CONTEXT_ORIGIN &&
+      await db.select({ taskKey: agentTaskSessions.taskKey }).from(agentTaskSessions).where(and(
+        eq(agentTaskSessions.companyId, input.companyId),
+        eq(agentTaskSessions.agentId, input.agentId),
+        eq(agentTaskSessions.adapterType, "pi_local"),
+        eq(agentTaskSessions.taskKey, issue.id),
+      )).limit(1).then((rows) => rows.length === 1);
     return {
       companyId: input.companyId,
       agentId: input.agentId,
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       sessionGeneration: issue.conversationSessionGeneration,
+      legacyContextImported,
+      model: mapping?.model ?? null,
+      thinking: mapping?.thinking ?? null,
+      sessionRole: mapping?.sessionRole ?? (owned ? await engineeringSessionAlias(input) : null),
+      repository: mapping?.repository ?? null,
+      ownerBinding: ownerBindingOf(mapping),
       run: run
         ? {
             id: run.id,
@@ -456,14 +901,53 @@ export function vectorIngressService(
             createdAt: run.createdAt,
             startedAt: run.startedAt,
             finishedAt: run.finishedAt,
+            ...(await db.select({ turnId: vectorIngressTurns.turnId, baseCursor: vectorIngressTurns.baseCursor })
+              .from(vectorIngressTurns)
+              .where(eq(vectorIngressTurns.runId, run.id))
+              .limit(1)
+              .then((rows) => rows[0] ?? {})),
           }
         : null,
     };
   }
 
   async function events(input: VectorIngressEventsInput) {
-    const snapshot = await status(input);
+    let snapshot = await status(input);
+    let target: { turnId: number; runId: string | null; baseCursor: number } | null = null;
+    if (input.turnId !== undefined) {
+      if (!hasCompleteOwnerScope(input)) {
+        throw conflict("Targeted Vector events require owner scope", { code: "vector_turn_owner_scope_required" });
+      }
+      const ownedInput = input as VectorIngressEventsInput & VectorIngressOwnerScope;
+      const { issue, mapping } = await requireOwnedConversation(ownedInput);
+      target = await db.select({ turnId: vectorIngressTurns.turnId, runId: vectorIngressTurns.runId, baseCursor: vectorIngressTurns.baseCursor })
+        .from(vectorIngressTurns)
+        .where(and(eq(vectorIngressTurns.conversationId, mapping.id), eq(vectorIngressTurns.turnId, ownedInput.turnId!)))
+        .limit(1).then((rows) => rows[0] ?? null);
+      if (!target) throw notFound("Vector turn not found");
+      const exactRun = target.runId
+        ? await db.select().from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.id, target.runId), eq(heartbeatRuns.companyId, input.companyId),
+            eq(heartbeatRuns.agentId, input.agentId),
+          )).limit(1).then((rows) => rows[0] ?? null)
+        : null;
+      if (target.runId && !exactRun) {
+        throw conflict("Vector turn run binding is invalid", { code: "vector_turn_run_scope_mismatch" });
+      }
+      snapshot = {
+        ...snapshot,
+        issueId: issue.id,
+        run: exactRun ? {
+          id: exactRun.id, status: exactRun.status, error: exactRun.error,
+          errorCode: exactRun.errorCode, usage: exactRun.usageJson,
+          eventCursor: Math.max(0, exactRun.nextEventSeq - 1), createdAt: exactRun.createdAt,
+          startedAt: exactRun.startedAt, finishedAt: exactRun.finishedAt,
+          turnId: target.turnId, baseCursor: target.baseCursor,
+        } : null,
+      };
+    }
     const afterSeq = input.afterSeq ?? 0;
+    const runAfterSeq = target ? Math.max(0, afterSeq - target.baseCursor + 1) : afterSeq;
     const runEvents = snapshot.run
       ? await db
           .select({
@@ -482,7 +966,7 @@ export function vectorIngressService(
               eq(heartbeatRunEvents.companyId, input.companyId),
               eq(heartbeatRunEvents.agentId, input.agentId),
               eq(heartbeatRunEvents.runId, snapshot.run.id),
-              gt(heartbeatRunEvents.seq, afterSeq),
+              gt(heartbeatRunEvents.seq, runAfterSeq),
               inArray(heartbeatRunEvents.eventType, [
                 ...VECTOR_PRESENTATION_EVENT_TYPES,
               ]),
@@ -494,7 +978,7 @@ export function vectorIngressService(
     return {
       ...snapshot,
       afterSeq,
-      nextSeq: runEvents.at(-1)?.seq ?? afterSeq,
+      nextSeq: runEvents.at(-1)?.seq ?? runAfterSeq,
       events: runEvents.map((event) => ({
         seq: event.seq,
         eventType: event.eventType,
@@ -505,6 +989,9 @@ export function vectorIngressService(
         payload: projectVectorEventPayload(event.eventType, event.payload),
         createdAt: event.createdAt,
       })),
+      turnId: target?.turnId ?? null,
+      baseCursor: target?.baseCursor ?? null,
+      pendingTurn: Boolean(target && !target.runId),
     };
   }
 
@@ -519,6 +1006,7 @@ export function vectorIngressService(
     const rows = await db
       .select({
         externalSessionId: vectorIngressConversations.externalSessionId,
+        ownerSha256: vectorIngressConversations.ownerSha256,
         mappingCreatedAt: vectorIngressConversations.createdAt,
         issueId: issues.id,
         issueIdentifier: issues.identifier,
@@ -578,6 +1066,7 @@ export function vectorIngressService(
         );
         return {
           externalSessionId: row.externalSessionId,
+          ownerBinding: ownerBindingOf(row),
           createdAt: row.issueCreatedAt,
           updatedAt: row.issueUpdatedAt,
           sessionGeneration: row.sessionGeneration,
@@ -668,6 +1157,41 @@ export function vectorIngressService(
               gt(heartbeatRuns.id, after!.id),
             ),
           );
+    const activeBranchId = await db.select({ id: vectorIngressBranchHeads.activeBranchId })
+      .from(vectorIngressBranchHeads)
+      .where(and(
+        eq(vectorIngressBranchHeads.companyId, input.companyId),
+        eq(vectorIngressBranchHeads.conversationId, mapping.id),
+        eq(vectorIngressBranchHeads.sessionGeneration, issue.conversationSessionGeneration),
+      )).limit(1).then((rows) => rows[0]?.id ?? null);
+    const activeCommentIds = activeBranchId
+      ? await db.select({ id: vectorIngressBranchTurns.commentId })
+          .from(vectorIngressBranchTurns)
+          .where(and(
+            eq(vectorIngressBranchTurns.companyId, input.companyId),
+            eq(vectorIngressBranchTurns.conversationId, mapping.id),
+            eq(vectorIngressBranchTurns.sessionGeneration, issue.conversationSessionGeneration),
+            eq(vectorIngressBranchTurns.branchId, activeBranchId),
+          )).then((rows) => rows.map((row) => row.id))
+      : null;
+    const projectedTurns = activeCommentIds
+      ? await db.select({
+          commentId: vectorIngressTurns.commentId,
+          runId: vectorIngressTurns.runId,
+        }).from(vectorIngressTurns)
+          .innerJoin(issueComments, eq(issueComments.id, vectorIngressTurns.commentId))
+          .where(and(
+            eq(vectorIngressTurns.conversationId, mapping.id),
+            or(
+              sql`${issueComments.conversationSessionGeneration} IS DISTINCT FROM ${issue.conversationSessionGeneration}`,
+              activeCommentIds.length > 0
+                ? inArray(vectorIngressTurns.commentId, activeCommentIds)
+                : sql`false`,
+            ),
+          ))
+      : null;
+    const projectedCommentIds = projectedTurns?.map((turn) => turn.commentId) ?? null;
+    const projectedRunIds = projectedTurns?.flatMap((turn) => turn.runId ? [turn.runId] : []) ?? null;
     const runScope = and(
       eq(heartbeatRuns.companyId, input.companyId),
       eq(heartbeatRuns.agentId, input.agentId),
@@ -675,6 +1199,11 @@ export function vectorIngressService(
         eq(heartbeatRuns.nativeIssueId, issue.id),
         sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
       ),
+      projectedRunIds
+        ? projectedRunIds.length > 0
+          ? inArray(heartbeatRuns.id, projectedRunIds)
+          : sql`false`
+        : undefined,
     );
     const [comments, runEvents, terminalRuns] = await Promise.all([
       db
@@ -692,6 +1221,11 @@ export function vectorIngressService(
           and(
             eq(vectorIngressTurns.conversationId, mapping.id),
             eq(issueComments.issueId, issue.id),
+            projectedCommentIds
+              ? projectedCommentIds.length > 0
+                ? inArray(vectorIngressTurns.commentId, projectedCommentIds)
+                : sql`false`
+              : undefined,
             isNull(issueComments.deletedAt),
             commentAfter,
           ),
@@ -744,6 +1278,34 @@ export function vectorIngressService(
         .orderBy(asc(heartbeatRuns.finishedAt), asc(heartbeatRuns.id))
         .limit(limit + 1),
     ]);
+    const commentImageRows = comments.length === 0
+      ? []
+      : await db
+          .select({
+            commentId: issueAttachments.issueCommentId,
+            attachmentId: issueAttachments.id,
+            contentType: assets.contentType,
+            byteSize: assets.byteSize,
+            sha256: assets.sha256,
+            originalFilename: assets.originalFilename,
+            objectKey: assets.objectKey,
+          })
+          .from(issueAttachments)
+          .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
+          .where(and(
+            eq(issueAttachments.companyId, input.companyId),
+            eq(issueAttachments.issueId, issue.id),
+            eq(assets.companyId, input.companyId),
+            inArray(issueAttachments.issueCommentId, comments.map((comment) => comment.id)),
+          ))
+          .orderBy(asc(assets.originalFilename), asc(issueAttachments.id));
+    const imagesByComment = new Map<string, Array<Record<string, unknown>>>();
+    for (const row of commentImageRows) {
+      if (!row.commentId || !isVectorIngressImageAsset({ ...row, companyId: input.companyId, issueId: issue.id })) continue;
+      const current = imagesByComment.get(row.commentId) ?? [];
+      current.push({ attachmentId: row.attachmentId, mimeType: row.contentType, byteSize: row.byteSize, sha256: row.sha256 });
+      imagesByComment.set(row.commentId, current);
+    }
     const candidates: TranscriptCandidate[] = [
       ...comments.map((comment) => ({
         at: comment.createdAt,
@@ -751,7 +1313,12 @@ export function vectorIngressService(
         id: comment.id,
         eventType: "user_turn",
         message: null,
-        payload: { text: comment.body },
+        payload: {
+          text: comment.body,
+          ...(imagesByComment.get(comment.id)?.length
+            ? { images: imagesByComment.get(comment.id) }
+            : {}),
+        },
       })),
       ...runEvents.map((event) => ({
         at: event.createdAt,
@@ -780,6 +1347,7 @@ export function vectorIngressService(
       companyId: input.companyId,
       agentId: input.agentId,
       externalSessionId: input.externalSessionId,
+      ownerBinding: ownerBindingOf(mapping),
       events: page.map((event) => ({
         eventType: event.eventType,
         message: event.message,
@@ -798,16 +1366,73 @@ export function vectorIngressService(
   }
 
   async function addTurn(input: VectorIngressTurnInput) {
+    if (input.authorityHandle && !options.toolAuthority) {
+      throw conflict("Vector tool authority is disabled", {
+        code: "vector_tool_authority_disabled",
+      });
+    }
+    if (input.providerAuthorityHandle && !options.providerAuthority) {
+      throw conflict("Vector provider authority is disabled", {
+        code: "vector_provider_authority_disabled",
+      });
+    }
+    await assertWorkloadLaunch(input);
+    await assertRoleTurn(input);
+    await assertRepositoryContext(input);
     const { issue, ownerId } = await resolveConversation(input);
     const mapping = hasCompleteOwnerScope(input)
       ? await bindConversationOwner(input, issue.id)
       : null;
+    const personaContext = await resolvePersonaTurn(input, issue);
+    const runtimeSelection = input.runtimeSelection ?? (mapping?.model && mapping.thinking
+      ? { model: mapping.model, thinking: mapping.thinking as VectorRuntimeSelection["thinking"] }
+      : input.profileId === "standard" && personaContext
+        ? { model: personaContext.model.replace(/^router\//, ""), thinking: "medium" as const }
+        : null);
+    if (runtimeSelection && input.profileId !== "standard" && input.profileId !== "engineering") {
+      throw conflict("Vector runtime selection requires an admitted owner scope", {
+        code: "vector_runtime_selection_scope_mismatch",
+      });
+    }
+    if (input.profileId === "standard" || runtimeSelection) {
+      if (input.profileId === "standard" && !runtimeSelection) {
+        throw conflict("Vector standard-chat requires a runtime selection", {
+          code: "vector_runtime_selection_required",
+        });
+      }
+      if (runtimeSelection) await assertRuntimeSelection(input, runtimeSelection);
+      if (input.profileId === "standard" && runtimeSelection &&
+        input.personaContext &&
+        input.personaContext.model !== `router/${runtimeSelection.model}`
+      ) {
+        throw conflict("Vector persona model differs from the runtime selection", {
+          code: "vector_runtime_selection_contract_mismatch",
+        });
+      }
+      if (runtimeSelection && mapping && (!mapping.model || !mapping.thinking)) {
+        await db.update(vectorIngressConversations).set(runtimeSelection).where(eq(vectorIngressConversations.id, mapping.id));
+      }
+    }
+    const baseCursor = input.baseCursor ?? 0;
+    if (!Number.isSafeInteger(baseCursor) || baseCursor < 0) {
+      throw conflict("Vector turn cursor base is invalid", { code: "vector_turn_cursor_invalid" });
+    }
     const requestedAttachmentIds = [...new Set(input.attachmentIds ?? [])];
+    const validatedImages = validateVectorIngressImages(input.images);
+    if (validatedImages.length > 0 && !options.storage) {
+      throw conflict("Vector image storage is disabled", { code: "vector_ingress_image_storage_disabled" });
+    }
+    const effectiveBody = input.launchContext
+      ? `[VECTOR_WORKLOAD_LAUNCH_V1]\n${JSON.stringify(input.launchContext)}\n\n${input.body}`
+      : input.roleContext
+        ? `[VECTOR_ROLE_TURN_V1]\n${JSON.stringify(input.roleContext)}\n\n${input.body}`
+      : input.body;
     let replayed = false;
 
+    let vectorImageAttachmentIds: string[] = [];
     const comment = await db.transaction(async (tx) => {
       const [locked] = await tx
-        .select({ id: issues.id })
+        .select({ id: issues.id, generation: issues.conversationSessionGeneration })
         .from(issues)
         .where(
           and(
@@ -819,6 +1444,62 @@ export function vectorIngressService(
         )
         .for("update");
       if (!locked) throw notFound("Vector conversation not found");
+
+      const branchHead = mapping
+        ? await tx.select().from(vectorIngressBranchHeads).where(and(
+            eq(vectorIngressBranchHeads.companyId, input.companyId),
+            eq(vectorIngressBranchHeads.conversationId, mapping.id),
+            eq(vectorIngressBranchHeads.sessionGeneration, locked.generation),
+          )).for("update").then((rows) => rows[0] ?? null)
+        : null;
+      if (branchHead?.controlOperationId) {
+        if (branchHead.controlExpiresAt && branchHead.controlExpiresAt > new Date()) {
+          throw conflict("Vector branch control is busy", { code: "vector_branch_control_busy" });
+        }
+        await tx.update(vectorIngressBranchHeads).set({
+          controlOperationId: null,
+          controlKind: null,
+          controlExpiresAt: null,
+          updatedAt: new Date(),
+        }).where(and(
+          eq(vectorIngressBranchHeads.companyId, input.companyId),
+          eq(vectorIngressBranchHeads.conversationId, mapping!.id),
+          eq(vectorIngressBranchHeads.sessionGeneration, locked.generation),
+          eq(vectorIngressBranchHeads.controlOperationId, branchHead.controlOperationId),
+        ));
+      }
+      const bindActiveBranchTurn = async (commentId: string, isReplay: boolean) => {
+        if (!mapping || !branchHead?.activeBranchId) return;
+        const existingMembership = await tx.select({ commentId: vectorIngressBranchTurns.commentId })
+          .from(vectorIngressBranchTurns)
+          .where(and(
+            eq(vectorIngressBranchTurns.branchId, branchHead.activeBranchId),
+            eq(vectorIngressBranchTurns.commentId, commentId),
+          )).limit(1).then((rows) => rows[0] ?? null);
+        if (existingMembership) return;
+        if (isReplay) {
+          throw conflict("Vector turn retry belongs to a different retained branch", {
+            code: "vector_branch_replay_mismatch",
+          });
+        }
+        const last = await tx.select({ ordinal: vectorIngressBranchTurns.ordinal })
+          .from(vectorIngressBranchTurns)
+          .where(and(
+            eq(vectorIngressBranchTurns.companyId, input.companyId),
+            eq(vectorIngressBranchTurns.conversationId, mapping.id),
+            eq(vectorIngressBranchTurns.sessionGeneration, locked.generation),
+            eq(vectorIngressBranchTurns.branchId, branchHead.activeBranchId),
+          )).orderBy(desc(vectorIngressBranchTurns.ordinal)).limit(1)
+          .then((rows) => rows[0]?.ordinal ?? -1);
+        await tx.insert(vectorIngressBranchTurns).values({
+          companyId: input.companyId,
+          conversationId: mapping.id,
+          sessionGeneration: locked.generation,
+          branchId: branchHead.activeBranchId,
+          commentId,
+          ordinal: last + 1,
+        });
+      };
 
       const existing = await tx
         .select()
@@ -832,9 +1513,17 @@ export function vectorIngressService(
         )
         .then((rows) => rows[0] ?? null);
       if (existing) {
-        const existingAttachmentIds = await tx
-          .select({ id: issueAttachments.id })
+        const existingAttachments = await tx
+          .select({
+            id: issueAttachments.id,
+            contentType: assets.contentType,
+            byteSize: assets.byteSize,
+            sha256: assets.sha256,
+            originalFilename: assets.originalFilename,
+            objectKey: assets.objectKey,
+          })
           .from(issueAttachments)
+          .innerJoin(assets, eq(assets.id, issueAttachments.assetId))
           .where(
             and(
               eq(issueAttachments.companyId, input.companyId),
@@ -842,16 +1531,27 @@ export function vectorIngressService(
               eq(issueAttachments.issueCommentId, existing.id),
             ),
           )
-          .then((rows) => rows.map((row) => row.id));
+          .orderBy(asc(assets.originalFilename), asc(issueAttachments.id));
+        const existingVectorImages = existingAttachments.filter((row) =>
+          isVectorIngressImageAsset({ ...row, companyId: input.companyId, issueId: issue.id }));
+        const existingAttachmentIds = existingAttachments
+          .filter((row) => !isVectorIngressImageAsset({ ...row, companyId: input.companyId, issueId: issue.id }))
+          .map((row) => row.id);
         if (
-          existing.body !== input.body ||
-          !sameStrings(existingAttachmentIds, requestedAttachmentIds)
+          existing.body !== effectiveBody ||
+          !sameStrings(existingAttachmentIds, requestedAttachmentIds) ||
+          existingVectorImages.length !== validatedImages.length ||
+          existingVectorImages.some((row, index) => {
+            const expected = validatedImages[index];
+            return !expected || row.contentType !== expected.mimeType || row.byteSize !== expected.byteSize || row.sha256 !== expected.sha256 || row.originalFilename !== expected.filename;
+          })
         ) {
           throw conflict(
             "Vector clientRequestId was already used for a different turn",
             { code: "vector_ingress_idempotency_conflict" },
           );
         }
+        vectorImageAttachmentIds = existingVectorImages.map((row) => row.id);
         replayed = true;
         if (mapping) {
           await tx
@@ -859,16 +1559,26 @@ export function vectorIngressService(
             .values({
               conversationId: mapping.id,
               commentId: existing.id,
+              baseCursor,
+              model: runtimeSelection?.model ?? null,
+              thinking: runtimeSelection?.thinking ?? null,
               createdAt: existing.createdAt,
             })
             .onConflictDoNothing();
+          const accepted = await tx.select({ turnId: vectorIngressTurns.turnId })
+            .from(vectorIngressTurns).where(and(eq(vectorIngressTurns.conversationId, mapping.id), eq(vectorIngressTurns.commentId, existing.id)))
+            .then((rows) => rows[0] ?? null);
+          if (!accepted) {
+            throw conflict("Vector clientRequestId is missing its durable turn binding", { code: "vector_ingress_idempotency_conflict" });
+          }
+          await bindActiveBranchTurn(existing.id, true);
         }
         return existing;
       }
 
       const inserted = await issuesSvc.addComment(
         issue.id,
-        input.body,
+        effectiveBody,
         { userId: responsibleUserId },
         {
           clientRequestId: input.clientRequestId,
@@ -877,12 +1587,42 @@ export function vectorIngressService(
         },
         tx,
       );
+      for (const image of validatedImages) {
+        const stored = await options.storage!.putFile({
+          companyId: input.companyId,
+          namespace: `vector-ingress/${issue.id}`,
+          originalFilename: image.filename,
+          contentType: image.mimeType,
+          body: image.bytes,
+        });
+        const [asset] = await tx.insert(assets).values({
+          companyId: input.companyId,
+          provider: stored.provider,
+          objectKey: stored.objectKey,
+          contentType: stored.contentType,
+          byteSize: stored.byteSize,
+          sha256: stored.sha256,
+          originalFilename: stored.originalFilename,
+          createdByUserId: responsibleUserId,
+        }).returning({ id: assets.id });
+        const [attachment] = await tx.insert(issueAttachments).values({
+          companyId: input.companyId,
+          issueId: issue.id,
+          issueCommentId: inserted.id,
+          assetId: asset!.id,
+        }).returning({ id: issueAttachments.id });
+        vectorImageAttachmentIds.push(attachment!.id);
+      }
       if (mapping) {
         await tx.insert(vectorIngressTurns).values({
           conversationId: mapping.id,
           commentId: inserted.id,
+          baseCursor,
+          model: runtimeSelection?.model ?? null,
+          thinking: runtimeSelection?.thinking ?? null,
           createdAt: inserted.createdAt,
         });
+        await bindActiveBranchTurn(inserted.id, false);
       }
       return inserted;
     });
@@ -904,9 +1644,57 @@ export function vectorIngressService(
       });
     }
 
+    const pendingAuthority = input.authorityHandle
+      ? options.toolAuthority!.registerPending({
+          companyId: input.companyId,
+          agentId: input.agentId,
+          externalSessionId: input.externalSessionId,
+          issueId: issue.id,
+          commentId: comment.id,
+          authorityHandle: input.authorityHandle,
+          allowedTools: input.authorityTools!,
+        })
+      : null;
+    const pendingProviderAuthority = input.providerAuthorityHandle
+      ? options.providerAuthority!.registerPending({
+          companyId: input.companyId,
+          agentId: input.agentId,
+          externalSessionId: input.externalSessionId,
+          issueId: issue.id,
+          commentId: comment.id,
+          authorityHandle: input.providerAuthorityHandle,
+        })
+      : null;
     let deliveredRunId: string | null = null;
     await deliverConversationComments(db, issue, async (agentId, wakeup) => {
-      const run = await heartbeat.wakeup(agentId, wakeup);
+      const targetWake = wakeup.idempotencyKey === `conversation-comment:${comment.id}`
+        ? {
+            ...wakeup,
+            contextSnapshot: {
+              ...wakeup.contextSnapshot,
+              // Per-turn presentation hint, never stored in user comments or
+              // inherited by subsequent turns. It grants no tool authority.
+              vectorVoiceActive: input.voiceActive === true,
+              ...(runtimeSelection ? { vectorRuntimeSelection: runtimeSelection } : {}),
+              ...(mapping
+                ? {
+                    vectorLegacyPiContextBinding: {
+                      ownerSha256: mapping.ownerSha256,
+                      externalSessionId: mapping.externalSessionId,
+                    },
+                  }
+                : {}),
+              ...(vectorImageAttachmentIds.length > 0
+                ? { vectorIngressImageAttachmentIds: vectorImageAttachmentIds }
+                : {}),
+              ...(pendingAuthority ? { vectorToolAuthorityPending: pendingAuthority } : {}),
+              ...(pendingProviderAuthority
+                ? { vectorProviderAuthorityPending: pendingProviderAuthority }
+                : {}),
+            },
+          }
+        : wakeup;
+      const run = await heartbeat.wakeup(agentId, targetWake);
       if (
         wakeup.idempotencyKey === `conversation-comment:${comment.id}` &&
         run &&
@@ -917,7 +1705,13 @@ export function vectorIngressService(
         deliveredRunId = run.id;
       }
       return run;
-    });
+    }, input.launchContext
+      ? { vectorWorkloadLaunch: input.launchContext }
+      : input.roleContext
+        ? { vectorRoleTurn: input.roleContext }
+        : personaContext
+          ? { vectorPersonaTurn: personaContext }
+          : {});
 
     const receipt = await db
       .select({
@@ -947,22 +1741,74 @@ export function vectorIngressService(
       )
       .then((rows) => rows[0] ?? null);
 
+    const runId = deliveredRunId ?? receipt?.runId ?? null;
+    const acceptedTurn = mapping
+      ? await db.select({ turnId: vectorIngressTurns.turnId, runId: vectorIngressTurns.runId, baseCursor: vectorIngressTurns.baseCursor })
+          .from(vectorIngressTurns).where(and(eq(vectorIngressTurns.conversationId, mapping.id), eq(vectorIngressTurns.commentId, comment.id)))
+          .limit(1).then((rows) => rows[0] ?? null)
+      : null;
+    if (acceptedTurn && runId) {
+      const [bound] = await db.update(vectorIngressTurns).set({ runId }).where(and(
+        eq(vectorIngressTurns.turnId, acceptedTurn.turnId),
+        or(isNull(vectorIngressTurns.runId), eq(vectorIngressTurns.runId, runId)),
+      )).returning({ runId: vectorIngressTurns.runId });
+      if (!bound || bound.runId !== runId) {
+        throw conflict("Vector turn was already bound to another run", { code: "vector_turn_run_conflict" });
+      }
+    }
+    if (input.authorityHandle) {
+      if (!runId) {
+        throw conflict("Vector tool authority requires a created run", {
+          code: "vector_tool_authority_run_missing",
+        });
+      }
+      await options.toolAuthority!.bindRun({
+        companyId: input.companyId,
+        agentId: input.agentId,
+        externalSessionId: input.externalSessionId,
+        issueId: issue.id,
+        runId,
+        authorityHandle: input.authorityHandle,
+      });
+    }
+    if (input.providerAuthorityHandle) {
+      if (!runId) {
+        throw conflict("Vector provider authority requires a created run", {
+          code: "vector_provider_authority_run_missing",
+        });
+      }
+      await options.providerAuthority!.bindRun({
+        companyId: input.companyId,
+        agentId: input.agentId,
+        externalSessionId: input.externalSessionId,
+        issueId: issue.id,
+        runId,
+        authorityHandle: input.providerAuthorityHandle,
+      });
+    }
+
     return {
       companyId: input.companyId,
       agentId: input.agentId,
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       commentId: comment.id,
-      runId: deliveredRunId ?? receipt?.runId ?? null,
+      runId,
       wakeupRequestId: receipt?.id ?? null,
       wakeupStatus: receipt?.status ?? null,
       sessionGeneration: current?.generation ?? issue.conversationSessionGeneration,
       replayed,
+      turnId: acceptedTurn?.turnId ?? 0,
+      baseCursor: acceptedTurn?.baseCursor ?? baseCursor,
+      ownerBinding: ownerBindingOf(mapping),
     } satisfies VectorIngressTurnResult;
   }
 
   async function cancel(input: VectorIngressCancelInput) {
-    const { issue } = await requireConversation(input);
+    const { issue, mapping } = hasCompleteOwnerScope(input)
+      ? await requireOwnedConversation(input)
+      : { ...(await requireConversation(input)), mapping: null };
+    const ownerBinding = ownerBindingOf(mapping);
     const activeRuns = await db
       .select()
       .from(heartbeatRuns)
@@ -996,6 +1842,7 @@ export function vectorIngressService(
         runId: null,
         cancelled: false,
         status: null,
+        ownerBinding,
       };
     }
 
@@ -1035,6 +1882,7 @@ export function vectorIngressService(
       runId: selected.id,
       cancelled: cancelled?.status === "cancelled",
       status: cancelled?.status ?? selected.status,
+      ownerBinding,
     };
   }
 
@@ -1047,6 +1895,11 @@ export function vectorIngressService(
     events,
     inventory,
     transcript,
+    importLegacyPiContext,
+    configureRuntime,
+    listBranches: sessionBranches.list,
+    forkBranch: sessionBranches.fork,
+    switchBranch: sessionBranches.switchBranch,
   };
 }
 

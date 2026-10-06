@@ -17,6 +17,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { paperclipApiPath, paperclipPath } from "@/lib/base-path";
 import {
   Tooltip,
   TooltipContent,
@@ -560,7 +561,7 @@ export function BoardChat() {
       try {
         const controller = new AbortController();
         const fetchTimeout = setTimeout(() => controller.abort(), 130000);
-        const res = await fetch("/api/board/chat/stream", {
+        const res = await fetch(paperclipApiPath("/board/chat/stream"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -905,7 +906,7 @@ export function BoardChat() {
               {/* Status bar — always visible while sending, independent from the chat bubble */}
               {sending && (
                 <div className="flex items-center gap-2 pl-1 text-xs text-muted-foreground">
-                  <img src="/paperclip-thinking.svg" alt="" className="inline-block shrink-0" style={{ width: 14, height: 14 }} />
+                  <img src={paperclipPath("/paperclip-thinking.svg")} alt="" className="inline-block shrink-0" style={{ width: 14, height: 14 }} />
                   <span>{statusText || "Thinking..."}</span>
                   {elapsedSec > 0 && (
                     <span className="opacity-50">{elapsedSec.toFixed(1)}s</span>

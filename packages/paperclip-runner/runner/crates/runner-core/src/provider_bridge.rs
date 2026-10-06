@@ -757,30 +757,7 @@ impl ProviderToolBridge {
                 "tool result operation does not match its call",
             ));
         }
-        let authorized = self.authorized.get(&result.operation_id).ok_or_else(|| {
-            ProviderBridgeError::invalid("tool result operation is no longer authorized")
-        })?;
-        let validator = jsonschema::validator_for(&authorized.response_schema).map_err(|_| {
-            ProviderBridgeError::invalid(format!(
-                "tool {} has an invalid durable response JSON Schema",
-                result.operation_id
-            ))
-        })?;
-        let response = semantic_response_value(&result)?;
-        if !result.is_error {
-            // Paperclip semantic dispatchers return an authoritative envelope;
-            // provider contracts describe the operation-specific value inside
-            // `result`. Direct values remain valid for compatibility with v1
-            // peers that do not wrap their semantic result.
-            if let Some(response) = response {
-                if !validator.is_valid(response) {
-                    return Err(ProviderBridgeError::invalid(format!(
-                        "tool result for {} failed JSON Schema validation",
-                        result.operation_id
-                    )));
-                }
-            }
-        }
+        validate_tool_result_contract(&self.authorized, &result)?;
         let result_bytes = json_size(&result.result, "provider tool result")?;
         let retained_bytes = self.retained_value_bytes()?;
         if retained_bytes

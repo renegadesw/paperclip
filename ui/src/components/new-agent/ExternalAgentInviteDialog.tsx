@@ -4,6 +4,7 @@ import { accessApi } from "@/api/access";
 import { queryKeys } from "@/lib/queryKeys";
 import { buildAgentOnboardingPrompt } from "@/lib/agent-onboarding-prompt";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import { paperclipApiPath } from "@/lib/base-path";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
@@ -40,7 +41,7 @@ export function ExternalAgentInviteDialog({ companyId, onClose, onBack }: {
         agentMessage: message.trim() || null,
       });
       void cache.invalidateQueries({ queryKey: queryKeys.access.invites(companyId, "all", 5) });
-      const path = invite.onboardingTextUrl ?? invite.onboardingTextPath ?? `/api/invites/${invite.token}/onboarding.txt`;
+      const path = invite.onboardingTextUrl ?? invite.onboardingTextPath ?? paperclipApiPath(`/invites/${invite.token}/onboarding.txt`);
       const onboardingTextUrl = new URL(path, window.location.origin).href;
       const manifest = await accessApi.getInviteOnboarding(invite.token).catch(() => null);
       return buildAgentOnboardingPrompt({

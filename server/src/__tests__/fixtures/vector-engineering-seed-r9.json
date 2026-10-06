@@ -1,0 +1,463 @@
+{
+  "schemaVersion": 1,
+  "manifestRevision": 9,
+  "installationId": "t480-engineering",
+  "profile": "engineering",
+  "company": {
+    "id": "12d42db4-38df-5ae1-9b10-204b6f2e5d0c",
+    "name": "Vector Engineering",
+    "description": "Vector engineering control plane for the t480 FunkyDev installation.",
+    "budgetMonthlyCents": 0,
+    "mutableFields": []
+  },
+  "agent": {
+    "id": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+    "name": "FunkyDev",
+    "role": "engineer",
+    "title": "Standing Vector engineer",
+    "reportsTo": null,
+    "capabilities": "Repository engineering and operator collaboration through the sealed engineering Pi surface.",
+    "adapterType": "pi_local",
+    "adapterConfig": {
+      "model": "router/Qwen3.8-Flash",
+      "thinking": "high",
+      "executionMode": "rpc",
+      "cwd": "/home/funkydev"
+    },
+    "instructions": {
+      "path": "paperclip/profile-assets/engineering/funkydev/AGENTS.md",
+      "sha256": "1e1ad327615732515987ff6be594a54e5c475be02bc8119180206ce6b3868661"
+    },
+    "runtimeConfig": {
+      "heartbeat": {
+        "enabled": false,
+        "wakeOnDemand": true,
+        "maxConcurrentRuns": 1
+      }
+    },
+    "budgetMonthlyCents": 0,
+    "permissions": {
+      "canCreateAgents": false,
+      "canCreateSkills": false
+    },
+    "mutableFields": [],
+    "operatorOwnedAdapterConfigKeys": [
+      "model",
+      "thinking"
+    ]
+  },
+  "additionalAgents": [
+    {
+      "id": "8fd6440a-405b-50cb-9033-71d5309b8a23",
+      "name": "Frontend Manager",
+      "role": "frontend-manager",
+      "title": "Frontend Department Manager",
+      "reportsTo": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+      "capabilities": "Plans and tracks Frontend work for Funky Dev: web UI, Vector frontend and NexusLink client surfaces.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/frontend-manager/AGENTS.md",
+        "sha256": "9df94f4f21784efeb57e53b1833288098588f16a52e59aa0fc19cfeee048b38b"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "ba5d31db-baaa-5098-9bb1-d424ec21b449",
+      "name": "Backend Manager",
+      "role": "backend-manager",
+      "title": "Backend Department Manager",
+      "reportsTo": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+      "capabilities": "Plans and tracks Backend work for Funky Dev: Go services, runtimes and APIs.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/backend-manager/AGENTS.md",
+        "sha256": "e98dc60d2d19445be4463bc8a654a95357c1354c3e953d1f9127a833ef09a081"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "1b1c9037-829e-59ef-aeec-244d4a718f8f",
+      "name": "Database Manager",
+      "role": "database-manager",
+      "title": "Database Department Manager",
+      "reportsTo": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+      "capabilities": "Plans and tracks Database work for Funky Dev: the Vector DDL, SQL function and contract-suite surface.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/database-manager/AGENTS.md",
+        "sha256": "4031fcae67cdc2264459a0c93b5e898201664e23312b64e1c913b3280a85f410"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "1d174b72-cba3-5072-b30d-1887e85dd358",
+      "name": "Infrastructure Manager",
+      "role": "infrastructure-manager",
+      "title": "Infrastructure Department Manager",
+      "reportsTo": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+      "capabilities": "Plans and tracks Infrastructure work for Funky Dev: CI/CD, runners, native installation and hosts.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/infrastructure-manager/AGENTS.md",
+        "sha256": "19d158334f71dcbb8c77ab8c3124ca32480920d0d1547ee5477112df639a9503"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "2105fbf6-1505-5f64-8428-f0f8ae45752b",
+      "name": "Frontend Engineer",
+      "role": "frontend-engineer",
+      "title": "Frontend Engineer",
+      "reportsTo": "8fd6440a-405b-50cb-9033-71d5309b8a23",
+      "capabilities": "Implements Frontend issues as draft pull requests with test evidence.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/frontend-engineer/AGENTS.md",
+        "sha256": "c2ec0b23801c34ae4053e2e5681ee6faeccf582e47bcfe20a8d5e6d5aadccb44"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "7c178efa-1911-5810-8e8a-3f2239933646",
+      "name": "Backend Engineer",
+      "role": "backend-engineer",
+      "title": "Backend Engineer",
+      "reportsTo": "ba5d31db-baaa-5098-9bb1-d424ec21b449",
+      "capabilities": "Implements Backend issues as draft pull requests with test evidence.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/backend-engineer/AGENTS.md",
+        "sha256": "477e036317b6b08a0dd265ee3e88108e6c55ea06b1592f12035b5c0ee4872ab4"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "efd7ea78-54d5-5c0a-92fd-81d3fd3a763e",
+      "name": "Database Engineer",
+      "role": "database-engineer",
+      "title": "Database Engineer",
+      "reportsTo": "1b1c9037-829e-59ef-aeec-244d4a718f8f",
+      "capabilities": "Implements Database issues as draft pull requests with contract-test evidence.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/database-engineer/AGENTS.md",
+        "sha256": "c3e90a935d5ddeac128f0949a7368ab0fe286a3817787b7a050419dc243f90db"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "a82a3e84-317f-5556-aa4e-ffbb7232cf1b",
+      "name": "Infrastructure Engineer",
+      "role": "infrastructure-engineer",
+      "title": "Infrastructure Engineer",
+      "reportsTo": "1d174b72-cba3-5072-b30d-1887e85dd358",
+      "capabilities": "Implements Infrastructure issues as draft pull requests with pipeline evidence.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/infrastructure-engineer/AGENTS.md",
+        "sha256": "0a42a958236f0eec6a68d958e87d8da7e830d9b7a1ee25df4534c5179a4cc66f"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "5a7d09a8-6774-55a9-a726-bf8e1871cf2e",
+      "name": "Product QA",
+      "role": "product-qa",
+      "title": "Product QA Engineer",
+      "reportsTo": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+      "capabilities": "Independently verifies user-facing routes and workflows against the exact change.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/product-qa/AGENTS.md",
+        "sha256": "84136c84a4d6e243fc41dc2237017886ebf4c2afc24158faae8b80d8dc9b4ea6"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    },
+    {
+      "id": "d9bd813a-f8c3-5143-bbfc-4c1ba07045b2",
+      "name": "Platform QA",
+      "role": "platform-qa",
+      "title": "Platform QA Engineer",
+      "reportsTo": "e5b45684-168d-51af-9bb4-e9a5d96f6329",
+      "capabilities": "Independently verifies APIs, database contracts, CI heads and release evidence.",
+      "adapterType": "pi_local",
+      "adapterConfig": {
+        "model": "router/Qwen3.8-Flash",
+        "thinking": "low",
+        "executionMode": "rpc",
+        "cwd": "/home/funkydev"
+      },
+      "instructions": {
+        "path": "paperclip/profile-assets/engineering/platform-qa/AGENTS.md",
+        "sha256": "1343729e1b6615b9c08ea5de6c99207fd11b5a6167e948d08b3c8097acab1902"
+      },
+      "runtimeConfig": {
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxConcurrentRuns": 1
+        }
+      },
+      "budgetMonthlyCents": 0,
+      "permissions": {
+        "canCreateAgents": false,
+        "canCreateSkills": false
+      },
+      "mutableFields": [],
+      "operatorOwnedAdapterConfigKeys": [
+        "model",
+        "thinking"
+      ]
+    }
+  ],
+  "toolPolicy": {
+    "profile": "engineering",
+    "builtinTools": [
+      "bash",
+      "edit",
+      "find",
+      "grep",
+      "ls",
+      "read",
+      "write"
+    ],
+    "extensions": [
+      {
+        "name": "funkydev.vault-reference",
+        "tools": [
+          "vault_read",
+          "vault_search"
+        ],
+        "permissions": {
+          "filesystem": true,
+          "shell": false
+        }
+      },
+      {
+        "name": "vector.tool-bridge",
+        "tools": [
+          "ask_user",
+          "memory_forget",
+          "memory_save",
+          "memory_search",
+          "todo_add",
+          "todo_list",
+          "todo_mark_done",
+          "todo_update"
+        ],
+        "permissions": {
+          "filesystem": false,
+          "shell": false
+        }
+      },
+      {
+        "name": "vector.speak",
+        "tools": [
+          "speak"
+        ],
+        "permissions": {
+          "filesystem": false,
+          "shell": false
+        }
+      }
+    ]
+  }
+}

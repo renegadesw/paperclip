@@ -1,5 +1,6 @@
 import type { DocumentRevision, IssueDocument, IssueLabel } from "@paperclipai/shared";
 import { api } from "./client";
+import { paperclipApiPath } from "@/lib/base-path";
 
 // -----------------------------------------------------------------------------
 // Cases API (experimental — PAP-12947). Mirrors server/src/routes/cases.ts.
@@ -109,7 +110,7 @@ export interface CaseParentRef {
 
 /** Content URL for an attachment's asset (served by the assets route). */
 export function caseAttachmentUrl(attachment: CaseAttachmentRef): string {
-  return `/api/assets/${attachment.asset.id}/content`;
+  return paperclipApiPath(`/assets/${attachment.asset.id}/content`);
 }
 
 export function isImageAttachment(attachment: CaseAttachmentRef): boolean {

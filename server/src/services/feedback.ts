@@ -1978,7 +1978,7 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
               updatedAt: now,
             })
             .onConflictDoUpdate({
-              target: [instanceSettings.singletonKey],
+              target: [instanceSettings.vectorInstallationId, instanceSettings.singletonKey],
               set: {
                 updatedAt: now,
               },
